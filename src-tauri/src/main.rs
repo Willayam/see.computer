@@ -13,11 +13,44 @@ mod share;
 mod tray;
 mod trigger;
 
+fn acquire_single_instance() -> std::fs::File {
+    use std::os::fd::AsRawFd;
+
+    let data = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let app_dir = data.join("see.computer");
+    if let Err(error) = std::fs::create_dir_all(&app_dir) {
+        eprintln!("could not create app data directory: {error}");
+        std::process::exit(1);
+    }
+    let path = app_dir.join("instance.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap_or_else(|error| {
+            eprintln!("could not open instance lock: {error}");
+            std::process::exit(1);
+        });
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return file;
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        eprintln!("see.computer is already running");
+        std::process::exit(0);
+    }
+    eprintln!("could not lock instance file: {error}");
+    std::process::exit(1);
+}
+
 fn main() {
     if let Some(cmd) = cli::parse(std::env::args().skip(1)) {
         std::process::exit(cli::run(cmd));
     }
 
+    let _instance = acquire_single_instance();
     let mic = match std::env::var_os("SEE_COMPUTER_AUDIO_FILE") {
         Some(path) => mic::Source::Replay(path.into()),
         None => mic::Source::Default,

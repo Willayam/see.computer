@@ -3,6 +3,8 @@
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
+const DEDUP_WINDOW: Duration = Duration::from_millis(1_500);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Text(String);
 
@@ -110,6 +112,7 @@ fn paste_loop(rx: Receiver<Job>) {
         }
     };
     let mut pending: Option<PendingRestore> = None;
+    let mut last: Option<(String, Instant)> = None;
     loop {
         let incoming = match pending.as_ref() {
             Some(restore) => {
@@ -137,14 +140,9 @@ fn paste_loop(rx: Receiver<Job>) {
         let Some(job) = incoming else {
             continue;
         };
-        let carried_prior = pending.take().and_then(|restore| {
-            if pasteboard_change_count() == restore.change_count {
-                restore.prior
-            } else {
-                clipboard.get_text().ok()
-            }
-        });
         if !accessibility_trusted(false) {
+            pending = None;
+            last = None;
             let outcome = match clipboard.set_text(job.text.as_str()) {
                 Ok(()) => Err(Error::AccessibilityDenied),
                 Err(error) => Err(Error::Clipboard(error.to_string())),
@@ -152,6 +150,18 @@ fn paste_loop(rx: Receiver<Job>) {
             (job.done)(Outcome(outcome));
             continue;
         }
+        let now = Instant::now();
+        if is_duplicate(&last, job.text.as_str(), now) {
+            (job.done)(Outcome(Ok(())));
+            continue;
+        }
+        let carried_prior = pending.take().and_then(|restore| {
+            if pasteboard_change_count() == restore.change_count {
+                restore.prior
+            } else {
+                clipboard.get_text().ok()
+            }
+        });
         let prior = carried_prior.or_else(|| clipboard.get_text().ok());
         if let Err(error) = clipboard.set_text(job.text.as_str()) {
             (job.done)(Outcome(Err(Error::Clipboard(error.to_string()))));
@@ -160,6 +170,7 @@ fn paste_loop(rx: Receiver<Job>) {
         let change_count = pasteboard_change_count();
         match post_cmd_v() {
             Ok(()) => {
+                last = Some((job.text.as_str().to_owned(), Instant::now()));
                 (job.done)(Outcome(Ok(())));
                 if job.clipboard == Clipboard::RestorePrior {
                     pending = Some(PendingRestore {
@@ -172,6 +183,12 @@ fn paste_loop(rx: Receiver<Job>) {
             Err(error) => (job.done)(Outcome(Err(error))),
         }
     }
+}
+
+fn is_duplicate(last: &Option<(String, Instant)>, text: &str, now: Instant) -> bool {
+    last.as_ref().is_some_and(|(prior, at)| {
+        prior == text && now.saturating_duration_since(*at) < DEDUP_WINDOW
+    })
 }
 
 pub struct Outcome(pub Result<(), Error>);
@@ -255,7 +272,8 @@ fn post_cmd_v() -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::Text;
+    use super::{is_duplicate, Text, DEDUP_WINDOW};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn text_is_trimmed_and_non_empty() {
@@ -264,5 +282,22 @@ mod tests {
             Some("hello".to_owned())
         );
         assert!(Text::parse("  ").is_none());
+    }
+
+    #[test]
+    fn identical_recent_paste_is_duplicate() {
+        let start = Instant::now();
+        let last = Some(("hello".to_owned(), start));
+        assert!(is_duplicate(
+            &last,
+            "hello",
+            start + DEDUP_WINDOW - Duration::from_millis(1)
+        ));
+        assert!(!is_duplicate(&last, "hello", start + DEDUP_WINDOW));
+        assert!(!is_duplicate(
+            &last,
+            "different",
+            start + Duration::from_millis(1)
+        ));
     }
 }
