@@ -57,6 +57,7 @@ fn main() {
     };
     let (tx, rx) = std::sync::mpsc::channel::<session::Msg>();
     let (pill_tx, pill_rx) = std::sync::mpsc::channel::<pill::PillEvent>();
+    let tray_pill_tx = pill_tx.clone();
     let trigger = std::sync::Arc::new(std::sync::Mutex::new(config::Config::load().trigger));
     let controller = session::spawn(
         session::Wiring {
@@ -80,7 +81,7 @@ fn main() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             pill::attach(app.handle(), pill_rx);
             trigger::set_app_handle(app.handle().clone());
-            tray::install(app.handle(), setup_tx, setup_trigger.clone())?;
+            tray::install(app.handle(), setup_tx, setup_trigger.clone(), tray_pill_tx)?;
             let selected = *setup_trigger
                 .lock()
                 .expect("trigger mutex poisoned at startup");

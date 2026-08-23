@@ -39,6 +39,17 @@ impl Trigger {
         }
     }
 
+    pub fn gestures(&self) -> String {
+        match self {
+            Self::LeftOption => "Hold Left Option to talk · Left Option+Shift records".to_owned(),
+            Self::RightOption => {
+                "Hold Right Option to talk · Right Option+Shift records".to_owned()
+            }
+            Self::Fn => "Hold Fn to talk · Fn+Shift records".to_owned(),
+            Self::Chord => "Hold Option+Space to talk · Cmd+Shift+Option+Space records".to_owned(),
+        }
+    }
+
     pub fn uses_tap(&self) -> bool {
         !matches!(self, Self::Chord)
     }
@@ -397,6 +408,21 @@ mod tests {
 
     fn after(start: Instant, millis: u64) -> Instant {
         start + Duration::from_millis(millis)
+    }
+
+    #[test]
+    fn gestures_name_the_trigger_and_recording_pairing() {
+        for trigger in [
+            Trigger::LeftOption,
+            Trigger::RightOption,
+            Trigger::Fn,
+            Trigger::Chord,
+        ] {
+            let gestures = trigger.gestures();
+            let label_key = trigger.label().replace(" (Globe)", "").replace(" + ", "+");
+            assert!(gestures.contains("records"));
+            assert!(gestures.contains(&label_key));
+        }
     }
 
     #[test]

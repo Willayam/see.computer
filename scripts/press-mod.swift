@@ -20,6 +20,15 @@ func post(_ key: CGKeyCode, down: Bool, flags: CGEventFlags) {
 switch mode {
 case "opt-hold":
     post(leftOption, down: true, flags: [.maskAlternate]); usleep(ms*1000); post(leftOption, down: false, flags: [])
+case "ropt-shift":
+    let rf = CGEventFlags(rawValue: CGEventFlags.maskAlternate.rawValue | 0x40)
+    let rfs = CGEventFlags(rawValue: CGEventFlags.maskAlternate.rawValue | CGEventFlags.maskShift.rawValue | 0x40 | 0x02)
+    post(rightOption, down: true, flags: rf)
+    usleep(30000)
+    post(leftShift, down: true, flags: rfs)
+    usleep(ms*1000)
+    post(leftShift, down: false, flags: rf)
+    post(rightOption, down: false, flags: [])
 case "ropt-hold":
     // Right Option carries the device-specific right bit (0x40) so the L/R decode can be exercised.
     let rflags = CGEventFlags(rawValue: CGEventFlags.maskAlternate.rawValue | 0x40)

@@ -33,6 +33,7 @@ pub enum Notice {
     RecordingNeedsIdle,
     Cancelled,
     Loading(Option<u8>),
+    TriggerChanged(String),
     Unavailable(String),
     MicUnavailable(String),
     ScreenRecordingFailed(String),
@@ -58,6 +59,7 @@ impl Notice {
             | Notice::RecordingNeedsIdle
             | Notice::Cancelled
             | Notice::Loading(_)
+            | Notice::TriggerChanged(_)
             | Notice::Copied => Tone::Info,
             Notice::Unavailable(_)
             | Notice::MicUnavailable(_)
@@ -77,6 +79,7 @@ impl Notice {
             Notice::Cancelled => "Cancelled".to_owned(),
             Notice::Loading(Some(percent)) => format!("Model loading {percent}%"),
             Notice::Loading(None) => "Model loading".to_owned(),
+            Notice::TriggerChanged(text) => text.clone(),
             Notice::Unavailable(error) => format!("Model unavailable: {error}"),
             Notice::MicUnavailable(error) => format!("Microphone unavailable: {error}"),
             Notice::ScreenRecordingFailed(error) => format!("Screen recording failed: {error}"),
@@ -116,13 +119,16 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
                 PillEvent::Finish(_) | PillEvent::Hide => current = None,
                 PillEvent::Flash(_) => {}
             }
-            let status = match current {
-                Some(Activity::Listening) => "Listening".to_owned(),
-                Some(Activity::Transcribing) => "Transcribing".to_owned(),
-                Some(Activity::Recording) => "Recording".to_owned(),
-                Some(Activity::Finalizing) => "Saving recording".to_owned(),
-                Some(Activity::Preparing { phase, pct }) => preparing_text(phase, pct),
-                None => "Ready".to_owned(),
+            let status = match &event {
+                PillEvent::Flash(Notice::TriggerChanged(text)) => text.clone(),
+                _ => match current {
+                    Some(Activity::Listening) => "Listening".to_owned(),
+                    Some(Activity::Transcribing) => "Transcribing".to_owned(),
+                    Some(Activity::Recording) => "Recording".to_owned(),
+                    Some(Activity::Finalizing) => "Saving recording".to_owned(),
+                    Some(Activity::Preparing { phase, pct }) => preparing_text(phase, pct),
+                    None => "Ready".to_owned(),
+                },
             };
             let wire = match event {
                 PillEvent::Show(activity) => Wire::Show(activity),
