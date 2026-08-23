@@ -26,7 +26,11 @@ func post(_ key: CGKeyCode, down: Bool, flags: CGEventFlags) {
     e.post(tap: .cghidEventTap)
 }
 var held: CGEventFlags = []
-for (key, flag) in modifierKeys { held.insert(flag); post(key, down: true, flags: held) }
+for (key, flag) in modifierKeys {
+    held.insert(flag)
+    post(key, down: true, flags: held)
+    usleep(15000) // let each modifier register before the next event, even under load
+}
 post(space, down: true, flags: flags)
 usleep(holdMs * 1000)
 post(space, down: false, flags: flags)
