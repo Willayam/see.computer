@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pill",
+  "description": "The pill only listens for the `pill` event. No commands, no invoke surface.",
+  "windows": ["pill"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

@@ -1,0 +1,5 @@
+target/
+.context/
+.audit/
+*.part
+src-tauri/gen/

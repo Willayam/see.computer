@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; background: transparent; overflow: hidden; }
+  #pill {
+    position: fixed; left: 50%; bottom: 8px; transform: translateX(-50%) translateY(6px);
+    padding: 8px 14px; border-radius: 999px; color: #fff; font: 500 13px/1 -apple-system, system-ui;
+    background: rgba(20,20,22,.92); opacity: 0; transition: opacity .12s ease-out, transform .12s ease-out;
+    display: flex; align-items: center; gap: 8px; white-space: nowrap;
+  }
+  #pill.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: #5ac8fa; }
+  .listening #dot { background: #ff453a; animation: pulse 1s infinite; }
+  .recording #dot { background: #ff453a; }
+  .transcribing #dot, .finalizing #dot, .preparing #dot { background: #5ac8fa; animation: pulse .6s infinite; }
+  .error { background: rgba(120,30,30,.94); }
+  @keyframes pulse { 50% { opacity: .3; } }
+</style>
+<div id="pill"><span id="dot"></span><span id="text"></span></div>
+<script>
+  const pill = document.getElementById('pill'), text = document.getElementById('text');
+  const labels = { listening: 'Listening', transcribing: 'Transcribing', recording: 'Recording', finalizing: 'Saving' };
+  const preparing = { downloading: 'Downloading model', loading: 'Loading model', warming: 'Warming up' };
+  let hideTimer, activity = null;
+  function render(cls, msg) { clearTimeout(hideTimer); pill.className = 'on ' + cls; text.textContent = msg; }
+  function hide() { clearTimeout(hideTimer); pill.className = ''; }
+  function show(p) {
+    const a = p.activity;
+    if (a === 'preparing') return render('preparing', preparing[p.phase] + (p.phase === 'downloading' && p.pct != null ? ' ' + p.pct + '%' : ''));
+    render(a, labels[a]);
+  }
+  window.__TAURI__.event.listen('pill', ({ payload: p }) => {
+    if (p.kind === 'hide') { activity = null; return hide(); }
+    if (p.kind === 'show') { activity = p; return show(p); }
+    render(p.tone, p.text);
+    hideTimer = setTimeout(() => activity ? show(activity) : hide(), p.tone === 'error' ? 3000 : 1600);
+  });
+</script>
