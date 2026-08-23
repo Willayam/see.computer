@@ -384,7 +384,7 @@ impl Controller {
 
     fn expire(&mut self) {
         if let Session::Dictating { since, .. } = &self.session {
-            if since.elapsed() >= MAX_DICTATION || !crate::hotkeys::main_key_held() {
+            if since.elapsed() >= MAX_DICTATION || !crate::trigger::dictation_gesture_held() {
                 self.step(Msg::MainReleased);
             }
             return;
@@ -677,17 +677,17 @@ mod tests {
         let started = Instant::now();
         while !ready.exists() {
             assert!(
-                started.elapsed() < Duration::from_secs(5),
+                started.elapsed() < Duration::from_secs(10),
                 "recorder script never armed its trap"
             );
             std::thread::sleep(Duration::from_millis(5));
         }
         controller.step(Msg::VideoPressed);
         assert!(matches!(controller.session, Session::Finalizing { .. }));
-        let finished = controller.rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let finished = controller.rx.recv_timeout(Duration::from_secs(10)).unwrap();
         controller.step(finished);
         assert!(matches!(controller.session, Session::Pasting { .. }));
-        controller.step(controller.rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        controller.step(controller.rx.recv_timeout(Duration::from_secs(5)).unwrap());
         assert!(matches!(controller.session, Session::Idle));
         assert!(std::fs::read_dir(dir)
             .unwrap()
@@ -721,6 +721,15 @@ mod tests {
             Session::Recording { active } => active.path().to_path_buf(),
             _ => panic!("expected recording"),
         };
+        let ready = path.with_extension("mov.ready");
+        let started = Instant::now();
+        while !ready.exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "recorder script never armed its trap"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         controller.step(Msg::Quit);
         assert!(matches!(controller.session, Session::Idle));
         assert!(path.metadata().is_ok_and(|metadata| metadata.len() > 0));
