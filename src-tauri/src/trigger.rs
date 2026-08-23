@@ -284,18 +284,14 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<AtomicBoo
             held.store(false, Ordering::SeqCst);
             return TapExit::Rebuild;
         }
-        let physically_held = physical_modifier_held(selected);
-        held.store(physically_held, Ordering::SeqCst);
-        // Ground arming and release in the real key: if the tap dropped the
-        // release edge, Flags(0) cancels a pending arm and ends dictation
-        // instead of a Tick firing a phantom press.
-        let input = if physically_held {
-            Input::Tick
-        } else {
-            Input::Flags(0)
-        };
+        // The event stream crosses the arm threshold and reports release; the
+        // physical poll only feeds the session's release watchdog, which ends a
+        // dictation whose release edge the tap missed. Gating the threshold on
+        // the poll instead would depend on cross-process HID state the poll
+        // cannot always see.
+        held.store(physical_modifier_held(selected), Ordering::SeqCst);
         let message = with_decoder(&decoder, selected, |decoder| {
-            decoder.step(input, Instant::now())
+            decoder.step(Input::Tick, Instant::now())
         });
         send_message(&inbox, message);
 
