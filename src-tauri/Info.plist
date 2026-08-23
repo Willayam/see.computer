@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Menu-bar only from the first frame; setup also sets ActivationPolicy::Accessory for `tauri dev`. -->
+  <key>LSUIElement</key><true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>see.computer transcribes your voice on this Mac. Audio never leaves the machine.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>see.computer records your screen when you press the video hotkey.</string>
+</dict>
+</plist>
