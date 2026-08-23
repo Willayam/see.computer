@@ -18,6 +18,7 @@ const ANY_SHIFT: u64 = 0x0002_0000;
 const COMMAND: u64 = 0x0010_0000;
 const CONTROL: u64 = 0x0004_0000;
 const HOLD_THRESHOLD: Duration = Duration::from_millis(180);
+const VIDEO_COOLDOWN: Duration = Duration::from_millis(350);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -64,6 +65,7 @@ pub struct Decoder {
     arming_since: Option<Instant>,
     dictating: bool,
     video_latched: bool,
+    video_cooldown_until: Option<Instant>,
 }
 
 pub enum Input {
@@ -79,6 +81,7 @@ impl Decoder {
             arming_since: None,
             dictating: false,
             video_latched: false,
+            video_cooldown_until: None,
         }
     }
 
@@ -87,6 +90,7 @@ impl Decoder {
         self.arming_since = None;
         self.dictating = false;
         self.video_latched = false;
+        self.video_cooldown_until = None;
     }
 
     pub fn step(&mut self, input: Input, now: Instant) -> Option<Msg> {
@@ -109,8 +113,6 @@ impl Decoder {
         self.dictating
     }
 
-    /// A recording combo entered from active dictation only releases it; the
-    /// combo must rise cleanly again before it toggles recording.
     fn flags_changed(&mut self, flags: u64, now: Instant) -> Option<Msg> {
         let mod_held = self.trigger.held_in(flags);
         let shift_held = flags & (LEFT_SHIFT | RIGHT_SHIFT | ANY_SHIFT) != 0;
@@ -121,12 +123,10 @@ impl Decoder {
 
         if video_combo {
             self.arming_since = None;
+            self.video_cooldown_until = Some(now + VIDEO_COOLDOWN);
             if !self.video_latched {
                 self.video_latched = true;
-                if self.dictating() {
-                    self.dictating = false;
-                    return Some(Msg::MainReleased);
-                }
+                self.dictating = false;
                 return Some(Msg::VideoPressed);
             }
         } else {
@@ -139,6 +139,11 @@ impl Decoder {
                 self.dictating = false;
                 return Some(Msg::MainReleased);
             }
+            return None;
+        }
+
+        if self.video_cooldown_until.is_some_and(|t| now < t) {
+            self.arming_since = None;
             return None;
         }
 
@@ -497,26 +502,42 @@ mod tests {
     }
 
     #[test]
-    fn video_combo_entered_from_dictation_requires_a_clean_rising_edge() {
+    fn video_combo_overrides_stale_dictation() {
         let start = Instant::now();
         let mut decoder = Decoder::new(Trigger::LeftOption);
         let combo = LEFT_OPTION | LEFT_SHIFT;
         assert!(decoder.step(Input::Flags(LEFT_OPTION), start).is_none());
         assert!(matches!(
-            decoder.step(Input::Tick, after(start, 180)),
+            decoder.step(Input::Tick, after(start, 200)),
             Some(Msg::MainPressed)
         ));
         assert!(matches!(
-            decoder.step(Input::Flags(combo), after(start, 200)),
-            Some(Msg::MainReleased)
+            decoder.step(Input::Flags(combo), after(start, 250)),
+            Some(Msg::VideoPressed)
+        ));
+        assert!(!decoder.dictating());
+    }
+
+    #[test]
+    fn video_cooldown_blocks_modifier_release_tail() {
+        let start = Instant::now();
+        let mut decoder = Decoder::new(Trigger::LeftOption);
+        let combo = LEFT_OPTION | LEFT_SHIFT;
+        assert!(matches!(
+            decoder.step(Input::Flags(combo), start),
+            Some(Msg::VideoPressed)
         ));
         assert!(decoder
-            .step(Input::Flags(combo), after(start, 210))
+            .step(Input::Flags(LEFT_OPTION), after(start, 100))
             .is_none());
-        assert!(decoder.step(Input::Flags(0), after(start, 220)).is_none());
+        assert!(decoder.step(Input::Tick, after(start, 300)).is_none());
+        assert!(decoder.step(Input::Flags(0), after(start, 350)).is_none());
+        assert!(decoder
+            .step(Input::Flags(LEFT_OPTION), after(start, 351))
+            .is_none());
         assert!(matches!(
-            decoder.step(Input::Flags(combo), after(start, 230)),
-            Some(Msg::VideoPressed)
+            decoder.step(Input::Tick, after(start, 551)),
+            Some(Msg::MainPressed)
         ));
     }
 

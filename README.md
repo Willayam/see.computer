@@ -7,7 +7,7 @@ Two gestures. That is the whole interface.
 | Gesture | What happens |
 |---|---|
 | Hold **Left Option**, speak, release | The spoken text is pasted at your cursor, in any app. Audio never leaves the machine. |
-| **Left Option+Shift** | Toggles screen and microphone recording. On stop, a link to the `.mov` is on your clipboard and pasted at your cursor. |
+| **Left Option+Shift** | Press once to start a screen and microphone recording, press again to stop (it is a toggle, not hold-to-record). On stop, a link to the `.mov` is on your clipboard and pasted at your cursor. |
 
 Choose Left Option, Right Option, Fn (Globe), or the legacy Option+Space trigger from the tray. Right Option is AltGr on the Swedish keyboard layout. Option+Space and Command+Shift+Option+Space remain available as fallback hotkeys regardless of the selected trigger.
 
