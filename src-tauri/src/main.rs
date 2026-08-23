@@ -1,7 +1,5 @@
 //! Process entry point and actor wiring.
 
-use tauri::Manager;
-
 mod cli;
 mod config;
 mod engine;
@@ -50,9 +48,12 @@ fn main() {
             pill::attach(app.handle(), pill_rx);
             trigger::set_app_handle(app.handle().clone());
             tray::install(app.handle(), setup_tx, setup_trigger.clone())?;
-            hotkeys::register_defaults(app.handle());
+            let selected = *setup_trigger
+                .lock()
+                .expect("trigger mutex poisoned at startup");
+            hotkeys::set_chords_registered(app.handle(), !selected.uses_tap());
             paste::accessibility_trusted(true);
-            app.manage(trigger::spawn_watcher(setup_trigger, setup_watcher_tx));
+            trigger::spawn_watcher(setup_trigger, setup_watcher_tx);
             Ok(())
         })
         .build(tauri::generate_context!())

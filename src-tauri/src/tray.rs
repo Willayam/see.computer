@@ -172,6 +172,7 @@ pub fn install(
                 if let Some(selected) = trigger_from_id(id) {
                     set_trigger(&trigger, selected);
                     trigger_items.set_selected(selected);
+                    crate::hotkeys::set_chords_registered(app, !selected.uses_tap());
                     if let Err(error) = (Config { trigger: selected }).save() {
                         eprintln!("could not save trigger preference: {error}");
                     }

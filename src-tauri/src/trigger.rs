@@ -2,7 +2,6 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc::Sender, Arc, Mutex, OnceLock};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::session::Msg;
@@ -160,11 +159,6 @@ impl Decoder {
     }
 }
 
-pub struct Watcher {
-    _dict_physically_held: Arc<AtomicBool>,
-    _handle: Option<JoinHandle<()>>,
-}
-
 static DICT_PHYSICALLY_HELD: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 static STATUS_APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 
@@ -172,21 +166,18 @@ pub fn set_app_handle(app: tauri::AppHandle) {
     let _ = STATUS_APP.set(app);
 }
 
-pub fn spawn_watcher(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>) -> Watcher {
+/// The watcher runs on a detached thread for the life of the process; its
+/// physical-key state lives in [`DICT_PHYSICALLY_HELD`] for the release
+/// watchdog to read.
+pub fn spawn_watcher(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>) {
     let dict_physically_held = Arc::new(AtomicBool::new(false));
     let _ = DICT_PHYSICALLY_HELD.set(dict_physically_held.clone());
-    let held_for_thread = dict_physically_held.clone();
-    let handle = std::thread::Builder::new()
+    if let Err(error) = std::thread::Builder::new()
         .name("see-trigger-tap".to_owned())
-        .spawn(move || watcher_thread(trigger, inbox, held_for_thread))
-        .map_err(|error| {
-            eprintln!("could not start modifier watcher: {error}");
-            show_input_monitoring_status();
-        })
-        .ok();
-    Watcher {
-        _dict_physically_held: dict_physically_held,
-        _handle: handle,
+        .spawn(move || watcher_thread(trigger, inbox, dict_physically_held))
+    {
+        eprintln!("could not start modifier watcher: {error}");
+        show_input_monitoring_status();
     }
 }
 
@@ -293,9 +284,18 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<AtomicBoo
             held.store(false, Ordering::SeqCst);
             return TapExit::Rebuild;
         }
-        held.store(physical_modifier_held(selected), Ordering::SeqCst);
+        let physically_held = physical_modifier_held(selected);
+        held.store(physically_held, Ordering::SeqCst);
+        // Ground arming and release in the real key: if the tap dropped the
+        // release edge, Flags(0) cancels a pending arm and ends dictation
+        // instead of a Tick firing a phantom press.
+        let input = if physically_held {
+            Input::Tick
+        } else {
+            Input::Flags(0)
+        };
         let message = with_decoder(&decoder, selected, |decoder| {
-            decoder.step(Input::Tick, Instant::now())
+            decoder.step(input, Instant::now())
         });
         send_message(&inbox, message);
 
