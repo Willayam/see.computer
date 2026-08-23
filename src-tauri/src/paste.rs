@@ -66,6 +66,8 @@ impl Paste {
     }
 }
 
+/// The prior clipboard goes back only if `NSPasteboard.changeCount` is still the
+/// value we wrote. Comparing text would misread "user copied the same text".
 struct PendingRestore {
     prior: Option<String>,
     change_count: i64,
@@ -157,6 +159,8 @@ pub enum Error {
     Event(String),
 }
 
+/// `prompt` is only passed as `true` once, at launch: a consent dialog during a
+/// paste would steal the focus we are about to paste into.
 pub fn accessibility_trusted(prompt: bool) -> bool {
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
@@ -202,6 +206,8 @@ fn pasteboard_change_count() -> i64 {
     }
 }
 
+/// Flags are set, not or'ed: `set_flags` replaces them, which is what stops a
+/// physically held Option key from turning this into Cmd+Option+V.
 fn post_cmd_v() -> Result<(), Error> {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};

@@ -21,6 +21,9 @@ pub enum Session {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Minted per finalize or paste. A reply from an operation that timed out
+/// cannot be mistaken for the current one, the same way `JobId` guards
+/// transcription.
 pub struct Turn(u64);
 
 pub enum Readiness {

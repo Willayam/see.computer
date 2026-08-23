@@ -180,6 +180,10 @@ fn preparing_text(phase: crate::engine::Phase, pct: Option<u8>) -> String {
     }
 }
 
+/// Ordered in once with `orderFrontRegardless` and never hidden again; Tauri's
+/// `show()` calls `makeKeyAndOrderFront`, which would steal the key focus that
+/// the synthetic Cmd+V needs to land in the user's app. Level 25 sits above
+/// other apps' floating chrome, which `always_on_top` (level 3) does not.
 fn configure_hud(window: &WebviewWindow) {
     const NS_STATUS_WINDOW_LEVEL: i64 = 25;
     const CAN_JOIN_ALL_SPACES: usize = 1 << 0;

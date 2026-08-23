@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::process::{Child, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+/// A SIGINT that lands before `screencapture` installs its handler kills it with
+/// no moov atom, leaving an unplayable file.
 const SIGNAL_DELAY: Duration = Duration::from_millis(400);
 
 pub enum Recorder {

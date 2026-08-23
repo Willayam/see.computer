@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const RATE: u32 = 16_000;
+/// Always-live ring copied to the head of every capture, so the syllable spoken
+/// before the hotkey registered is not clipped.
 pub const PREROLL: Duration = Duration::from_millis(300);
 
 #[derive(Clone)]
