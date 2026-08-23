@@ -9,6 +9,7 @@ guard args.count >= 2 else { FileHandle.standardError.write("usage: press-mod op
 let mode = args[1]
 let ms = args.count >= 3 ? (UInt32(args[2]) ?? 400) : 400
 let leftOption: CGKeyCode = 58
+let rightOption: CGKeyCode = 61
 let leftShift: CGKeyCode = 56
 guard let src = CGEventSource(stateID: .hidSystemState) else { exit(70) }
 func post(_ key: CGKeyCode, down: Bool, flags: CGEventFlags) {
@@ -19,6 +20,10 @@ func post(_ key: CGKeyCode, down: Bool, flags: CGEventFlags) {
 switch mode {
 case "opt-hold":
     post(leftOption, down: true, flags: [.maskAlternate]); usleep(ms*1000); post(leftOption, down: false, flags: [])
+case "ropt-hold":
+    // Right Option carries the device-specific right bit (0x40) so the L/R decode can be exercised.
+    let rflags = CGEventFlags(rawValue: CGEventFlags.maskAlternate.rawValue | 0x40)
+    post(rightOption, down: true, flags: rflags); usleep(ms*1000); post(rightOption, down: false, flags: [])
 case "opt-shift":
     post(leftOption, down: true, flags: [.maskAlternate])
     usleep(30000)

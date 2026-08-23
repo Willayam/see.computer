@@ -368,8 +368,16 @@ fn physical_modifier_held(trigger: Trigger) -> bool {
         fn CGEventSourceFlagsState(state: CGEventSourceStateID) -> CGEventFlags;
     }
 
-    let flags = unsafe { CGEventSourceFlagsState(CGEventSourceStateID::HIDSystemState) };
-    trigger.held_in(flags.bits())
+    let flags = unsafe { CGEventSourceFlagsState(CGEventSourceStateID::HIDSystemState) }.bits();
+    // The source state canonicalizes left/right Option to one device bit, so it
+    // cannot confirm a specific side. The event stream already enforces the
+    // side; here we only need to know the modifier family is still physically
+    // down, so a genuine release cancels a pending arm.
+    match trigger {
+        Trigger::LeftOption | Trigger::RightOption => flags & ANY_OPTION != 0,
+        Trigger::Fn => flags & FN != 0,
+        Trigger::Chord => false,
+    }
 }
 
 fn event_tap_is_enabled(tap: &core_graphics::event::CGEventTap<'static>) -> bool {
