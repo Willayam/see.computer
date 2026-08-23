@@ -33,6 +33,8 @@ Set `APPLE_SIGNING_IDENTITY` to a signing identity before building so macOS keep
 
 macOS asks for these the first time each feature runs. The tray menu has a shortcut to each pane under **System Settings > Privacy & Security**.
 
+Another dictation app listening on the same key doubles every input. see.computer warns when a known one (Hex, Wispr Flow, Superwhisper, …) is running; quit it or change the trigger.
+
 - **Accessibility**: needed to press Command+V in the app you are dictating into. Without it the text is still on your clipboard and the pill says so.
 - **Input Monitoring**: needed for bare-modifier hold-to-talk and modifier+Shift recording. The legacy Option+Space chord fallback needs only Accessibility.
 - **Microphone**: dictation, and the audio track of recordings.

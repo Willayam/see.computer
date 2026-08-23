@@ -8,6 +8,7 @@ mod mic;
 mod paste;
 mod pill;
 mod recorder;
+mod rivals;
 mod session;
 mod share;
 mod tray;
@@ -58,6 +59,7 @@ fn main() {
     let (tx, rx) = std::sync::mpsc::channel::<session::Msg>();
     let (pill_tx, pill_rx) = std::sync::mpsc::channel::<pill::PillEvent>();
     let trigger = std::sync::Arc::new(std::sync::Mutex::new(config::Config::load().trigger));
+    rivals::spawn(pill_tx.clone());
     let controller = session::spawn(
         session::Wiring {
             mic,
