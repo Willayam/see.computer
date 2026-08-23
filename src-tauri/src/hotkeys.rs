@@ -17,6 +17,17 @@ pub fn video_chord() -> Shortcut {
     )
 }
 
+/// Physical state of the Space key, for the Dictating release watchdog.
+pub fn main_key_held() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
+    }
+    const HID_SYSTEM_STATE: i32 = 1;
+    const SPACE: u16 = 49;
+    unsafe { CGEventSourceKeyState(HID_SYSTEM_STATE, SPACE) }
+}
+
 pub fn cancel_chord() -> Shortcut {
     Shortcut::new(None, Code::Escape)
 }

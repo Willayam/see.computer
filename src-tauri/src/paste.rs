@@ -19,6 +19,13 @@ impl Text {
     pub(crate) fn literal(raw: String) -> Text {
         Text(raw)
     }
+
+    /// Dictated sentences land mid-document; a trailing space keeps the next
+    /// one from gluing onto this one.
+    pub fn followed_by_space(mut self) -> Text {
+        self.0.push(' ');
+        self
+    }
 }
 
 pub struct Paste {
@@ -31,8 +38,17 @@ enum Mode {
     Dry,
 }
 
+/// Dictated text gives the clipboard back; a share link is the thing the user
+/// came for, so it stays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clipboard {
+    RestorePrior,
+    Keep,
+}
+
 struct Job {
     text: Text,
+    clipboard: Clipboard,
     done: Box<dyn FnOnce(Outcome) + Send>,
 }
 
@@ -50,11 +66,20 @@ impl Paste {
         Paste { mode: Mode::Dry }
     }
 
-    pub fn paste(&self, text: Text, reply: impl FnOnce(Outcome) + Send + 'static) {
+    pub fn paste(
+        &self,
+        text: Text,
+        clipboard: Clipboard,
+        reply: impl FnOnce(Outcome) + Send + 'static,
+    ) {
         let done = Box::new(reply);
         match &self.mode {
             Mode::System(tx) => {
-                if let Err(error) = tx.send(Job { text, done }) {
+                if let Err(error) = tx.send(Job {
+                    text,
+                    clipboard,
+                    done,
+                }) {
                     (error.0.done)(Outcome(Err(Error::Clipboard(
                         "paste worker stopped".to_owned(),
                     ))));
@@ -136,11 +161,13 @@ fn paste_loop(rx: Receiver<Job>) {
         match post_cmd_v() {
             Ok(()) => {
                 (job.done)(Outcome(Ok(())));
-                pending = Some(PendingRestore {
-                    prior,
-                    change_count,
-                    at: Instant::now() + Duration::from_millis(1_200),
-                });
+                if job.clipboard == Clipboard::RestorePrior {
+                    pending = Some(PendingRestore {
+                        prior,
+                        change_count,
+                        at: Instant::now() + Duration::from_millis(1_200),
+                    });
+                }
             }
             Err(error) => (job.done)(Outcome(Err(error))),
         }

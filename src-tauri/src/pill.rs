@@ -111,22 +111,19 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
         let mut cancel_armed = false;
         while let Ok(event) = rx.recv() {
             let starts_activity = matches!(event, PillEvent::Show(_)) && current.is_none();
-            let status = match &event {
-                PillEvent::Show(activity) => match activity {
-                    Activity::Listening => "Listening".to_owned(),
-                    Activity::Transcribing => "Transcribing".to_owned(),
-                    Activity::Recording => "Recording".to_owned(),
-                    Activity::Finalizing => "Saving recording".to_owned(),
-                    Activity::Preparing { phase, pct } => preparing_text(*phase, *pct),
-                },
-                PillEvent::Flash(notice) | PillEvent::Finish(notice) => notice.text(),
-                PillEvent::Hide => "Ready".to_owned(),
-            };
             match &event {
                 PillEvent::Show(activity) => current = Some(*activity),
                 PillEvent::Finish(_) | PillEvent::Hide => current = None,
                 PillEvent::Flash(_) => {}
             }
+            let status = match current {
+                Some(Activity::Listening) => "Listening".to_owned(),
+                Some(Activity::Transcribing) => "Transcribing".to_owned(),
+                Some(Activity::Recording) => "Recording".to_owned(),
+                Some(Activity::Finalizing) => "Saving recording".to_owned(),
+                Some(Activity::Preparing { phase, pct }) => preparing_text(phase, pct),
+                None => "Ready".to_owned(),
+            };
             let wire = match event {
                 PillEvent::Show(activity) => Wire::Show(activity),
                 PillEvent::Flash(notice) => Wire::Flash {

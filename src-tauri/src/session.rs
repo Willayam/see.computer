@@ -67,6 +67,9 @@ pub fn spawn(wiring: Wiring, inbox: (Sender<Msg>, Receiver<Msg>)) -> std::thread
 pub const MAX_DICTATION: Duration = Duration::from_secs(120);
 /// Captured audio always includes the pre-roll, so this is time after the press.
 pub const MIN_DICTATION: Duration = Duration::from_millis(250);
+/// While Dictating the controller checks the physical key this often, so a
+/// lost key-up event (the classic hold-to-talk failure) cannot strand it.
+pub const RELEASE_POLL: Duration = Duration::from_millis(200);
 pub const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const FINALIZE_TIMEOUT: Duration = Duration::from_secs(8);
 pub const PASTE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -309,7 +312,9 @@ impl Controller {
             ) if job != done => state,
             (Session::Transcribing { .. }, Msg::Engine(engine::Event::Done(_, result))) => {
                 match result {
-                    Ok(Some(text)) => self.begin_paste(text),
+                    Ok(Some(text)) => {
+                        self.begin_paste(text.followed_by_space(), paste::Clipboard::RestorePrior)
+                    }
                     Ok(None) => {
                         self.finish(Notice::NothingHeard);
                         Session::Idle
@@ -337,7 +342,7 @@ impl Controller {
                 match result {
                     Ok(recording) => {
                         let text = self.share.link(&recording).into_text();
-                        self.begin_paste(text)
+                        self.begin_paste(text, paste::Clipboard::Keep)
                     }
                     Err(error) => {
                         self.finish(Notice::ScreenRecordingFailed(error.to_string()));
@@ -366,7 +371,9 @@ impl Controller {
 
     fn deadline(&self) -> Option<Instant> {
         match &self.session {
-            Session::Dictating { since, .. } => Some(*since + MAX_DICTATION),
+            Session::Dictating { since, .. } => {
+                Some((*since + MAX_DICTATION).min(Instant::now() + RELEASE_POLL))
+            }
             Session::Transcribing { since, .. } => Some(*since + TRANSCRIBE_TIMEOUT),
             Session::Recording { .. } => Some(Instant::now() + Duration::from_secs(1)),
             Session::Finalizing { since, .. } => Some(*since + FINALIZE_TIMEOUT),
@@ -376,8 +383,10 @@ impl Controller {
     }
 
     fn expire(&mut self) {
-        if matches!(self.session, Session::Dictating { .. }) {
-            self.step(Msg::MainReleased);
+        if let Session::Dictating { since, .. } = &self.session {
+            if since.elapsed() >= MAX_DICTATION || !crate::hotkeys::main_key_held() {
+                self.step(Msg::MainReleased);
+            }
             return;
         }
         if let Session::Recording { active } = &mut self.session {
@@ -411,10 +420,10 @@ impl Controller {
         }
     }
 
-    fn begin_paste(&mut self, text: paste::Text) -> Session {
+    fn begin_paste(&mut self, text: paste::Text, clipboard: paste::Clipboard) -> Session {
         let turn = self.mint_turn();
         let tx = self.tx.clone();
-        self.paste.paste(text, move |outcome| {
+        self.paste.paste(text, clipboard, move |outcome| {
             let _ = tx.send(Msg::Paste(turn, outcome));
         });
         Session::Pasting {

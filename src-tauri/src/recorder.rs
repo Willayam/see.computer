@@ -203,7 +203,7 @@ pub enum Error {
         program: PathBuf,
         source: std::io::Error,
     },
-    #[error("recording produced no file; Screen Recording permission may be off")]
+    #[error("recording stopped early; check Screen Recording and Microphone permissions")]
     NoFile,
     #[error("recorder exited with {0}")]
     Exit(std::process::ExitStatus),
