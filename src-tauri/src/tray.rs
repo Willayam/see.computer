@@ -6,6 +6,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
 
 use crate::config::Config;
+use crate::pill::{Notice, PillEvent};
 use crate::session::Msg;
 use crate::trigger::Trigger;
 
@@ -73,6 +74,7 @@ pub fn install(
     app: &AppHandle,
     inbox: Sender<Msg>,
     trigger: Arc<Mutex<Trigger>>,
+    pill: Sender<PillEvent>,
 ) -> tauri::Result<()> {
     let status = MenuItem::with_id(app, "status", "Loading model…", false, None::<&str>)?;
     let retry = MenuItem::with_id(app, "retry", "Retry model download", true, None::<&str>)?;
@@ -112,12 +114,20 @@ pub fn install(
         None::<&str>,
     )?;
     let selected = current_trigger(&trigger);
+    let trigger_help = MenuItem::with_id(
+        app,
+        "trigger-help",
+        "Hold to talk · add Shift to record",
+        false,
+        None::<&str>,
+    )?;
     let trigger_items = TriggerItems::new(app, selected)?;
     let trigger_menu = Submenu::with_items(
         app,
         "Trigger",
         true,
         &[
+            &trigger_help,
             &trigger_items.left_option,
             &trigger_items.right_option,
             &trigger_items.function,
@@ -176,7 +186,10 @@ pub fn install(
                     if let Err(error) = (Config { trigger: selected }).save() {
                         eprintln!("could not save trigger preference: {error}");
                     }
-                    set_status(app, &format!("Trigger: {}", selected.label()));
+                    set_status(app, &selected.gestures());
+                    let _ = pill.send(PillEvent::Flash(Notice::TriggerChanged(
+                        selected.gestures(),
+                    )));
                 }
             }
         })

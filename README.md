@@ -9,7 +9,7 @@ Two gestures. That is the whole interface.
 | Hold **Left Option**, speak, release | The spoken text is pasted at your cursor, in any app. Audio never leaves the machine. |
 | **Left Option+Shift** | Press once to start a screen and microphone recording, press again to stop (it is a toggle, not hold-to-record). On stop, a link to the `.mov` is on your clipboard and pasted at your cursor. |
 
-Choose Left Option, Right Option, Fn (Globe), or the legacy Option+Space trigger from the tray. Right Option is AltGr on the Swedish keyboard layout. Option+Space and Command+Shift+Option+Space remain available as fallback hotkeys regardless of the selected trigger.
+Choose Left Option, Right Option, Fn (Globe), or the legacy Option+Space trigger from the tray. Right Option is AltGr on the Swedish keyboard layout. The recording gesture always follows the trigger: whatever key you pick, add Shift to record. The legacy Option+Space and Command+Shift+Option+Space chords are active only when the Option+Space trigger is selected.
 
 Dictation runs NVIDIA Parakeet TDT 0.6b v3 (INT8, ONNX) on the CPU. On an M3 Max a six-second Swedish sentence comes back in about 155 ms. The model is 670 MB and downloads on first launch into `~/Library/Application Support/see.computer/models/`.
 
