@@ -2,11 +2,17 @@
 
 use chrono::Local;
 use std::path::PathBuf;
-use std::process::{Child, Stdio};
-use std::sync::mpsc::Sender;
+use std::process::{Child, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
+const SIGNAL_DELAY: Duration = Duration::from_millis(400);
 
 pub enum Recorder {
-    ScreenCapture { program: PathBuf, dir: PathBuf },
+    ScreenCapture {
+        program: PathBuf,
+        dir: PathBuf,
+        preflight: bool,
+    },
 }
 
 impl Recorder {
@@ -14,17 +20,26 @@ impl Recorder {
         Recorder::ScreenCapture {
             program: PathBuf::from("/usr/sbin/screencapture"),
             dir,
+            preflight: true,
         }
     }
 
     #[cfg(test)]
     pub fn with_program(program: PathBuf, dir: PathBuf) -> Recorder {
-        Recorder::ScreenCapture { program, dir }
+        Recorder::ScreenCapture {
+            program,
+            dir,
+            preflight: false,
+        }
     }
 
     pub fn start(&self) -> Result<Active, Error> {
-        let Recorder::ScreenCapture { program, dir } = self;
-        if !cfg!(test) || program == std::path::Path::new("/usr/sbin/screencapture") {
+        let Recorder::ScreenCapture {
+            program,
+            dir,
+            preflight,
+        } = self;
+        if *preflight {
             #[link(name = "CoreGraphics", kind = "framework")]
             extern "C" {
                 fn CGPreflightScreenCaptureAccess() -> bool;
@@ -42,7 +57,13 @@ impl Recorder {
             program: program.clone(),
             source,
         })?;
-        let path = dir.join(format!("{}.mov", Local::now().format("%Y-%m-%d-%H-%M-%S")));
+        let stamp = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
+        let mut path = dir.join(format!("{stamp}.mov"));
+        let mut suffix = 2;
+        while path.exists() {
+            path = dir.join(format!("{stamp}-{suffix}.mov"));
+            suffix += 1;
+        }
         let child = std::process::Command::new(program)
             .args(["-v", "-g", "-x"])
             .arg(&path)
@@ -54,13 +75,20 @@ impl Recorder {
                 program: program.clone(),
                 source,
             })?;
-        Ok(Active { child, path })
+        Ok(Active {
+            child,
+            path,
+            started: Instant::now(),
+            exited: None,
+        })
     }
 }
 
 pub struct Active {
     child: Child,
     path: PathBuf,
+    started: Instant,
+    exited: Option<ExitStatus>,
 }
 
 impl Active {
@@ -69,48 +97,93 @@ impl Active {
         &self.path
     }
 
-    pub fn stop<M: From<Finished> + Send + 'static>(self, reply: Sender<M>) {
-        let Active { mut child, path } = self;
-        let pid = child.id() as libc::pid_t;
-        unsafe {
-            libc::kill(pid, libc::SIGINT);
+    pub fn try_wait(&mut self) -> Option<ExitStatus> {
+        if self.exited.is_none() {
+            self.exited = self.child.try_wait().ok().flatten();
         }
+        self.exited
+    }
+
+    pub fn stop(self, reply: impl FnOnce(Finished) + Send + 'static) {
         std::thread::spawn(move || {
-            let result = child
-                .wait()
-                .map_err(|source| Error::Spawn {
-                    program: PathBuf::from("recorder process"),
-                    source,
-                })
-                .and_then(|status| {
-                    if status.success() {
-                        Ok(())
-                    } else {
-                        Err(Error::Exit(status))
-                    }
-                })
-                .and_then(|()| {
-                    let valid = path.metadata().map(|meta| meta.len() > 0).unwrap_or(false);
-                    if valid {
-                        Ok(Recording { path })
-                    } else {
-                        Err(Error::NoFile)
-                    }
-                });
-            let _ = reply.send(Finished(result).into());
+            reply(stop_inner(self));
         });
     }
 
+    pub fn stop_blocking(self) -> Finished {
+        stop_inner(self)
+    }
+
     pub fn abort(self) {
-        let Active { mut child, path } = self;
-        unsafe {
-            libc::kill(child.id() as libc::pid_t, libc::SIGINT);
-        }
         std::thread::spawn(move || {
+            let Active {
+                mut child,
+                path,
+                started,
+                exited,
+            } = self;
+            if exited.is_none() {
+                wait_to_signal(started);
+                unsafe {
+                    libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+                }
+            }
             let _ = child.wait();
             let _ = std::fs::remove_file(path);
         });
     }
+}
+
+fn stop_inner(active: Active) -> Finished {
+    let Active {
+        mut child,
+        path,
+        started,
+        exited,
+    } = active;
+    let status = match exited {
+        Some(status) => Ok(status),
+        None => {
+            wait_to_signal(started);
+            unsafe {
+                libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+            }
+            child.wait().map_err(|source| Error::Spawn {
+                program: PathBuf::from("recorder process"),
+                source,
+            })
+        }
+    };
+    let result = status
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(Error::Exit(status))
+            }
+        })
+        .and_then(|()| {
+            let valid = path.metadata().map(|meta| meta.len() > 0).unwrap_or(false);
+            if valid {
+                Ok(Recording { path })
+            } else {
+                Err(Error::NoFile)
+            }
+        });
+    Finished(result)
+}
+
+fn wait_to_signal(started: Instant) {
+    if let Some(wait) = (started + SIGNAL_DELAY).checked_duration_since(Instant::now()) {
+        std::thread::sleep(wait);
+    }
+}
+
+pub fn default_dir() -> PathBuf {
+    dirs::video_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("see.computer")
 }
 
 pub struct Recording {

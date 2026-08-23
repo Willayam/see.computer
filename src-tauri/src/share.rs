@@ -11,10 +11,15 @@ impl Share {
     pub fn link(&self, recording: &Recording) -> Link {
         match self {
             Share::LocalFile => {
-                let url = url::Url::from_file_path(&recording.path)
-                    .expect("recording paths are absolute local paths");
-                let text = Text::parse(url.to_string()).expect("file URLs are non-empty");
-                Link(text)
+                let plain = recording.path.to_string_lossy().into_owned();
+                let rendered = if recording.path.is_absolute() {
+                    url::Url::from_file_path(&recording.path)
+                        .map(|url| url.to_string())
+                        .unwrap_or(plain)
+                } else {
+                    plain
+                };
+                Link(Text::literal(rendered))
             }
         }
     }

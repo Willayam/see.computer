@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 pub enum PillEvent {
     Show(Activity),
     Flash(Notice),
+    Finish(Notice),
     Hide,
 }
 
@@ -91,7 +92,11 @@ impl Notice {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum Wire {
     Show(Activity),
-    Flash { tone: Tone, text: String },
+    Flash {
+        tone: Tone,
+        text: String,
+        ends: bool,
+    },
     Hide,
 }
 
@@ -102,10 +107,10 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
     configure_hud(&window);
     let app = app.clone();
     std::thread::spawn(move || {
-        let mut activity_showing = false;
+        let mut current = None;
+        let mut cancel_armed = false;
         while let Ok(event) = rx.recv() {
-            let starts_activity = matches!(event, PillEvent::Show(_)) && !activity_showing;
-            activity_showing = matches!(event, PillEvent::Show(_));
+            let starts_activity = matches!(event, PillEvent::Show(_)) && current.is_none();
             let status = match &event {
                 PillEvent::Show(activity) => match activity {
                     Activity::Listening => "Listening".to_owned(),
@@ -114,14 +119,25 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
                     Activity::Finalizing => "Saving recording".to_owned(),
                     Activity::Preparing { phase, pct } => preparing_text(*phase, *pct),
                 },
-                PillEvent::Flash(notice) => notice.text(),
+                PillEvent::Flash(notice) | PillEvent::Finish(notice) => notice.text(),
                 PillEvent::Hide => "Ready".to_owned(),
             };
+            match &event {
+                PillEvent::Show(activity) => current = Some(*activity),
+                PillEvent::Finish(_) | PillEvent::Hide => current = None,
+                PillEvent::Flash(_) => {}
+            }
             let wire = match event {
                 PillEvent::Show(activity) => Wire::Show(activity),
                 PillEvent::Flash(notice) => Wire::Flash {
                     tone: notice.tone(),
                     text: notice.text(),
+                    ends: false,
+                },
+                PillEvent::Finish(notice) => Wire::Flash {
+                    tone: notice.tone(),
+                    text: notice.text(),
+                    ends: true,
                 },
                 PillEvent::Hide => Wire::Hide,
             };
@@ -130,11 +146,23 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
                 let window = window.clone();
                 let _ = dispatcher.run_on_main_thread(move || move_to_cursor_monitor(&window));
             }
+            let armed = matches!(
+                current,
+                Some(
+                    Activity::Listening
+                        | Activity::Transcribing
+                        | Activity::Recording
+                        | Activity::Finalizing
+                )
+            );
             let dispatcher = app.clone();
             let main_app = app.clone();
-            let armed = activity_showing;
+            let armed_changed = armed != cancel_armed;
+            cancel_armed = armed;
             let _ = dispatcher.run_on_main_thread(move || {
-                crate::hotkeys::set_cancel_armed(&main_app, armed);
+                if armed_changed {
+                    crate::hotkeys::set_cancel_armed(&main_app, armed);
+                }
                 crate::tray::set_status(&main_app, &status);
             });
             let _ = app.emit_to("pill", "pill", wire);
@@ -153,6 +181,11 @@ fn preparing_text(phase: crate::engine::Phase, pct: Option<u8>) -> String {
 }
 
 fn configure_hud(window: &WebviewWindow) {
+    const NS_STATUS_WINDOW_LEVEL: i64 = 25;
+    const CAN_JOIN_ALL_SPACES: usize = 1 << 0;
+    const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
+    const SHARING_NONE: usize = 0;
+
     unsafe {
         use objc2::msg_send;
         use objc2::runtime::AnyObject;
@@ -163,13 +196,13 @@ fn configure_hud(window: &WebviewWindow) {
         if window.is_null() {
             return;
         }
-        let _: () = msg_send![window, setLevel: 25_i64];
+        let _: () = msg_send![window, setLevel: NS_STATUS_WINDOW_LEVEL];
         let current: usize = msg_send![window, collectionBehavior];
-        let behavior = current | (1 << 0) | (1 << 8);
+        let behavior = current | CAN_JOIN_ALL_SPACES | FULL_SCREEN_AUXILIARY;
         let _: () = msg_send![window, setCollectionBehavior: behavior];
         let _: () = msg_send![window, setIgnoresMouseEvents: true];
         let _: () = msg_send![window, setHidesOnDeactivate: false];
-        let _: () = msg_send![window, setSharingType: 0_usize];
+        let _: () = msg_send![window, setSharingType: SHARING_NONE];
         let _: () = msg_send![window, orderFrontRegardless];
     }
 }

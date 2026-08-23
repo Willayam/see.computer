@@ -32,6 +32,7 @@
   window.__TAURI__.event.listen('pill', ({ payload: p }) => {
     if (p.kind === 'hide') { activity = null; return hide(); }
     if (p.kind === 'show') { activity = p; return show(p); }
+    if (p.ends) activity = null;
     render(p.tone, p.text);
     hideTimer = setTimeout(() => activity ? show(activity) : hide(), p.tone === 'error' ? 3000 : 1600);
   });

@@ -16,9 +16,12 @@ pub enum Session {
     Dictating { armed: mic::Armed, since: Instant },
     Transcribing { job: JobId, since: Instant },
     Recording { active: recorder::Active },
-    Finalizing { since: Instant },
-    Pasting { since: Instant },
+    Finalizing { turn: Turn, since: Instant },
+    Pasting { turn: Turn, since: Instant },
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Turn(u64);
 
 pub enum Readiness {
     Loading(Progress),
@@ -31,27 +34,16 @@ pub enum Msg {
     MainReleased,
     VideoPressed,
     Cancel,
+    Quit,
     RetryEngine,
     Engine(engine::Event),
-    Recorder(recorder::Finished),
-    Paste(paste::Outcome),
+    Recorder(Turn, recorder::Finished),
+    Paste(Turn, paste::Outcome),
 }
 
 impl From<engine::Event> for Msg {
     fn from(event: engine::Event) -> Self {
         Msg::Engine(event)
-    }
-}
-
-impl From<recorder::Finished> for Msg {
-    fn from(finished: recorder::Finished) -> Self {
-        Msg::Recorder(finished)
-    }
-}
-
-impl From<paste::Outcome> for Msg {
-    fn from(outcome: paste::Outcome) -> Self {
-        Msg::Paste(outcome)
     }
 }
 
@@ -70,7 +62,7 @@ pub fn spawn(wiring: Wiring, inbox: (Sender<Msg>, Receiver<Msg>)) -> std::thread
 }
 
 pub const MAX_DICTATION: Duration = Duration::from_secs(120);
-/// Captured audio shorter than this is a tap, not speech.
+/// Captured audio always includes the pre-roll, so this is time after the press.
 pub const MIN_DICTATION: Duration = Duration::from_millis(250);
 pub const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const FINALIZE_TIMEOUT: Duration = Duration::from_secs(8);
@@ -90,6 +82,7 @@ struct Controller {
     trail: Trail,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
+    next_turn: u64,
 }
 
 impl Controller {
@@ -116,6 +109,7 @@ impl Controller {
             trail: wiring.trail,
             tx: inbox.0,
             rx: inbox.1,
+            next_turn: 0,
         }
     }
 
@@ -134,16 +128,16 @@ impl Controller {
                 Some(deadline) => self
                     .rx
                     .recv_timeout(deadline.saturating_duration_since(Instant::now())),
-                None => match self.rx.recv() {
-                    Ok(message) => {
-                        self.step(message);
-                        continue;
-                    }
-                    Err(_) => break,
-                },
+                None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
             };
             match received {
-                Ok(message) => self.step(message),
+                Ok(message) => {
+                    let quitting = matches!(message, Msg::Quit);
+                    self.step(message);
+                    if quitting {
+                        break;
+                    }
+                }
                 Err(RecvTimeoutError::Timeout) => self.expire(),
                 Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -152,17 +146,22 @@ impl Controller {
 
     /// Moves `self.session` out and applies the complete transition table.
     ///
-    /// | session | Main | Release | Video | Cancel | worker result |
+    /// | session | Main/Release | Video | Cancel | matching worker result | liveness/quit |
     /// |---|---|---|---|---|---|
-    /// | Idle | arm if ready | ignore | start recording | ignore | stale |
-    /// | Dictating | ignore | submit audio | notice | drain | ignore |
-    /// | Transcribing | notice | ignore | notice | stale job | paste/idle |
-    /// | Recording | notice | ignore | finalize | abort | ignore |
-    /// | Finalizing | ignore | ignore | ignore | ignore | paste/idle |
-    /// | Pasting | ignore | ignore | ignore | ignore | hide/notice |
+    /// | Idle | arm/ignore | start recording | ignore | stale | quit |
+    /// | Dictating | ignore/submit | notice | drain | ignore | max length/disarm |
+    /// | Transcribing | notice/ignore | notice | cancel/idle | matching job pastes | timeout/quit |
+    /// | Recording | notice/ignore | finalize with `Turn` | abort | ignore | poll child/stop |
+    /// | Finalizing | ignore | ignore | ignore | matching `Turn` pastes | timeout/quit |
+    /// | Pasting | ignore | ignore | ignore | matching `Turn` ends | timeout/quit |
     fn step(&mut self, msg: Msg) {
         let from = session_label(&self.session);
         let message = msg_label(&msg);
+        if matches!(msg, Msg::Quit) {
+            self.quit();
+            self.trail.record(from, message, "Idle");
+            return;
+        }
         match msg {
             Msg::Engine(engine::Event::Progress(progress)) => {
                 let activity = Activity::Preparing {
@@ -184,7 +183,7 @@ impl Controller {
                 let text = error.to_string();
                 self.readiness = Readiness::Broken(error);
                 if matches!(self.session, Session::Idle) {
-                    self.flash(Notice::Unavailable(text));
+                    self.finish(Notice::Unavailable(text));
                 }
             }
             Msg::RetryEngine => {
@@ -215,11 +214,11 @@ impl Controller {
         self.session = match (current, msg) {
             (Session::Idle, Msg::MainPressed) => match &self.readiness {
                 Readiness::Loading(progress) => {
-                    self.flash(Notice::Loading(progress.percent()));
+                    self.finish(Notice::Loading(progress.percent()));
                     Session::Idle
                 }
                 Readiness::Broken(error) => {
-                    self.flash(Notice::Unavailable(error.to_string()));
+                    self.finish(Notice::Unavailable(error.to_string()));
                     Session::Idle
                 }
                 Readiness::Ready => {
@@ -227,7 +226,7 @@ impl Controller {
                         match Mic::open(self.mic_source.clone()) {
                             Ok(mic) => self.mic = Some(mic),
                             Err(error) => {
-                                self.flash(Notice::MicUnavailable(error.to_string()));
+                                self.finish(Notice::MicUnavailable(error.to_string()));
                                 return;
                             }
                         }
@@ -251,27 +250,33 @@ impl Controller {
                     Session::Recording { active }
                 }
                 Err(error) => {
-                    self.flash(Notice::ScreenRecordingFailed(error.to_string()));
+                    self.finish(Notice::ScreenRecordingFailed(error.to_string()));
                     Session::Idle
                 }
             },
             (Session::Dictating { armed, .. }, Msg::MainReleased) => {
                 let audio = self.mic.as_mut().map(|mic| mic.disarm(armed));
-                if audio
-                    .as_ref()
-                    .is_some_and(|audio| audio.seconds() < MIN_DICTATION.as_secs_f32())
-                {
-                    self.flash(Notice::NothingHeard);
+                if audio.as_ref().is_some_and(|audio| {
+                    audio.seconds() < (mic::PREROLL + MIN_DICTATION).as_secs_f32()
+                }) {
+                    self.finish(Notice::NothingHeard);
                     Session::Idle
                 } else if let Some(audio) = audio {
-                    let job = self.engine.submit(audio);
-                    self.show(Activity::Transcribing);
-                    Session::Transcribing {
-                        job,
-                        since: Instant::now(),
+                    match self.engine.submit(audio) {
+                        Ok(job) => {
+                            self.show(Activity::Transcribing);
+                            Session::Transcribing {
+                                job,
+                                since: Instant::now(),
+                            }
+                        }
+                        Err(error) => {
+                            self.finish(Notice::TranscriptionFailed(error.to_string()));
+                            Session::Idle
+                        }
                     }
                 } else {
-                    self.flash(Notice::MicUnavailable("microphone closed".to_owned()));
+                    self.finish(Notice::MicUnavailable("microphone closed".to_owned()));
                     Session::Idle
                 }
             }
@@ -284,7 +289,7 @@ impl Controller {
                 if let Some(mic) = self.mic.as_mut() {
                     let _ = mic.disarm(armed);
                 }
-                self.flash(Notice::Cancelled);
+                self.finish(Notice::Cancelled);
                 Session::Idle
             }
             (state @ Session::Transcribing { .. }, Msg::MainPressed | Msg::VideoPressed) => {
@@ -292,7 +297,7 @@ impl Controller {
                 state
             }
             (Session::Transcribing { .. }, Msg::Cancel) => {
-                self.flash(Notice::Cancelled);
+                self.finish(Notice::Cancelled);
                 Session::Idle
             }
             (
@@ -301,18 +306,13 @@ impl Controller {
             ) if job != done => state,
             (Session::Transcribing { .. }, Msg::Engine(engine::Event::Done(_, result))) => {
                 match result {
-                    Ok(Some(text)) => {
-                        self.paste.paste(text, self.tx.clone());
-                        Session::Pasting {
-                            since: Instant::now(),
-                        }
-                    }
+                    Ok(Some(text)) => self.begin_paste(text),
                     Ok(None) => {
-                        self.flash(Notice::NothingHeard);
+                        self.finish(Notice::NothingHeard);
                         Session::Idle
                     }
                     Err(error) => {
-                        self.flash(Notice::TranscriptionFailed(error.to_string()));
+                        self.finish(Notice::TranscriptionFailed(error.to_string()));
                         Session::Idle
                     }
                 }
@@ -321,43 +321,39 @@ impl Controller {
                 self.flash(Notice::RecordingInProgress);
                 state
             }
-            (Session::Recording { active, .. }, Msg::VideoPressed) => {
-                active.stop(self.tx.clone());
-                self.show(Activity::Finalizing);
-                Session::Finalizing {
-                    since: Instant::now(),
-                }
-            }
+            (Session::Recording { active, .. }, Msg::VideoPressed) => self.begin_finalizing(active),
             (Session::Recording { active, .. }, Msg::Cancel) => {
                 active.abort();
-                self.flash(Notice::Cancelled);
+                self.finish(Notice::Cancelled);
                 Session::Idle
             }
-            (Session::Finalizing { .. }, Msg::Recorder(recorder::Finished(result))) => match result
-            {
-                Ok(recording) => {
-                    let text = self.share.link(&recording).into_text();
-                    self.paste.paste(text, self.tx.clone());
-                    Session::Pasting {
-                        since: Instant::now(),
+            (state @ Session::Finalizing { turn, .. }, Msg::Recorder(done, _)) if turn != done => {
+                state
+            }
+            (Session::Finalizing { .. }, Msg::Recorder(_, recorder::Finished(result))) => {
+                match result {
+                    Ok(recording) => {
+                        let text = self.share.link(&recording).into_text();
+                        self.begin_paste(text)
+                    }
+                    Err(error) => {
+                        self.finish(Notice::ScreenRecordingFailed(error.to_string()));
+                        Session::Idle
                     }
                 }
-                Err(error) => {
-                    self.flash(Notice::ScreenRecordingFailed(error.to_string()));
-                    Session::Idle
-                }
-            },
-            (Session::Pasting { .. }, Msg::Paste(paste::Outcome(result))) => match result {
+            }
+            (state @ Session::Pasting { turn, .. }, Msg::Paste(done, _)) if turn != done => state,
+            (Session::Pasting { .. }, Msg::Paste(_, paste::Outcome(result))) => match result {
                 Ok(()) => {
                     let _ = self.pill.send(PillEvent::Hide);
                     Session::Idle
                 }
                 Err(paste::Error::AccessibilityDenied) => {
-                    self.flash(Notice::Copied);
+                    self.finish(Notice::Copied);
                     Session::Idle
                 }
                 Err(error) => {
-                    self.flash(Notice::PasteFailed(error.to_string()));
+                    self.finish(Notice::PasteFailed(error.to_string()));
                     Session::Idle
                 }
             },
@@ -369,15 +365,22 @@ impl Controller {
         match &self.session {
             Session::Dictating { since, .. } => Some(*since + MAX_DICTATION),
             Session::Transcribing { since, .. } => Some(*since + TRANSCRIBE_TIMEOUT),
-            Session::Finalizing { since } => Some(*since + FINALIZE_TIMEOUT),
-            Session::Pasting { since } => Some(*since + PASTE_TIMEOUT),
-            Session::Idle | Session::Recording { .. } => None,
+            Session::Recording { .. } => Some(Instant::now() + Duration::from_secs(1)),
+            Session::Finalizing { since, .. } => Some(*since + FINALIZE_TIMEOUT),
+            Session::Pasting { since, .. } => Some(*since + PASTE_TIMEOUT),
+            Session::Idle => None,
         }
     }
 
     fn expire(&mut self) {
         if matches!(self.session, Session::Dictating { .. }) {
             self.step(Msg::MainReleased);
+            return;
+        }
+        if let Session::Recording { active } = &mut self.session {
+            if active.try_wait().is_some() {
+                self.step(Msg::VideoPressed);
+            }
             return;
         }
         let what = match self.session {
@@ -388,8 +391,52 @@ impl Controller {
         };
         let from = session_label(&self.session);
         self.session = Session::Idle;
-        self.flash(Notice::TimedOut(what));
+        self.finish(Notice::TimedOut(what));
         self.trail.record(from, "Timeout", "Idle");
+    }
+
+    fn begin_finalizing(&mut self, active: recorder::Active) -> Session {
+        let turn = self.mint_turn();
+        let tx = self.tx.clone();
+        active.stop(move |finished| {
+            let _ = tx.send(Msg::Recorder(turn, finished));
+        });
+        self.show(Activity::Finalizing);
+        Session::Finalizing {
+            turn,
+            since: Instant::now(),
+        }
+    }
+
+    fn begin_paste(&mut self, text: paste::Text) -> Session {
+        let turn = self.mint_turn();
+        let tx = self.tx.clone();
+        self.paste.paste(text, move |outcome| {
+            let _ = tx.send(Msg::Paste(turn, outcome));
+        });
+        Session::Pasting {
+            turn,
+            since: Instant::now(),
+        }
+    }
+
+    fn mint_turn(&mut self) -> Turn {
+        self.next_turn = self.next_turn.wrapping_add(1);
+        Turn(self.next_turn)
+    }
+
+    fn quit(&mut self) {
+        match std::mem::replace(&mut self.session, Session::Idle) {
+            Session::Recording { active } => {
+                let _ = active.stop_blocking();
+            }
+            Session::Dictating { armed, .. } => {
+                if let Some(mic) = self.mic.as_mut() {
+                    let _ = mic.disarm(armed);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn show(&self, activity: Activity) {
@@ -398,6 +445,10 @@ impl Controller {
 
     fn flash(&self, notice: Notice) {
         let _ = self.pill.send(PillEvent::Flash(notice));
+    }
+
+    fn finish(&self, notice: Notice) {
+        let _ = self.pill.send(PillEvent::Finish(notice));
     }
 }
 
@@ -418,13 +469,14 @@ fn msg_label(message: &Msg) -> &'static str {
         Msg::MainReleased => "MainReleased",
         Msg::VideoPressed => "VideoPressed",
         Msg::Cancel => "Cancel",
+        Msg::Quit => "Quit",
         Msg::RetryEngine => "RetryEngine",
         Msg::Engine(engine::Event::Progress(_)) => "EngineProgress",
         Msg::Engine(engine::Event::Ready(_)) => "EngineReady",
         Msg::Engine(engine::Event::Done(_, _)) => "EngineDone",
-        Msg::Recorder(_) => "RecorderFinished",
-        Msg::Paste(paste::Outcome(Ok(()))) => "PasteOk",
-        Msg::Paste(paste::Outcome(Err(_))) => "PasteErr",
+        Msg::Recorder(_, _) => "RecorderFinished",
+        Msg::Paste(_, paste::Outcome(Ok(()))) => "PasteOk",
+        Msg::Paste(_, paste::Outcome(Err(_))) => "PasteErr",
     }
 }
 
@@ -466,8 +518,20 @@ mod tests {
     use crate::paste::Text;
     use std::os::unix::fs::PermissionsExt;
 
-    fn fixture() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.audit/fixtures/sv.wav")
+    fn fixture(dir: &std::path::Path, seconds: f32) -> std::path::PathBuf {
+        let path = dir.join("mic.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: mic::RATE,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for _ in 0..(seconds * mic::RATE as f32).round() as usize {
+            writer.write_sample(0_i16).unwrap();
+        }
+        writer.finalize().unwrap();
+        path
     }
 
     fn temp_dir() -> std::path::PathBuf {
@@ -493,12 +557,14 @@ mod tests {
         script
     }
 
-    fn test_controller() -> (Controller, Receiver<PillEvent>, std::path::PathBuf) {
+    fn test_controller_with_audio(
+        seconds: f32,
+    ) -> (Controller, Receiver<PillEvent>, std::path::PathBuf) {
         let dir = temp_dir();
         let script = recorder_script(&dir);
         let (pill_tx, pill_rx) = std::sync::mpsc::channel();
         let mut controller = Controller::for_test(Wiring {
-            mic: mic::Source::Replay(fixture()),
+            mic: mic::Source::Replay(fixture(&dir, seconds)),
             engine: engine::Loader::Canned("hello world".to_owned()),
             recorder: Recorder::with_program(script, dir.clone()),
             share: Share::LocalFile,
@@ -508,6 +574,10 @@ mod tests {
         });
         controller.readiness = Readiness::Ready;
         (controller, pill_rx, dir)
+    }
+
+    fn test_controller() -> (Controller, Receiver<PillEvent>, std::path::PathBuf) {
+        test_controller_with_audio(1.0)
     }
 
     #[test]
@@ -525,7 +595,11 @@ mod tests {
             Ok(Text::parse("hello world")),
         )));
         assert!(matches!(controller.session, Session::Pasting { .. }));
-        controller.step(Msg::Paste(paste::Outcome(Ok(()))));
+        let turn = match controller.session {
+            Session::Pasting { turn, .. } => turn,
+            _ => panic!("expected paste"),
+        };
+        controller.step(Msg::Paste(turn, paste::Outcome(Ok(()))));
         assert!(matches!(controller.session, Session::Idle));
         assert!(pill.try_iter().any(|event| event == PillEvent::Hide));
     }
@@ -562,7 +636,10 @@ mod tests {
         let (mut controller, _, _) = test_controller();
         controller.step(Msg::MainPressed);
         controller.step(Msg::MainReleased);
-        let stale = controller.engine.submit(crate::mic::Audio16k::silence(0.3));
+        let stale = controller
+            .engine
+            .submit(crate::mic::Audio16k::silence(0.3))
+            .unwrap();
         controller.step(Msg::Engine(engine::Event::Done(stale, Ok(None))));
         assert!(matches!(controller.session, Session::Transcribing { .. }));
 
@@ -604,6 +681,61 @@ mod tests {
             .unwrap()
             .flatten()
             .any(|entry| entry.path().extension().is_some_and(|ext| ext == "mov")));
+    }
+
+    #[test]
+    fn stale_recorder_turn_is_ignored() {
+        let (mut controller, _, _) = test_controller();
+        let current = Turn(2);
+        controller.session = Session::Finalizing {
+            turn: current,
+            since: Instant::now(),
+        };
+        controller.step(Msg::Recorder(
+            Turn(1),
+            recorder::Finished(Err(recorder::Error::NoFile)),
+        ));
+        assert!(matches!(
+            controller.session,
+            Session::Finalizing { turn, .. } if turn == current
+        ));
+    }
+
+    #[test]
+    fn quit_stops_recording_and_keeps_file() {
+        let (mut controller, _, _) = test_controller();
+        controller.step(Msg::VideoPressed);
+        let path = match &controller.session {
+            Session::Recording { active } => active.path().to_path_buf(),
+            _ => panic!("expected recording"),
+        };
+        controller.step(Msg::Quit);
+        assert!(matches!(controller.session, Session::Idle));
+        assert!(path.metadata().is_ok_and(|metadata| metadata.len() > 0));
+    }
+
+    #[test]
+    fn recording_notice_flashes_without_ending_activity() {
+        let (mut controller, pill, _) = test_controller();
+        controller.step(Msg::VideoPressed);
+        controller.step(Msg::MainPressed);
+        let events = pill.try_iter().collect::<Vec<_>>();
+        assert!(events.contains(&PillEvent::Flash(Notice::RecordingInProgress)));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, PillEvent::Finish(_))));
+        controller.step(Msg::Cancel);
+    }
+
+    #[test]
+    fn tap_guard_finishes_nothing_heard() {
+        let (mut controller, pill, _) = test_controller_with_audio(0.4);
+        controller.step(Msg::MainPressed);
+        controller.step(Msg::MainReleased);
+        assert!(matches!(controller.session, Session::Idle));
+        assert!(pill
+            .try_iter()
+            .any(|event| event == PillEvent::Finish(Notice::NothingHeard)));
     }
 
     #[test]

@@ -22,35 +22,39 @@ fn main() {
     };
     let (tx, rx) = std::sync::mpsc::channel::<session::Msg>();
     let (pill_tx, pill_rx) = std::sync::mpsc::channel::<pill::PillEvent>();
+    let controller = session::spawn(
+        session::Wiring {
+            mic,
+            engine: engine::Loader::Models(engine::Models::default_root()),
+            recorder: recorder::Recorder::screencapture(recorder::default_dir()),
+            share: share::Share::LocalFile,
+            paste: paste::Paste::system(),
+            pill: pill_tx,
+            trail: session::Trail::from_env(),
+        },
+        (tx.clone(), rx),
+    );
 
-    tauri::Builder::default()
+    let setup_tx = tx.clone();
+    let app = tauri::Builder::default()
         .plugin(hotkeys::plugin(tx.clone()))
         .setup(move |app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             pill::attach(app.handle(), pill_rx);
-            tray::install(app.handle(), tx.clone())?;
-            session::spawn(
-                session::Wiring {
-                    mic,
-                    engine: engine::Loader::Models(engine::Models::default_root()),
-                    recorder: recorder::Recorder::screencapture(recordings_dir()),
-                    share: share::Share::LocalFile,
-                    paste: paste::Paste::system(),
-                    pill: pill_tx,
-                    trail: session::Trail::from_env(),
-                },
-                (tx, rx),
-            );
-            hotkeys::register_defaults(app.handle())?;
+            tray::install(app.handle(), setup_tx)?;
+            hotkeys::register_defaults(app.handle());
             paste::accessibility_trusted(true);
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("see.computer failed to start");
-}
-
-fn recordings_dir() -> std::path::PathBuf {
-    dirs::video_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("see.computer")
+    let mut controller = Some(controller);
+    app.run(move |_, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            let _ = tx.send(session::Msg::Quit);
+            if let Some(handle) = controller.take() {
+                let _ = handle.join();
+            }
+        }
+    });
 }

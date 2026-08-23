@@ -15,6 +15,10 @@ impl Text {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn literal(raw: String) -> Text {
+        Text(raw)
+    }
 }
 
 pub struct Paste {
@@ -46,10 +50,8 @@ impl Paste {
         Paste { mode: Mode::Dry }
     }
 
-    pub fn paste<M: From<Outcome> + Send + 'static>(&self, text: Text, reply: Sender<M>) {
-        let done = Box::new(move |outcome: Outcome| {
-            let _ = reply.send(outcome.into());
-        });
+    pub fn paste(&self, text: Text, reply: impl FnOnce(Outcome) + Send + 'static) {
+        let done = Box::new(reply);
         match &self.mode {
             Mode::System(tx) => {
                 if let Err(error) = tx.send(Job { text, done }) {
@@ -108,7 +110,13 @@ fn paste_loop(rx: Receiver<Job>) {
         let Some(job) = incoming else {
             continue;
         };
-        let carried_prior = pending.take().and_then(|restore| restore.prior);
+        let carried_prior = pending.take().and_then(|restore| {
+            if pasteboard_change_count() == restore.change_count {
+                restore.prior
+            } else {
+                clipboard.get_text().ok()
+            }
+        });
         if !accessibility_trusted(false) {
             let outcome = match clipboard.set_text(job.text.as_str()) {
                 Ok(()) => Err(Error::AccessibilityDenied),

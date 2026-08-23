@@ -10,7 +10,6 @@ use crate::session::Msg;
 struct StatusItem(MenuItem<tauri::Wry>);
 
 pub fn install(app: &AppHandle, inbox: Sender<Msg>) -> tauri::Result<()> {
-    let _ = app.remove_tray_by_id("main");
     let status = MenuItem::with_id(app, "status", "Loading model…", false, None::<&str>)?;
     let retry = MenuItem::with_id(app, "retry", "Retry model download", true, None::<&str>)?;
     let recordings = MenuItem::with_id(
@@ -66,15 +65,11 @@ pub fn install(app: &AppHandle, inbox: Sender<Msg>) -> tauri::Result<()> {
         .tooltip("see.computer")
         .show_menu_on_left_click(true)
         .menu(&menu)
-        .on_menu_event(move |app, event| match event.id().as_ref() {
+        .on_menu_event(move |_app, event| match event.id().as_ref() {
             "retry" => {
                 let _ = inbox.send(Msg::RetryEngine);
             }
-            "recordings" => open_path(
-                dirs::video_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("see.computer"),
-            ),
+            "recordings" => open_path(crate::recorder::default_dir()),
             "microphone" => open_path(
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
             ),
@@ -84,7 +79,6 @@ pub fn install(app: &AppHandle, inbox: Sender<Msg>) -> tauri::Result<()> {
             "accessibility" => open_path(
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
             ),
-            "quit" => app.exit(0),
             _ => {}
         })
         .build(app)?;

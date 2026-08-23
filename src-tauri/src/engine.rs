@@ -4,6 +4,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
 use crate::mic::Audio16k;
 use crate::paste::Text;
@@ -59,16 +60,36 @@ impl Models {
         fs::create_dir_all(&self.root).map_err(download_error)?;
         let total = CATALOG.iter().map(|file| file.bytes).sum();
         let mut done = 0_u64;
+        let mut last_percent = None;
+        let mut last_report = Instant::now();
+        let mut report = |done: u64, force: bool| {
+            let progress = Progress {
+                phase: Phase::Downloading,
+                done,
+                total: Some(total),
+            };
+            let percent = progress.percent();
+            if force
+                || percent != last_percent
+                || last_report.elapsed() >= Duration::from_millis(250)
+            {
+                last_percent = percent;
+                last_report = Instant::now();
+                on(progress);
+            }
+        };
+
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .timeout_recv_response(Some(Duration::from_secs(30)))
+            .build()
+            .into();
 
         for model in CATALOG {
             let target = self.root.join(model.name);
             if target.metadata().map(|meta| meta.len()).unwrap_or(0) == model.bytes {
                 done += model.bytes;
-                on(Progress {
-                    phase: Phase::Downloading,
-                    done,
-                    total: Some(total),
-                });
+                report(done, true);
                 continue;
             }
 
@@ -77,18 +98,14 @@ impl Models {
             if offset == model.bytes {
                 fs::rename(&part, &target).map_err(download_error)?;
                 done += model.bytes;
-                on(Progress {
-                    phase: Phase::Downloading,
-                    done,
-                    total: Some(total),
-                });
+                report(done, true);
                 continue;
             }
             if offset > model.bytes {
                 fs::remove_file(&part).map_err(download_error)?;
                 offset = 0;
             }
-            let mut request = ureq::get(model.url);
+            let mut request = agent.get(model.url);
             if offset > 0 {
                 request = request.header("Range", &format!("bytes={offset}-"));
             }
@@ -115,11 +132,7 @@ impl Models {
                 }
                 output.write_all(&buffer[..count]).map_err(download_error)?;
                 written += count as u64;
-                on(Progress {
-                    phase: Phase::Downloading,
-                    done: done + written,
-                    total: Some(total),
-                });
+                report(done + written, false);
             }
             output.flush().map_err(download_error)?;
             if written != model.bytes {
@@ -130,6 +143,7 @@ impl Models {
             }
             fs::rename(&part, &target).map_err(download_error)?;
             done += model.bytes;
+            report(done, true);
         }
         Ok(ModelFiles {
             dir: self.root.clone(),
@@ -216,18 +230,15 @@ impl Worker {
                             })
                             .into(),
                         );
-                        parakeet::Parakeet::load(&files).and_then(|mut engine| {
-                            let _ = reply.send(
-                                Event::Progress(Progress {
-                                    phase: Phase::Warming,
-                                    done: 0,
-                                    total: Some(1),
-                                })
-                                .into(),
-                            );
-                            engine.transcribe(&Audio16k::silence(1.0))?;
-                            Ok(Box::new(engine) as Box<dyn Engine>)
-                        })
+                        let _ = reply.send(
+                            Event::Progress(Progress {
+                                phase: Phase::Warming,
+                                done: 0,
+                                total: Some(1),
+                            })
+                            .into(),
+                        );
+                        load(files)
                     })
                 }
                 #[cfg(test)]
@@ -253,11 +264,13 @@ impl Worker {
         Worker { jobs, next: 0 }
     }
 
-    pub fn submit(&mut self, audio: Audio16k) -> JobId {
+    pub fn submit(&mut self, audio: Audio16k) -> Result<JobId, EngineError> {
         self.next = self.next.wrapping_add(1);
         let job = JobId(self.next);
-        let _ = self.jobs.send((job, audio));
-        job
+        self.jobs
+            .send((job, audio))
+            .map_err(|_| EngineError::Inference("transcription worker stopped".to_owned()))?;
+        Ok(job)
     }
 }
 

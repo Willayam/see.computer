@@ -31,9 +31,18 @@ pub fn plugin<R: Runtime>(inbox: Sender<Msg>) -> tauri::plugin::TauriPlugin<R> {
         .build()
 }
 
-pub fn register_defaults(app: &AppHandle) -> Result<(), tauri_plugin_global_shortcut::Error> {
-    app.global_shortcut().register(main_chord())?;
-    app.global_shortcut().register(video_chord())
+pub fn register_defaults(app: &AppHandle) {
+    let shortcuts = app.global_shortcut();
+    let mut failures = Vec::new();
+    if let Err(error) = shortcuts.register(main_chord()) {
+        failures.push(format!("Option+Space ({error})"));
+    }
+    if let Err(error) = shortcuts.register(video_chord()) {
+        failures.push(format!("Command+Shift+Option+Space ({error})"));
+    }
+    if !failures.is_empty() {
+        crate::tray::set_status(app, &format!("Hotkey unavailable: {}", failures.join(", ")));
+    }
 }
 
 pub fn set_cancel_armed(app: &AppHandle, armed: bool) {

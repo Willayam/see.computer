@@ -5,9 +5,10 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub const RATE: u32 = 16_000;
-const PREROLL_MS: usize = 300;
+pub const PREROLL: Duration = Duration::from_millis(300);
 
 #[derive(Clone)]
 pub struct Audio16k(Vec<f32>);
@@ -212,7 +213,7 @@ impl Mic {
 }
 
 fn append_input(shared: &Shared, data: &[f32], rate: u32, channels: u16) {
-    let capacity = rate as usize * channels as usize * PREROLL_MS / 1_000;
+    let capacity = rate as usize * channels as usize * PREROLL.as_millis() as usize / 1_000;
     if let Ok(mut preroll) = shared.preroll.lock() {
         preroll.extend(data.iter().copied());
         while preroll.len() > capacity {
