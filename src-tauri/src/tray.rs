@@ -117,7 +117,7 @@ pub fn install(
     let trigger_help = MenuItem::with_id(
         app,
         "trigger-help",
-        "Hold to talk · add Shift to record",
+        "Hold to talk · hold with Shift to record",
         false,
         None::<&str>,
     )?;

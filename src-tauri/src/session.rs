@@ -13,11 +13,26 @@ use crate::share::Share;
 
 pub enum Session {
     Idle,
-    Dictating { armed: mic::Armed, since: Instant },
-    Transcribing { job: JobId, since: Instant },
-    Recording { active: recorder::Active },
-    Finalizing { turn: Turn, since: Instant },
-    Pasting { turn: Turn, since: Instant },
+    Dictating {
+        armed: mic::Armed,
+        since: Instant,
+    },
+    Transcribing {
+        job: JobId,
+        since: Instant,
+    },
+    Recording {
+        active: recorder::Active,
+        since: Instant,
+    },
+    Finalizing {
+        turn: Turn,
+        since: Instant,
+    },
+    Pasting {
+        turn: Turn,
+        since: Instant,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -36,6 +51,7 @@ pub enum Msg {
     MainPressed,
     MainReleased,
     VideoPressed,
+    VideoReleased,
     Cancel,
     Quit,
     RetryEngine,
@@ -67,6 +83,8 @@ pub fn spawn(wiring: Wiring, inbox: (Sender<Msg>, Receiver<Msg>)) -> std::thread
 pub const MAX_DICTATION: Duration = Duration::from_secs(120);
 /// Captured audio always includes the pre-roll, so this is time after the press.
 pub const MIN_DICTATION: Duration = Duration::from_millis(250);
+/// A shorter hold is an accidental combo tap; the file would be unplayable noise.
+pub const MIN_RECORDING: Duration = Duration::from_millis(600);
 /// While Dictating the controller checks the physical key this often, so a
 /// lost key-up event (the classic hold-to-talk failure) cannot strand it.
 pub const RELEASE_POLL: Duration = Duration::from_millis(200);
@@ -152,12 +170,12 @@ impl Controller {
 
     /// Moves `self.session` out and applies the complete transition table.
     ///
-    /// | session | Main/Release | Video | Cancel | matching worker result | liveness/quit |
+    /// | session | Main press/release | Video press/release | Cancel | matching worker result | liveness/quit |
     /// |---|---|---|---|---|---|
-    /// | Idle | arm/ignore | start recording | ignore | stale | quit |
-    /// | Dictating | ignore/submit | notice | drain | ignore | max length/disarm |
-    /// | Transcribing | notice/ignore | notice | cancel/idle | matching job pastes | timeout/quit |
-    /// | Recording | notice/ignore | finalize with `Turn` | abort | ignore | poll child/stop |
+    /// | Idle | arm/ignore | start/ignore | ignore | stale | quit |
+    /// | Dictating | ignore/submit | notice/ignore | drain | ignore | max length/disarm |
+    /// | Transcribing | notice/ignore | notice/ignore | cancel/idle | matching job pastes | timeout/quit |
+    /// | Recording | notice/ignore | ignore/finalize or abort | abort | ignore | poll child/stop |
     /// | Finalizing | ignore | ignore | ignore | matching `Turn` pastes | timeout/quit |
     /// | Pasting | ignore | ignore | ignore | matching `Turn` ends | timeout/quit |
     fn step(&mut self, msg: Msg) {
@@ -253,7 +271,10 @@ impl Controller {
             (Session::Idle, Msg::VideoPressed) => match self.recorder.start() {
                 Ok(active) => {
                     self.show(Activity::Recording);
-                    Session::Recording { active }
+                    Session::Recording {
+                        active,
+                        since: Instant::now(),
+                    }
                 }
                 Err(error) => {
                     self.finish(Notice::ScreenRecordingFailed(error.to_string()));
@@ -329,7 +350,16 @@ impl Controller {
                 self.flash(Notice::RecordingInProgress);
                 state
             }
-            (Session::Recording { active, .. }, Msg::VideoPressed) => self.begin_finalizing(active),
+            (state @ Session::Recording { .. }, Msg::VideoPressed) => state,
+            (Session::Recording { active, since }, Msg::VideoReleased) => {
+                if since.elapsed() < MIN_RECORDING {
+                    active.abort();
+                    self.finish(Notice::Cancelled);
+                    Session::Idle
+                } else {
+                    self.begin_finalizing(active)
+                }
+            }
             (Session::Recording { active, .. }, Msg::Cancel) => {
                 active.abort();
                 self.finish(Notice::Cancelled);
@@ -389,9 +419,9 @@ impl Controller {
             }
             return;
         }
-        if let Session::Recording { active } = &mut self.session {
+        if let Session::Recording { active, .. } = &mut self.session {
             if active.try_wait().is_some() {
-                self.step(Msg::VideoPressed);
+                self.step(Msg::VideoReleased);
             }
             return;
         }
@@ -439,7 +469,7 @@ impl Controller {
 
     fn quit(&mut self) {
         match std::mem::replace(&mut self.session, Session::Idle) {
-            Session::Recording { active } => {
+            Session::Recording { active, .. } => {
                 let _ = active.stop_blocking();
             }
             Session::Dictating { armed, .. } => {
@@ -480,6 +510,7 @@ fn msg_label(message: &Msg) -> &'static str {
         Msg::MainPressed => "MainPressed",
         Msg::MainReleased => "MainReleased",
         Msg::VideoPressed => "VideoPressed",
+        Msg::VideoReleased => "VideoReleased",
         Msg::Cancel => "Cancel",
         Msg::Quit => "Quit",
         Msg::RetryEngine => "RetryEngine",
@@ -560,7 +591,7 @@ mod tests {
         let script = dir.join("recorder.sh");
         std::fs::write(
             &script,
-            "#!/bin/sh\nout=\nfor arg in \"$@\"; do out=\"$arg\"; done\ntrap 'printf recording > \"$out\"; exit 0' INT\ntouch \"$out.ready\"\nwhile :; do sleep 0.02; done\n",
+            "#!/bin/sh\nout=\nfor arg in \"$@\"; do out=\"$arg\"; done\ntrap 'printf recording > \"$out\"; exit 0' INT\n: > \"$out\"\ntouch \"$out.ready\"\nwhile :; do sleep 0.02; done\n",
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&script).unwrap().permissions();
@@ -682,7 +713,10 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-        controller.step(Msg::VideoPressed);
+        while started.elapsed() < MIN_RECORDING {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        controller.step(Msg::VideoReleased);
         assert!(matches!(controller.session, Session::Finalizing { .. }));
         let finished = controller.rx.recv_timeout(Duration::from_secs(10)).unwrap();
         controller.step(finished);
@@ -693,6 +727,46 @@ mod tests {
             .unwrap()
             .flatten()
             .any(|entry| entry.path().extension().is_some_and(|ext| ext == "mov")));
+    }
+
+    #[test]
+    fn short_recording_hold_is_cancelled_and_deleted() {
+        let (mut controller, pill, _) = test_controller();
+        controller.step(Msg::VideoPressed);
+        let (path, ready) = match &controller.session {
+            Session::Recording { active, .. } => (
+                active.path().to_path_buf(),
+                active.path().with_extension("mov.ready"),
+            ),
+            _ => panic!("expected recording"),
+        };
+        let started = Instant::now();
+        while !ready.exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "recorder script never armed its trap"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(path.exists());
+        if let Session::Recording { since, .. } = &mut controller.session {
+            *since = Instant::now();
+        }
+        controller.step(Msg::VideoReleased);
+        assert!(matches!(controller.session, Session::Idle));
+        assert!(pill
+            .try_iter()
+            .any(|event| event == PillEvent::Finish(Notice::Cancelled)));
+
+        let deletion_deadline = Instant::now() + Duration::from_secs(2);
+        while path.exists() && Instant::now() < deletion_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!path.exists(), "aborted recording was not deleted");
+        assert!(!controller
+            .rx
+            .try_iter()
+            .any(|message| matches!(message, Msg::Recorder(_, _))));
     }
 
     #[test]
@@ -718,7 +792,7 @@ mod tests {
         let (mut controller, _, _) = test_controller();
         controller.step(Msg::VideoPressed);
         let path = match &controller.session {
-            Session::Recording { active } => active.path().to_path_buf(),
+            Session::Recording { active, .. } => active.path().to_path_buf(),
             _ => panic!("expected recording"),
         };
         let ready = path.with_extension("mov.ready");
