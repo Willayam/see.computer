@@ -150,10 +150,16 @@ fn stop_inner(active: Active) -> Finished {
             unsafe {
                 libc::kill(child.id() as libc::pid_t, libc::SIGINT);
             }
-            child.wait().map_err(|source| Error::Spawn {
-                program: PathBuf::from("recorder process"),
-                source,
-            })
+            match wait_bounded(&mut child, Duration::from_secs(5)) {
+                Some(status) => Ok(status),
+                None => {
+                    unsafe {
+                        libc::kill(child.id() as libc::pid_t, libc::SIGKILL);
+                    }
+                    let _ = child.wait();
+                    Err(Error::NoFile)
+                }
+            }
         }
     };
     let result = status
@@ -173,6 +179,19 @@ fn stop_inner(active: Active) -> Finished {
             }
         });
     Finished(result)
+}
+
+/// Reap the child after SIGINT without hanging the caller forever if
+/// `screencapture` wedges. On quit this runs on the controller thread.
+fn wait_bounded(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => return None,
+        }
+    }
 }
 
 fn wait_to_signal(started: Instant) {
