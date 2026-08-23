@@ -2,12 +2,14 @@
 
 Ultra-fast, local-first dictation and instant video links for the Mac. Free and open source (MIT).
 
-Two hotkeys. That is the whole interface.
+Two gestures. That is the whole interface.
 
-| Hotkey | What happens |
+| Gesture | What happens |
 |---|---|
-| Hold **Option+Space**, speak, release | The spoken text is pasted at your cursor, in any app. Audio never leaves the machine. |
-| **Command+Shift+Option+Space** (press to start, press again to stop) | Records the screen and microphone. On stop, a link to the `.mov` is on your clipboard and pasted at your cursor. |
+| Hold **Left Option**, speak, release | The spoken text is pasted at your cursor, in any app. Audio never leaves the machine. |
+| **Left Option+Shift** | Toggles screen and microphone recording. On stop, a link to the `.mov` is on your clipboard and pasted at your cursor. |
+
+Choose Left Option, Right Option, Fn (Globe), or the legacy Option+Space trigger from the tray. Right Option is AltGr on the Swedish keyboard layout. Option+Space and Command+Shift+Option+Space remain available as fallback hotkeys regardless of the selected trigger.
 
 Dictation runs NVIDIA Parakeet TDT 0.6b v3 (INT8, ONNX) on the CPU. On an M3 Max a six-second Swedish sentence comes back in about 155 ms. The model is 670 MB and downloads on first launch into `~/Library/Application Support/see.computer/models/`.
 
@@ -32,6 +34,7 @@ Set `APPLE_SIGNING_IDENTITY` to a signing identity before building so macOS keep
 macOS asks for these the first time each feature runs. The tray menu has a shortcut to each pane under **System Settings > Privacy & Security**.
 
 - **Accessibility**: needed to press Command+V in the app you are dictating into. Without it the text is still on your clipboard and the pill says so.
+- **Input Monitoring**: needed for bare-modifier hold-to-talk and modifier+Shift recording. The legacy Option+Space chord fallback needs only Accessibility.
 - **Microphone**: dictation, and the audio track of recordings.
 - **Screen Recording**: the video hotkey.
 

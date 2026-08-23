@@ -3,3 +3,4 @@ target/
 .audit/
 *.part
 src-tauri/gen/
+/press-mod

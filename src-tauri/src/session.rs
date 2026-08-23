@@ -384,7 +384,7 @@ impl Controller {
 
     fn expire(&mut self) {
         if let Session::Dictating { since, .. } = &self.session {
-            if since.elapsed() >= MAX_DICTATION || !crate::hotkeys::main_key_held() {
+            if since.elapsed() >= MAX_DICTATION || !crate::trigger::dictation_gesture_held() {
                 self.step(Msg::MainReleased);
             }
             return;
