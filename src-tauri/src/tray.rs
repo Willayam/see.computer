@@ -1,75 +1,47 @@
-//! Menu-bar icon and native menu.
+//! Menu-bar icon, and the state the glass panel is drawn from.
 
 use std::sync::{mpsc::Sender, Arc, Mutex};
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::config::Config;
+use crate::menu::{self, Row};
 use crate::pill::{Notice, PillEvent};
 use crate::session::Msg;
 use crate::trigger::Trigger;
 
-struct StatusItem(MenuItem<tauri::Wry>);
+const TRIGGERS: [(&str, Trigger); 4] = [
+    ("trigger-left-option", Trigger::LeftOption),
+    ("trigger-right-option", Trigger::RightOption),
+    ("trigger-fn", Trigger::Fn),
+    ("trigger-chord", Trigger::Chord),
+];
 
-#[derive(Clone)]
-struct TriggerItems {
-    left_option: CheckMenuItem<tauri::Wry>,
-    right_option: CheckMenuItem<tauri::Wry>,
-    function: CheckMenuItem<tauri::Wry>,
-    chord: CheckMenuItem<tauri::Wry>,
-}
+const PANES: [(&str, &str, &str); 4] = [
+    (
+        "microphone",
+        "Microphone",
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+    ),
+    (
+        "screen",
+        "Screen Recording",
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+    ),
+    (
+        "accessibility",
+        "Accessibility",
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+    ),
+    (
+        "input-monitoring",
+        "Input Monitoring",
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+    ),
+];
 
-impl TriggerItems {
-    fn new(app: &AppHandle, selected: Trigger) -> tauri::Result<Self> {
-        Ok(Self {
-            left_option: CheckMenuItem::with_id(
-                app,
-                "trigger-left-option",
-                Trigger::LeftOption.label(),
-                true,
-                selected == Trigger::LeftOption,
-                None::<&str>,
-            )?,
-            right_option: CheckMenuItem::with_id(
-                app,
-                "trigger-right-option",
-                Trigger::RightOption.label(),
-                true,
-                selected == Trigger::RightOption,
-                None::<&str>,
-            )?,
-            function: CheckMenuItem::with_id(
-                app,
-                "trigger-fn",
-                Trigger::Fn.label(),
-                true,
-                selected == Trigger::Fn,
-                None::<&str>,
-            )?,
-            chord: CheckMenuItem::with_id(
-                app,
-                "trigger-chord",
-                Trigger::Chord.label(),
-                true,
-                selected == Trigger::Chord,
-                None::<&str>,
-            )?,
-        })
-    }
-
-    fn set_selected(&self, selected: Trigger) {
-        let _ = self
-            .left_option
-            .set_checked(selected == Trigger::LeftOption);
-        let _ = self
-            .right_option
-            .set_checked(selected == Trigger::RightOption);
-        let _ = self.function.set_checked(selected == Trigger::Fn);
-        let _ = self.chord.set_checked(selected == Trigger::Chord);
-    }
-}
+struct Status(Mutex<String>);
 
 pub fn install(
     app: &AppHandle,
@@ -77,166 +49,125 @@ pub fn install(
     trigger: Arc<Mutex<Trigger>>,
     pill: Sender<PillEvent>,
 ) -> tauri::Result<()> {
-    let status = MenuItem::with_id(app, "status", "Loading model…", false, None::<&str>)?;
-    let retry = MenuItem::with_id(app, "retry", "Retry model download", true, None::<&str>)?;
-    let recordings = MenuItem::with_id(
-        app,
-        "recordings",
-        "Open Recordings Folder",
-        true,
-        None::<&str>,
-    )?;
-    let microphone = MenuItem::with_id(
-        app,
-        "microphone",
-        "Microphone Settings…",
-        true,
-        None::<&str>,
-    )?;
-    let screen = MenuItem::with_id(
-        app,
-        "screen",
-        "Screen Recording Settings…",
-        true,
-        None::<&str>,
-    )?;
-    let accessibility = MenuItem::with_id(
-        app,
-        "accessibility",
-        "Accessibility Settings…",
-        true,
-        None::<&str>,
-    )?;
-    let input_monitoring = MenuItem::with_id(
-        app,
-        "input-monitoring",
-        "Input Monitoring Settings…",
-        true,
-        None::<&str>,
-    )?;
-    let open_at_login_enabled = app.autolaunch().is_enabled().unwrap_or_else(|error| {
-        eprintln!("could not read open-at-login status: {error}");
-        false
-    });
-    let open_at_login = CheckMenuItem::with_id(
-        app,
-        "open-at-login",
-        "Open at Login",
-        true,
-        open_at_login_enabled,
-        None::<&str>,
-    )?;
-    let selected = current_trigger(&trigger);
-    let trigger_help = MenuItem::with_id(
-        app,
-        "trigger-help",
-        "Hold to talk · add Shift to record",
-        false,
-        None::<&str>,
-    )?;
-    let trigger_items = TriggerItems::new(app, selected)?;
-    let trigger_menu = Submenu::with_items(
-        app,
-        "Trigger",
-        true,
-        &[
-            &trigger_help,
-            &trigger_items.left_option,
-            &trigger_items.right_option,
-            &trigger_items.function,
-            &trigger_items.chord,
-        ],
-    )?;
-    let separator_one = PredefinedMenuItem::separator(app)?;
-    let separator_two = PredefinedMenuItem::separator(app)?;
-    let quit = PredefinedMenuItem::quit(app, Some("Quit see.computer"))?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &status,
-            &retry,
-            &recordings,
-            &separator_one,
-            &trigger_menu,
-            &microphone,
-            &screen,
-            &accessibility,
-            &input_monitoring,
-            &open_at_login,
-            &separator_two,
-            &quit,
-        ],
-    )?;
-    app.manage(StatusItem(status));
+    app.manage(Status(Mutex::new("Loading model…".to_owned())));
+
+    let picked_app = app.clone();
+    let picked_trigger = trigger.clone();
+    menu::on_pick(move |id| pick(&picked_app, &inbox, &picked_trigger, &pill, id));
+
+    let opened_app = app.clone();
     let image = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
     TrayIconBuilder::with_id("main")
         .icon(image)
         .icon_as_template(true)
         .tooltip("see.computer")
-        .show_menu_on_left_click(true)
-        .menu(&menu)
-        .on_menu_event(move |app, event| match event.id().as_ref() {
-            "retry" => {
-                let _ = inbox.send(Msg::RetryEngine);
-            }
-            "recordings" => open_path(crate::recorder::default_dir()),
-            "microphone" => open_path(
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
-            ),
-            "screen" => open_path(
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
-            ),
-            "accessibility" => open_path(
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-            ),
-            "input-monitoring" => open_path(
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
-            ),
-            "open-at-login" => {
-                let manager = app.autolaunch();
-                let was_enabled = manager.is_enabled().unwrap_or(open_at_login_enabled);
-                let result = if was_enabled {
-                    manager.disable()
-                } else {
-                    manager.enable()
-                };
-                match result {
-                    Ok(()) => {
-                        let _ = open_at_login.set_checked(!was_enabled);
-                    }
-                    Err(error) => {
-                        eprintln!("could not update open-at-login status: {error}");
-                        let _ = open_at_login.set_checked(was_enabled);
-                    }
-                }
-            }
-            id => {
-                if let Some(selected) = trigger_from_id(id) {
-                    set_trigger(&trigger, selected);
-                    trigger_items.set_selected(selected);
-                    crate::hotkeys::set_chords_registered(app, !selected.uses_tap());
-                    if let Err(error) = (Config { trigger: selected }).save() {
-                        eprintln!("could not save trigger preference: {error}");
-                    }
-                    set_status(app, &selected.gestures());
-                    let _ = pill.send(PillEvent::Flash(Notice::TriggerChanged(
-                        selected.gestures(),
-                    )));
-                }
+        .on_tray_icon_event(move |_tray, event| {
+            if let TrayIconEvent::Click {
+                button_state: MouseButtonState::Down,
+                ..
+            } = event
+            {
+                menu::toggle(&rows(&opened_app, &trigger));
             }
         })
         .build(app)?;
     Ok(())
 }
 
-fn trigger_from_id(id: &str) -> Option<Trigger> {
-    match id {
-        "trigger-left-option" => Some(Trigger::LeftOption),
-        "trigger-right-option" => Some(Trigger::RightOption),
-        "trigger-fn" => Some(Trigger::Fn),
-        "trigger-chord" => Some(Trigger::Chord),
-        _ => None,
+fn rows(app: &AppHandle, trigger: &Mutex<Trigger>) -> Vec<Row> {
+    let selected = current_trigger(trigger);
+    let mut rows = vec![
+        Row::Status(status_text(app)),
+        Row::Separator,
+        Row::Caption("Trigger".to_owned()),
+    ];
+    rows.extend(TRIGGERS.map(|(id, option)| Row::Item {
+        id,
+        label: option.label().to_owned(),
+        checked: Some(option == selected),
+    }));
+    rows.push(Row::Caption("Hold to talk · add Shift to record".to_owned()));
+    rows.push(Row::Separator);
+    rows.push(Row::Item {
+        id: "recordings",
+        label: "Open Recordings Folder".to_owned(),
+        checked: None,
+    });
+    rows.push(Row::Item {
+        id: "open-at-login",
+        label: "Open at Login".to_owned(),
+        checked: Some(open_at_login(app)),
+    });
+    rows.push(Row::Item {
+        id: "retry",
+        label: "Retry Model Download".to_owned(),
+        checked: None,
+    });
+    rows.push(Row::Separator);
+    rows.push(Row::Caption("Permissions".to_owned()));
+    rows.extend(PANES.map(|(id, label, _)| Row::Item {
+        id,
+        label: format!("{label}…"),
+        checked: None,
+    }));
+    rows.push(Row::Separator);
+    rows.push(Row::Item {
+        id: "quit",
+        label: "Quit see.computer".to_owned(),
+        checked: None,
+    });
+    rows
+}
+
+fn pick(
+    app: &AppHandle,
+    inbox: &Sender<Msg>,
+    trigger: &Mutex<Trigger>,
+    pill: &Sender<PillEvent>,
+    id: &str,
+) {
+    if let Some((_, _, pane)) = PANES.iter().find(|(pane_id, _, _)| *pane_id == id) {
+        open_path(pane);
+        return;
     }
+    if let Some((_, selected)) = TRIGGERS.iter().find(|(option_id, _)| *option_id == id) {
+        set_trigger(trigger, *selected);
+        crate::hotkeys::set_chords_registered(app, !selected.uses_tap());
+        if let Err(error) = (Config { trigger: *selected }).save() {
+            eprintln!("could not save trigger preference: {error}");
+        }
+        set_status(app, &selected.gestures());
+        let _ = pill.send(PillEvent::Flash(Notice::TriggerChanged(
+            selected.gestures(),
+        )));
+        return;
+    }
+    match id {
+        "retry" => {
+            let _ = inbox.send(Msg::RetryEngine);
+        }
+        "recordings" => open_path(crate::recorder::default_dir()),
+        "open-at-login" => {
+            let manager = app.autolaunch();
+            let result = if open_at_login(app) {
+                manager.disable()
+            } else {
+                manager.enable()
+            };
+            if let Err(error) = result {
+                eprintln!("could not update open-at-login status: {error}");
+            }
+        }
+        "quit" => app.exit(0),
+        _ => {}
+    }
+}
+
+fn open_at_login(app: &AppHandle) -> bool {
+    app.autolaunch().is_enabled().unwrap_or_else(|error| {
+        eprintln!("could not read open-at-login status: {error}");
+        false
+    })
 }
 
 fn current_trigger(trigger: &Mutex<Trigger>) -> Trigger {
@@ -253,12 +184,28 @@ fn set_trigger(trigger: &Mutex<Trigger>, selected: Trigger) {
     }
 }
 
+fn status_text(app: &AppHandle) -> String {
+    match app.try_state::<Status>() {
+        Some(status) => match status.0.lock() {
+            Ok(text) => text.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        },
+        None => String::new(),
+    }
+}
+
 fn open_path(path: impl AsRef<std::ffi::OsStr>) {
     let _ = std::process::Command::new("open").arg(path).spawn();
 }
 
+/// Main thread only, from the pill's status stream.
 pub fn set_status(app: &AppHandle, text: &str) {
-    if let Some(status) = app.try_state::<StatusItem>() {
-        let _ = status.0.set_text(text);
+    let Some(status) = app.try_state::<Status>() else {
+        return;
+    };
+    match status.0.lock() {
+        Ok(mut stored) => *stored = text.to_owned(),
+        Err(poisoned) => *poisoned.into_inner() = text.to_owned(),
     }
+    menu::set_status(text);
 }

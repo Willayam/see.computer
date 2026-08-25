@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod engine;
 mod hotkeys;
+mod menu;
 mod mic;
 mod paste;
 mod pill;
