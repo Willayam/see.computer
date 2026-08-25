@@ -7,13 +7,13 @@ Two gestures. That is the whole interface.
 | Gesture | What happens |
 |---|---|
 | Hold **Left Option**, speak, release | The spoken text is pasted at your cursor, in any app. Audio never leaves the machine. |
-| **Left Option+Shift** | Press once to start a screen and microphone recording, press again to stop (it is a toggle, not hold-to-record). On stop, a link to the `.mov` is on your clipboard and pasted at your cursor. |
+| **Left Option+Shift** | Press once to start a screen and microphone recording, press again to stop (it is a toggle, not hold-to-record). On stop, the recording is packaged into an agent-readable clip folder and the path to its `clip.md` is on your clipboard and pasted at your cursor. |
 
 Choose Left Option, Right Option, Fn (Globe), or the legacy Option+Space trigger from the tray. Right Option is AltGr on the Swedish keyboard layout. The recording gesture always follows the trigger: whatever key you pick, add Shift to record. The legacy Option+Space and Command+Shift+Option+Space chords are active only when the Option+Space trigger is selected.
 
 Dictation runs NVIDIA Parakeet TDT 0.6b v3 (INT8, ONNX) on the CPU. On an M3 Max a six-second Swedish sentence comes back in about 155 ms. The model is 670 MB and downloads on first launch into `~/Library/Application Support/see.computer/models/`.
 
-The link is a `file://` URL in v1. Recordings land in `~/Movies/see.computer/`.
+Recordings land in `~/Movies/see.computer/`. Next to each `<stamp>.mov` the app writes `<stamp>/` containing `clip.md` (a timestamped transcript with a screen frame inline at each sentence), `transcript.json` (the same segments, machine-readable), and `frames/` (JPEG stills, at most 16, extracted with AVFoundation). Paste the `clip.md` path into any agent that can read files and it can read what was said and open the exact frames where it was said, without decoding the video. If transcription or packaging fails or times out, the plain `file://` link to the `.mov` is pasted instead. `see-computer clip <mov>` (the binary inside the bundle) rebuilds the folder for any existing recording and prints the `clip.md` path.
 
 ## Dictation history
 

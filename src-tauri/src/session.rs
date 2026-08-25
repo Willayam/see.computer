@@ -1,9 +1,11 @@
 //! The single-owner state machine for dictation, recording, and paste.
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
+use crate::clip;
 use crate::engine::{self, EngineError, JobId, Progress};
 use crate::mic::{self, Mic};
 use crate::paste;
@@ -27,6 +29,7 @@ pub enum Session {
     Transcribing { job: JobId, since: Instant },
     Recording { active: recorder::Active },
     Finalizing { turn: Turn, since: Instant },
+    Packaging { turn: Turn, job: Option<JobId>, path: PathBuf, since: Instant },
     Pasting { turn: Turn, since: Instant },
 }
 
@@ -51,6 +54,8 @@ pub enum Msg {
     RetryEngine,
     Engine(engine::Event),
     Recorder(Turn, recorder::Finished),
+    ClipAudio(Turn, Option<mic::Audio16k>),
+    Packaged(Turn, Result<PathBuf, String>),
     Paste(Turn, paste::Outcome),
 }
 
@@ -86,6 +91,9 @@ pub const MIN_DICTATION: Duration = Duration::from_millis(250);
 pub const RELEASE_POLL: Duration = Duration::from_millis(200);
 pub const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const FINALIZE_TIMEOUT: Duration = Duration::from_secs(8);
+/// Transcription runs about 25x realtime, so this covers a half-hour recording;
+/// hitting it pastes the plain video link instead of losing the recording.
+pub const PACKAGE_TIMEOUT: Duration = Duration::from_secs(90);
 pub const PASTE_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct Controller {
@@ -176,7 +184,8 @@ impl Controller {
     /// | Dictating | ignore/submit | notice | drain | ignore | max length/disarm |
     /// | Transcribing | notice/ignore | notice | cancel/idle | matching job pastes | timeout/quit |
     /// | Recording | notice/ignore | finalize with `Turn` | abort | ignore | poll child/stop |
-    /// | Finalizing | ignore | ignore | ignore | matching `Turn` pastes | timeout/quit |
+    /// | Finalizing | ignore | ignore | ignore | matching `Turn` packages | timeout/quit |
+    /// | Packaging | notice | notice | paste plain link | matching `Turn` advances | timeout pastes plain link |
     /// | Pasting | ignore | ignore | ignore | matching `Turn` ends | timeout/quit |
     fn step(&mut self, msg: Msg) {
         let from = session_label(&self.session);
@@ -339,7 +348,7 @@ impl Controller {
                 Msg::Engine(engine::Event::Done(done, _result)),
             ) if job != done => state,
             (Session::Transcribing { .. }, Msg::Engine(engine::Event::Done(_, result))) => {
-                match result {
+                match result.map(|transcription| transcription.text) {
                     Ok(Some(text)) => {
                         self.history.record(text.as_str());
                         self.begin_paste(text.followed_by_space(), paste::Clipboard::RestorePrior)
@@ -369,14 +378,56 @@ impl Controller {
             }
             (Session::Finalizing { .. }, Msg::Recorder(_, recorder::Finished(result))) => {
                 match result {
-                    Ok(recording) => {
-                        let text = self.share.link(&recording).into_text();
-                        self.begin_paste(text, paste::Clipboard::Keep)
-                    }
+                    Ok(recording) => self.begin_packaging(recording),
                     Err(error) => {
                         self.finish(Notice::ScreenRecordingFailed(error.to_string()));
                         Session::Idle
                     }
+                }
+            }
+            (state @ Session::Packaging { .. }, Msg::MainPressed | Msg::VideoPressed) => {
+                self.flash(Notice::StillTranscribing);
+                state
+            }
+            (Session::Packaging { path, .. }, Msg::Cancel) => {
+                let text = self.share.link(&recorder::Recording { path }).into_text();
+                self.begin_paste(text, paste::Clipboard::Keep)
+            }
+            (Session::Packaging { turn, job, path, since }, Msg::ClipAudio(done, audio)) => {
+                if done != turn {
+                    Session::Packaging { turn, job, path, since }
+                } else {
+                    match audio.map(|audio| self.engine.submit(audio)) {
+                        Some(Ok(job)) => {
+                            self.show(Activity::Transcribing);
+                            Session::Packaging { turn, job: Some(job), path, since }
+                        }
+                        Some(Err(_)) | None => {
+                            self.spawn_package(turn, path, engine::Transcription::empty(), since)
+                        }
+                    }
+                }
+            }
+            (
+                Session::Packaging { turn, job, path, since },
+                Msg::Engine(engine::Event::Done(done, result)),
+            ) => {
+                if job != Some(done) {
+                    Session::Packaging { turn, job, path, since }
+                } else {
+                    let transcription = result.unwrap_or_else(|_| engine::Transcription::empty());
+                    self.spawn_package(turn, path, transcription, since)
+                }
+            }
+            (Session::Packaging { turn, job, path, since }, Msg::Packaged(done, result)) => {
+                if done != turn {
+                    Session::Packaging { turn, job, path, since }
+                } else {
+                    let text = match result {
+                        Ok(markdown) => paste::Text::literal(markdown.display().to_string()),
+                        Err(_) => self.share.link(&recorder::Recording { path }).into_text(),
+                    };
+                    self.begin_paste(text, paste::Clipboard::Keep)
                 }
             }
             (state @ Session::Pasting { turn, .. }, Msg::Paste(done, _)) if turn != done => state,
@@ -406,6 +457,7 @@ impl Controller {
             Session::Transcribing { since, .. } => Some(*since + TRANSCRIBE_TIMEOUT),
             Session::Recording { .. } => Some(Instant::now() + Duration::from_secs(1)),
             Session::Finalizing { since, .. } => Some(*since + FINALIZE_TIMEOUT),
+            Session::Packaging { since, .. } => Some(*since + PACKAGE_TIMEOUT),
             Session::Pasting { since, .. } => Some(*since + PASTE_TIMEOUT),
             Session::Idle => None,
         }
@@ -422,6 +474,16 @@ impl Controller {
             if active.try_wait().is_some() {
                 self.step(Msg::VideoPressed);
             }
+            return;
+        }
+        if let Session::Packaging { path, .. } = &self.session {
+            let from = session_label(&self.session);
+            let text = self
+                .share
+                .link(&recorder::Recording { path: path.clone() })
+                .into_text();
+            self.session = self.begin_paste(text, paste::Clipboard::Keep);
+            self.trail.record(from, "Timeout", session_label(&self.session));
             return;
         }
         let what = match self.session {
@@ -447,6 +509,44 @@ impl Controller {
             turn,
             since: Instant::now(),
         }
+    }
+
+    /// Kick off the clip folder for a finished recording: pull the audio out
+    /// of the movie on a worker thread, transcribe it, then write frames and
+    /// markdown. Every failure path degrades to pasting the plain video link.
+    fn begin_packaging(&mut self, recording: recorder::Recording) -> Session {
+        let turn = self.mint_turn();
+        let since = Instant::now();
+        if matches!(self.readiness, Readiness::Ready) {
+            let tx = self.tx.clone();
+            let mov = recording.path.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(Msg::ClipAudio(turn, clip::extract_audio(&mov)));
+            });
+            self.show(Activity::Finalizing);
+            Session::Packaging { turn, job: None, path: recording.path, since }
+        } else {
+            self.spawn_package(turn, recording.path, engine::Transcription::empty(), since)
+        }
+    }
+
+    fn spawn_package(
+        &mut self,
+        turn: Turn,
+        path: PathBuf,
+        transcription: engine::Transcription,
+        since: Instant,
+    ) -> Session {
+        let tx = self.tx.clone();
+        let mov = path.clone();
+        std::thread::spawn(move || {
+            let result = clip::package(&mov, &transcription)
+                .map(|packaged| packaged.markdown)
+                .map_err(|error| error.to_string());
+            let _ = tx.send(Msg::Packaged(turn, result));
+        });
+        self.show(Activity::Finalizing);
+        Session::Packaging { turn, job: None, path, since }
     }
 
     fn begin_paste(&mut self, text: paste::Text, clipboard: paste::Clipboard) -> Session {
@@ -507,6 +607,7 @@ fn session_label(session: &Session) -> &'static str {
         Session::Transcribing { .. } => "Transcribing",
         Session::Recording { .. } => "Recording",
         Session::Finalizing { .. } => "Finalizing",
+        Session::Packaging { .. } => "Packaging",
         Session::Pasting { .. } => "Pasting",
     }
 }
@@ -523,6 +624,9 @@ fn msg_label(message: &Msg) -> &'static str {
         Msg::Engine(engine::Event::Ready(_)) => "EngineReady",
         Msg::Engine(engine::Event::Done(_, _)) => "EngineDone",
         Msg::Recorder(_, _) => "RecorderFinished",
+        Msg::ClipAudio(_, _) => "ClipAudio",
+        Msg::Packaged(_, Ok(_)) => "PackagedOk",
+        Msg::Packaged(_, Err(_)) => "PackagedErr",
         Msg::Paste(_, paste::Outcome(Ok(()))) => "PasteOk",
         Msg::Paste(_, paste::Outcome(Err(_))) => "PasteErr",
     }
@@ -642,7 +746,10 @@ mod tests {
         };
         controller.step(Msg::Engine(engine::Event::Done(
             job,
-            Ok(Text::parse("hello world")),
+            Ok(engine::Transcription {
+                text: Text::parse("hello world"),
+                segments: Vec::new(),
+            }),
         )));
         assert!(matches!(controller.session, Session::Pasting { .. }));
         let turn = match controller.session {
@@ -690,7 +797,10 @@ mod tests {
             .engine
             .submit(crate::mic::Audio16k::silence(0.3))
             .unwrap();
-        controller.step(Msg::Engine(engine::Event::Done(stale, Ok(None))));
+        controller.step(Msg::Engine(engine::Event::Done(
+            stale,
+            Ok(engine::Transcription::empty()),
+        )));
         assert!(matches!(controller.session, Session::Transcribing { .. }));
 
         let (mut controller, _, _) = test_controller();
@@ -724,7 +834,13 @@ mod tests {
         assert!(matches!(controller.session, Session::Finalizing { .. }));
         let finished = controller.rx.recv_timeout(Duration::from_secs(10)).unwrap();
         controller.step(finished);
-        assert!(matches!(controller.session, Session::Pasting { .. }));
+        assert!(matches!(controller.session, Session::Packaging { .. }));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !matches!(controller.session, Session::Pasting { .. }) {
+            assert!(Instant::now() < deadline, "never reached Pasting");
+            let message = controller.rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            controller.step(message);
+        }
         controller.step(controller.rx.recv_timeout(Duration::from_secs(5)).unwrap());
         assert!(matches!(controller.session, Session::Idle));
         assert!(std::fs::read_dir(dir)
