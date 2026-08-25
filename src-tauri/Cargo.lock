@@ -3571,6 +3571,7 @@ dependencies = [
  "hound",
  "libc",
  "objc2",
+ "ort",
  "parakeet-rs",
  "serde",
  "serde_json",

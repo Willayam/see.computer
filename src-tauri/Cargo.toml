@@ -28,6 +28,7 @@ url = "2"
 libc = "0.2"
 chrono = "0.4"
 parakeet-rs = "0.3.7"
+ort = "=2.0.0-rc.13"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
