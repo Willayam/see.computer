@@ -88,12 +88,14 @@ fn main() {
         .setup(move |app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             pill::attach(app.handle(), pill_rx);
-            trigger::set_app_handle(app.handle().clone());
             tray::install(app.handle(), setup_tx, setup_trigger.clone(), tray_pill_tx)?;
             let selected = *setup_trigger
                 .lock()
                 .expect("trigger mutex poisoned at startup");
-            hotkeys::set_chords_registered(app.handle(), !selected.uses_tap());
+            if let Err(error) = hotkeys::set_chords_registered(app.handle(), !selected.uses_tap())
+            {
+                eprintln!("hotkey unavailable at startup: {error}");
+            }
             paste::accessibility_trusted(true);
             trigger::spawn_watcher(setup_trigger, setup_watcher_tx);
             Ok(())

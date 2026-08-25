@@ -124,17 +124,6 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
                 PillEvent::Finish(_) | PillEvent::Hide => current = None,
                 PillEvent::Flash(_) => {}
             }
-            let status = match &event {
-                PillEvent::Flash(Notice::TriggerChanged(text)) => text.clone(),
-                _ => match current {
-                    Some(Activity::Listening) => "Listening".to_owned(),
-                    Some(Activity::Transcribing) => "Transcribing".to_owned(),
-                    Some(Activity::Recording) => "Recording".to_owned(),
-                    Some(Activity::Finalizing) => "Saving recording".to_owned(),
-                    Some(Activity::Preparing { phase, pct }) => preparing_text(phase, pct),
-                    None => "Ready".to_owned(),
-                },
-            };
             let wire = match event {
                 PillEvent::Show(activity) => Wire::Show(activity),
                 PillEvent::Flash(notice) => Wire::Flash {
@@ -171,21 +160,10 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
                 if armed_changed {
                     crate::hotkeys::set_cancel_armed(&main_app, armed);
                 }
-                crate::tray::set_status(&main_app, &status);
             });
             let _ = app.emit_to("pill", "pill", wire);
         }
     });
-}
-
-fn preparing_text(phase: crate::engine::Phase, pct: Option<u8>) -> String {
-    use crate::engine::Phase;
-    match (phase, pct) {
-        (Phase::Downloading, Some(pct)) => format!("Downloading model {pct}%"),
-        (Phase::Downloading, None) => "Downloading model".to_owned(),
-        (Phase::Loading, _) => "Loading model".to_owned(),
-        (Phase::Warming, _) => "Warming up".to_owned(),
-    }
 }
 
 /// Ordered in once with `orderFrontRegardless` and never hidden again; Tauri's

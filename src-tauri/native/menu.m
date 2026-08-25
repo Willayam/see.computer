@@ -13,15 +13,16 @@ typedef struct {
     int checked;
 } SeeMenuRow;
 
-enum { SeeRowItem = 0, SeeRowStatus = 1, SeeRowCaption = 2, SeeRowSeparator = 3 };
+enum { SeeRowItem = 0, SeeRowSection = 1, SeeRowHint = 2, SeeRowSeparator = 3 };
 
 typedef void (*SeeMenuPick)(const char *);
 
 static const CGFloat kPanelWidth = 268.0;
 static const CGFloat kItemHeight = 28.0;
-static const CGFloat kCaptionHeight = 22.0;
+static const CGFloat kSectionHeight = 34.0;
+static const CGFloat kHintHeight = 22.0;
 static const CGFloat kSeparatorHeight = 11.0;
-static const CGFloat kPadding = 10.0;
+static const CGFloat kPadding = 8.0;
 static const CGFloat kCornerRadius = 18.0;
 static const CGFloat kMenuBarGap = 6.0;
 
@@ -42,7 +43,7 @@ static const CGFloat kMenuBarGap = 6.0;
 @property(strong) NSTextField *label;
 @property(strong) NSImageView *check;
 @property(strong) NSColor *restingColor;
-@property(assign) BOOL highlighted;
+@property(nonatomic, assign) BOOL highlighted;
 @end
 
 @implementation SeeMenuRowView {
@@ -52,12 +53,18 @@ static const CGFloat kMenuBarGap = 6.0;
 - (void)updateTrackingAreas {
     [super updateTrackingAreas];
     if (_tracking) [self removeTrackingArea:_tracking];
+    NSPoint mouse = [self convertPoint:[self.window convertPointFromScreen:NSEvent.mouseLocation]
+                              fromView:nil];
+    BOOL inside = self.window != nil && NSPointInRect(mouse, self.bounds);
+    NSTrackingAreaOptions options = NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways;
+    if (inside) options |= NSTrackingAssumeInside;
     _tracking = [[NSTrackingArea alloc]
         initWithRect:self.bounds
-             options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways
+             options:options
                owner:self
             userInfo:nil];
     [self addTrackingArea:_tracking];
+    self.highlighted = inside && self.rowId != nil;
 }
 
 - (void)setHighlighted:(BOOL)highlighted {
@@ -86,6 +93,17 @@ static const CGFloat kMenuBarGap = 6.0;
     [fill fill];
 }
 
+// The app is never active and the panel never becomes key, so every click on a
+// row is a first-mouse click, which NSView drops by default. Claiming it here,
+// and claiming the mouseDown that would otherwise walk up the responder chain,
+// is what makes AppKit deliver the matching mouseUp back to this view.
+- (BOOL)acceptsFirstMouse:(NSEvent *__unused)event {
+    return YES;
+}
+
+- (void)mouseDown:(NSEvent *__unused)event {
+}
+
 - (void)mouseUp:(NSEvent *__unused)event {
     if (!self.rowId) return;
     extern void see_menu_pick(NSString *identifier);
@@ -94,13 +112,19 @@ static const CGFloat kMenuBarGap = 6.0;
 @end
 
 static SeeMenuPanel *gPanel = nil;
+static NSView *gShell = nil;
+static NSView *gBody = nil;
 static SeeMenuPick gPick = NULL;
 static id gGlobalMonitor = nil;
 static id gLocalMonitor = nil;
-static NSTextField *gStatusField = nil;
 
+// The pick arrives inside -[SeeMenuRowView mouseUp:]. Redrawing there would
+// free the view AppKit is still dispatching into, so the handler runs on the
+// next turn of the loop instead.
 void see_menu_pick(NSString *identifier) {
-    if (gPick) gPick(identifier.UTF8String);
+    if (!gPick) return;
+    NSString *held = [identifier copy];
+    dispatch_async(dispatch_get_main_queue(), ^{ gPick(held.UTF8String); });
 }
 
 static NSTextField *label_field(NSString *text, NSFont *font, NSColor *color) {
@@ -114,19 +138,18 @@ static NSTextField *label_field(NSString *text, NSFont *font, NSColor *color) {
 static CGFloat row_height(const SeeMenuRow *row) {
     switch (row->kind) {
         case SeeRowSeparator: return kSeparatorHeight;
-        case SeeRowCaption: return kCaptionHeight;
-        case SeeRowStatus: return kItemHeight;
+        case SeeRowSection: return kSectionHeight;
+        case SeeRowHint: return kHintHeight;
         default: return kItemHeight;
     }
 }
 
-static NSView *build_content(const SeeMenuRow *rows, int count, CGFloat *out_height) {
+static CGFloat fill_body(const SeeMenuRow *rows, int count) {
     CGFloat height = kPadding * 2;
     for (int i = 0; i < count; i++) height += row_height(&rows[i]);
-    *out_height = height;
 
-    NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, kPanelWidth, height)];
-    gStatusField = nil;
+    gBody.frame = NSMakeRect(0, 0, kPanelWidth, height);
+    [gBody.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
     CGFloat y = height - kPadding;
     for (int i = 0; i < count; i++) {
         const SeeMenuRow *row = &rows[i];
@@ -135,11 +158,11 @@ static NSView *build_content(const SeeMenuRow *rows, int count, CGFloat *out_hei
         NSRect frame = NSMakeRect(kPadding, y, kPanelWidth - kPadding * 2, h);
 
         if (row->kind == SeeRowSeparator) {
-            NSView *line = [[NSView alloc]
-                initWithFrame:NSMakeRect(kPadding + 6, y + h / 2, kPanelWidth - kPadding * 2 - 12, 1)];
-            line.wantsLayer = YES;
-            line.layer.backgroundColor = [NSColor.separatorColor colorWithAlphaComponent:0.55].CGColor;
-            [content addSubview:line];
+            NSBox *line = [[NSBox alloc]
+                initWithFrame:NSMakeRect(kPadding + 6, y + (h - 1) / 2,
+                                         kPanelWidth - kPadding * 2 - 12, 1)];
+            line.boxType = NSBoxSeparator;
+            [gBody addSubview:line];
             continue;
         }
 
@@ -151,19 +174,19 @@ static NSView *build_content(const SeeMenuRow *rows, int count, CGFloat *out_hei
         // One label column for every row, checked or not, so the left edge of
         // the panel reads as a single line and the checkmark hangs beside it.
         const CGFloat textLeft = 26;
-        if (row->kind == SeeRowCaption) {
+        if (row->kind == SeeRowSection) {
             field = label_field(text,
                                 [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold],
                                 NSColor.tertiaryLabelColor);
-        } else if (row->kind == SeeRowStatus) {
+        } else if (row->kind == SeeRowHint) {
             field = label_field(text,
-                                [NSFont systemFontOfSize:13 weight:NSFontWeightMedium],
-                                NSColor.secondaryLabelColor);
-            gStatusField = field;
+                                [NSFont systemFontOfSize:11 weight:NSFontWeightRegular],
+                                NSColor.tertiaryLabelColor);
         } else {
             field = label_field(text, [NSFont systemFontOfSize:13], NSColor.labelColor);
         }
-        field.frame = NSMakeRect(textLeft, (h - 17) / 2, NSWidth(frame) - textLeft - 8, 17);
+        CGFloat labelY = row->kind == SeeRowSection ? 0 : (h - 17) / 2;
+        field.frame = NSMakeRect(textLeft, labelY, NSWidth(frame) - textLeft - 8, 17);
         view.label = field;
         view.restingColor = field.textColor;
         [view addSubview:field];
@@ -177,9 +200,9 @@ static NSView *build_content(const SeeMenuRow *rows, int count, CGFloat *out_hei
             view.check = check;
             [view addSubview:check];
         }
-        [content addSubview:view];
+        [gBody addSubview:view];
     }
-    return content;
+    return height;
 }
 
 static void stop_monitors(void) {
@@ -197,9 +220,16 @@ static NSTimeInterval gHiddenAt = 0;
 
 void see_menu_hide(void) {
     stop_monitors();
-    gStatusField = nil;
     gHiddenAt = NSDate.timeIntervalSinceReferenceDate;
     [gPanel orderOut:nil];
+}
+
+/// Whether the pointer is over the panel. Which window a click is delivered to
+/// depends on routing the panel cannot see, and a redraw under the cursor is
+/// enough to get that wrong. The rectangle is not in doubt.
+static BOOL pointer_over_panel(void) {
+    return gPanel != nil && gPanel.isVisible &&
+           NSPointInRect(NSEvent.mouseLocation, gPanel.frame);
 }
 
 static void start_monitors(void) {
@@ -207,11 +237,13 @@ static void start_monitors(void) {
     NSEventMask mask = NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown;
     gGlobalMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:mask
                                                             handler:^(NSEvent *__unused event) {
-                                                              see_menu_hide();
+                                                              if (!pointer_over_panel()) see_menu_hide();
                                                             }];
     gLocalMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:mask
                                                           handler:^NSEvent *(NSEvent *event) {
-                                                            if (event.window != gPanel) see_menu_hide();
+                                                            if (event.window != gPanel && !pointer_over_panel()) {
+                                                              see_menu_hide();
+                                                            }
                                                             return event;
                                                           }];
 }
@@ -224,35 +256,28 @@ void see_menu_set_callback(SeeMenuPick pick) {
     gPick = pick;
 }
 
-void see_menu_set_status(const char *text) {
-    if (gStatusField && text) gStatusField.stringValue = @(text);
-}
+static void ensure_panel(void) {
+    if (gPanel) return;
 
-void see_menu_show(const SeeMenuRow *rows, int count) {
-    CGFloat height = 0;
-    NSView *content = build_content(rows, count, &height);
+    NSRect frame = NSMakeRect(0, 0, kPanelWidth, 1);
+    gPanel = [[SeeMenuPanel alloc]
+        initWithContentRect:frame
+                  styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    gPanel.floatingPanel = YES;
+    gPanel.becomesKeyOnlyIfNeeded = YES;
+    gPanel.hidesOnDeactivate = NO;
+    gPanel.opaque = NO;
+    gPanel.backgroundColor = NSColor.clearColor;
+    gPanel.hasShadow = YES;
+    gPanel.level = NSPopUpMenuWindowLevel;
+    gPanel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
+                                NSWindowCollectionBehaviorFullScreenAuxiliary |
+                                NSWindowCollectionBehaviorIgnoresCycle;
+    gPanel.animationBehavior = NSWindowAnimationBehaviorUtilityWindow;
 
-    if (!gPanel) {
-        gPanel = [[SeeMenuPanel alloc]
-            initWithContentRect:NSMakeRect(0, 0, kPanelWidth, height)
-                      styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
-                        backing:NSBackingStoreBuffered
-                          defer:NO];
-        gPanel.floatingPanel = YES;
-        gPanel.becomesKeyOnlyIfNeeded = YES;
-        gPanel.hidesOnDeactivate = NO;
-        gPanel.opaque = NO;
-        gPanel.backgroundColor = NSColor.clearColor;
-        gPanel.hasShadow = YES;
-        gPanel.level = NSPopUpMenuWindowLevel;
-        gPanel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
-                                    NSWindowCollectionBehaviorFullScreenAuxiliary |
-                                    NSWindowCollectionBehaviorIgnoresCycle;
-        gPanel.animationBehavior = NSWindowAnimationBehaviorUtilityWindow;
-    }
-
-    NSRect frame = NSMakeRect(0, 0, kPanelWidth, height);
-    NSView *shell;
+    gBody = [[NSView alloc] initWithFrame:frame];
     if (@available(macOS 26.0, *)) {
         NSGlassEffectView *glass = [[NSGlassEffectView alloc] initWithFrame:frame];
         glass.cornerRadius = kCornerRadius;
@@ -260,8 +285,8 @@ void see_menu_show(const SeeMenuRow *rows, int count) {
         if (@available(macOS 27.0, *)) {
             glass.effectIsInteractive = YES;
         }
-        glass.contentView = content;
-        shell = glass;
+        glass.contentView = gBody;
+        gShell = glass;
     } else {
         NSVisualEffectView *blur = [[NSVisualEffectView alloc] initWithFrame:frame];
         blur.material = NSVisualEffectMaterialMenu;
@@ -270,11 +295,23 @@ void see_menu_show(const SeeMenuRow *rows, int count) {
         blur.wantsLayer = YES;
         blur.layer.cornerRadius = kCornerRadius;
         blur.layer.masksToBounds = YES;
-        content.frame = blur.bounds;
-        [blur addSubview:content];
-        shell = blur;
+        [blur addSubview:gBody];
+        gShell = blur;
     }
-    gPanel.contentView = shell;
+    gPanel.contentView = gShell;
+}
+
+void see_menu_update(const SeeMenuRow *rows, int count) {
+    if (!gPanel || !gPanel.isVisible) return;
+    NSRect frame = gPanel.frame;
+    CGFloat height = fill_body(rows, count);
+    [gPanel setContentSize:NSMakeSize(kPanelWidth, height)];
+    [gPanel setFrameOrigin:NSMakePoint(NSMinX(frame), NSMaxY(frame) - height)];
+}
+
+void see_menu_show(const SeeMenuRow *rows, int count) {
+    ensure_panel();
+    CGFloat height = fill_body(rows, count);
     [gPanel setContentSize:NSMakeSize(kPanelWidth, height)];
 
     NSPoint mouse = NSEvent.mouseLocation;

@@ -2,7 +2,7 @@
 
 use std::sync::{mpsc::Sender, Arc, Mutex};
 use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::config::Config;
@@ -41,16 +41,12 @@ const PANES: [(&str, &str, &str); 4] = [
     ),
 ];
 
-struct Status(Mutex<String>);
-
 pub fn install(
     app: &AppHandle,
     inbox: Sender<Msg>,
     trigger: Arc<Mutex<Trigger>>,
     pill: Sender<PillEvent>,
 ) -> tauri::Result<()> {
-    app.manage(Status(Mutex::new("Loading model…".to_owned())));
-
     let picked_app = app.clone();
     let picked_trigger = trigger.clone();
     menu::on_pick(move |id| pick(&picked_app, &inbox, &picked_trigger, &pill, id));
@@ -76,47 +72,60 @@ pub fn install(
 
 fn rows(app: &AppHandle, trigger: &Mutex<Trigger>) -> Vec<Row> {
     let selected = current_trigger(trigger);
-    let mut rows = vec![
-        Row::Status(status_text(app)),
-        Row::Separator,
-        Row::Caption("Trigger".to_owned()),
-    ];
+    let mut rows = Vec::new();
+    if let Some((id, label)) = alert(selected) {
+        rows.push(Row::Item {
+            id,
+            label: label.to_owned(),
+            checked: false,
+        });
+    }
+    rows.push(Row::Section("Trigger".to_owned()));
     rows.extend(TRIGGERS.map(|(id, option)| Row::Item {
         id,
         label: option.label().to_owned(),
-        checked: Some(option == selected),
+        checked: option == selected,
     }));
-    rows.push(Row::Caption("Hold to talk · add Shift to record".to_owned()));
+    rows.push(Row::Hint("Hold to talk · add Shift to record".to_owned()));
     rows.push(Row::Separator);
     rows.push(Row::Item {
         id: "recordings",
         label: "Open Recordings Folder".to_owned(),
-        checked: None,
+        checked: false,
     });
     rows.push(Row::Item {
         id: "open-at-login",
         label: "Open at Login".to_owned(),
-        checked: Some(open_at_login(app)),
+        checked: open_at_login(app),
     });
     rows.push(Row::Item {
         id: "retry",
         label: "Retry Model Download".to_owned(),
-        checked: None,
+        checked: false,
     });
-    rows.push(Row::Separator);
-    rows.push(Row::Caption("Permissions".to_owned()));
+    rows.push(Row::Section("Permissions".to_owned()));
     rows.extend(PANES.map(|(id, label, _)| Row::Item {
         id,
         label: format!("{label}…"),
-        checked: None,
+        checked: false,
     }));
     rows.push(Row::Separator);
     rows.push(Row::Item {
         id: "quit",
         label: "Quit see.computer".to_owned(),
-        checked: None,
+        checked: false,
     });
     rows
+}
+
+/// The one thing standing between the chosen trigger and hold-to-talk working,
+/// paired with the id of the row that fixes it. Queried live rather than
+/// stored, so granting the permission clears it on the next open.
+fn alert(selected: Trigger) -> Option<(&'static str, &'static str)> {
+    (selected.uses_tap() && !crate::trigger::listen_access_granted()).then_some((
+        "input-monitoring",
+        "Enable Input Monitoring for hold-to-talk",
+    ))
 }
 
 fn pick(
@@ -125,28 +134,33 @@ fn pick(
     trigger: &Mutex<Trigger>,
     pill: &Sender<PillEvent>,
     id: &str,
-) {
+) -> Option<Vec<Row>> {
     if let Some((_, _, pane)) = PANES.iter().find(|(pane_id, _, _)| *pane_id == id) {
         open_path(pane);
-        return;
+        return None;
     }
     if let Some((_, selected)) = TRIGGERS.iter().find(|(option_id, _)| *option_id == id) {
         set_trigger(trigger, *selected);
-        crate::hotkeys::set_chords_registered(app, !selected.uses_tap());
+        if let Err(error) = crate::hotkeys::set_chords_registered(app, !selected.uses_tap()) {
+            let _ = pill.send(PillEvent::Flash(Notice::Unavailable(error)));
+        }
         if let Err(error) = (Config { trigger: *selected }).save() {
             eprintln!("could not save trigger preference: {error}");
         }
-        set_status(app, &selected.gestures());
         let _ = pill.send(PillEvent::Flash(Notice::TriggerChanged(
             selected.gestures(),
         )));
-        return;
+        return Some(rows(app, trigger));
     }
     match id {
         "retry" => {
             let _ = inbox.send(Msg::RetryEngine);
+            None
         }
-        "recordings" => open_path(crate::recorder::default_dir()),
+        "recordings" => {
+            open_path(crate::recorder::default_dir());
+            None
+        }
         "open-at-login" => {
             let manager = app.autolaunch();
             let result = if open_at_login(app) {
@@ -157,9 +171,13 @@ fn pick(
             if let Err(error) = result {
                 eprintln!("could not update open-at-login status: {error}");
             }
+            Some(rows(app, trigger))
         }
-        "quit" => app.exit(0),
-        _ => {}
+        "quit" => {
+            app.exit(0);
+            None
+        }
+        _ => None,
     }
 }
 
@@ -184,28 +202,6 @@ fn set_trigger(trigger: &Mutex<Trigger>, selected: Trigger) {
     }
 }
 
-fn status_text(app: &AppHandle) -> String {
-    match app.try_state::<Status>() {
-        Some(status) => match status.0.lock() {
-            Ok(text) => text.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        },
-        None => String::new(),
-    }
-}
-
 fn open_path(path: impl AsRef<std::ffi::OsStr>) {
     let _ = std::process::Command::new("open").arg(path).spawn();
-}
-
-/// Main thread only, from the pill's status stream.
-pub fn set_status(app: &AppHandle, text: &str) {
-    let Some(status) = app.try_state::<Status>() else {
-        return;
-    };
-    match status.0.lock() {
-        Ok(mut stored) => *stored = text.to_owned(),
-        Err(poisoned) => *poisoned.into_inner() = text.to_owned(),
-    }
-    menu::set_status(text);
 }

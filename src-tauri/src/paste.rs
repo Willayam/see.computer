@@ -57,7 +57,9 @@ struct Job {
 impl Paste {
     pub fn system() -> Paste {
         let (tx, rx) = std::sync::mpsc::channel();
-        crate::qos::spawn("see-paste", crate::qos::Class::Keystroke, move || paste_loop(rx));
+        crate::qos::spawn("see-paste", crate::qos::Class::Keystroke, move || {
+            paste_loop(rx)
+        });
         Paste {
             mode: Mode::System(tx),
         }
