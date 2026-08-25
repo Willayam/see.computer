@@ -79,6 +79,10 @@ fn main() {
     let setup_trigger = trigger.clone();
     let app = tauri::Builder::default()
         .plugin(hotkeys::plugin(tx.clone()))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(move |app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             pill::attach(app.handle(), pill_rx);

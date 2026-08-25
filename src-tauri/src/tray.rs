@@ -4,6 +4,7 @@ use std::sync::{mpsc::Sender, Arc, Mutex};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
+use tauri_plugin_autostart::ManagerExt;
 
 use crate::config::Config;
 use crate::pill::{Notice, PillEvent};
@@ -113,6 +114,18 @@ pub fn install(
         true,
         None::<&str>,
     )?;
+    let open_at_login_enabled = app.autolaunch().is_enabled().unwrap_or_else(|error| {
+        eprintln!("could not read open-at-login status: {error}");
+        false
+    });
+    let open_at_login = CheckMenuItem::with_id(
+        app,
+        "open-at-login",
+        "Open at Login",
+        true,
+        open_at_login_enabled,
+        None::<&str>,
+    )?;
     let selected = current_trigger(&trigger);
     let trigger_help = MenuItem::with_id(
         app,
@@ -149,6 +162,7 @@ pub fn install(
             &screen,
             &accessibility,
             &input_monitoring,
+            &open_at_login,
             &separator_two,
             &quit,
         ],
@@ -178,6 +192,24 @@ pub fn install(
             "input-monitoring" => open_path(
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
             ),
+            "open-at-login" => {
+                let manager = app.autolaunch();
+                let was_enabled = manager.is_enabled().unwrap_or(open_at_login_enabled);
+                let result = if was_enabled {
+                    manager.disable()
+                } else {
+                    manager.enable()
+                };
+                match result {
+                    Ok(()) => {
+                        let _ = open_at_login.set_checked(!was_enabled);
+                    }
+                    Err(error) => {
+                        eprintln!("could not update open-at-login status: {error}");
+                        let _ = open_at_login.set_checked(was_enabled);
+                    }
+                }
+            }
             id => {
                 if let Some(selected) = trigger_from_id(id) {
                     set_trigger(&trigger, selected);
