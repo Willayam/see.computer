@@ -39,6 +39,12 @@ pub const CATALOG: &[ModelFile] = &[
     },
 ];
 
+/// Sibling of the download dir holding the derived copy of the model whose
+/// weights live in an external file that ONNX Runtime memory-maps, so they
+/// stay clean, evictable pages instead of dirty heap. Built once by
+/// `parakeet::prepare`; valid once its `ready` marker exists.
+pub const PREPARED_DIR: &str = "int8-prepared";
+
 #[derive(Clone)]
 pub struct Models {
     root: PathBuf,
@@ -57,6 +63,13 @@ impl Models {
     }
 
     pub fn ensure(&self, on: &mut dyn FnMut(Progress)) -> Result<ModelFiles, EngineError> {
+        let prepared = self.root.with_file_name(PREPARED_DIR);
+        if prepared.join("ready").exists() {
+            return Ok(ModelFiles {
+                dir: prepared,
+                prepared: true,
+            });
+        }
         fs::create_dir_all(&self.root).map_err(download_error)?;
         let total = CATALOG.iter().map(|file| file.bytes).sum();
         let mut done = 0_u64;
@@ -147,6 +160,7 @@ impl Models {
         }
         Ok(ModelFiles {
             dir: self.root.clone(),
+            prepared: false,
         })
     }
 }
@@ -157,6 +171,7 @@ fn download_error(error: std::io::Error) -> EngineError {
 
 pub struct ModelFiles {
     pub dir: PathBuf,
+    pub prepared: bool,
 }
 
 #[derive(Clone, Debug)]
