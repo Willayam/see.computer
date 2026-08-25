@@ -10,7 +10,7 @@ typedef struct {
     const char *id;
     const char *label;
     int kind;
-    int checked;
+    const char *symbol;
 } SeeMenuRow;
 
 enum { SeeRowItem = 0, SeeRowSection = 1, SeeRowHint = 2, SeeRowSeparator = 3 };
@@ -191,8 +191,8 @@ static CGFloat fill_body(const SeeMenuRow *rows, int count) {
         view.restingColor = field.textColor;
         [view addSubview:field];
 
-        if (row->checked == 1) {
-            NSImage *mark = [NSImage imageWithSystemSymbolName:@"checkmark"
+        if (row->symbol) {
+            NSImage *mark = [NSImage imageWithSystemSymbolName:@(row->symbol)
                                      accessibilityDescription:nil];
             NSImageView *check = [NSImageView imageViewWithImage:mark];
             check.contentTintColor = NSColor.labelColor;

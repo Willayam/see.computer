@@ -38,6 +38,7 @@ pub enum Notice {
     MicUnavailable(String),
     ScreenRecordingFailed(String),
     Copied,
+    CopiedNoPaste,
     TranscriptionFailed(String),
     PasteFailed(String),
     TimedOut(&'static str),
@@ -61,7 +62,8 @@ impl Notice {
             | Notice::Cancelled
             | Notice::Loading(_)
             | Notice::TriggerChanged(_)
-            | Notice::Copied => Tone::Info,
+            | Notice::Copied
+            | Notice::CopiedNoPaste => Tone::Info,
             Notice::Unavailable(_)
             | Notice::MicUnavailable(_)
             | Notice::ScreenRecordingFailed(_)
@@ -85,7 +87,10 @@ impl Notice {
             Notice::Unavailable(error) => format!("Model unavailable: {error}"),
             Notice::MicUnavailable(error) => format!("Microphone unavailable: {error}"),
             Notice::ScreenRecordingFailed(error) => format!("Screen recording failed: {error}"),
-            Notice::Copied => "Copied — allow Accessibility to paste automatically".to_owned(),
+            Notice::Copied => "Copied".to_owned(),
+            Notice::CopiedNoPaste => {
+                "Copied — allow Accessibility to paste automatically".to_owned()
+            }
             Notice::TranscriptionFailed(error) => format!("Transcription failed: {error}"),
             Notice::PasteFailed(error) => format!("Paste failed: {error}"),
             Notice::TimedOut(activity) => format!("{activity} timed out"),

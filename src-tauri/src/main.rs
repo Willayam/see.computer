@@ -3,6 +3,7 @@
 mod cli;
 mod config;
 mod engine;
+mod history;
 mod hotkeys;
 mod menu;
 mod mic;
@@ -61,8 +62,15 @@ fn main() {
     let (tx, rx) = std::sync::mpsc::channel::<session::Msg>();
     let (pill_tx, pill_rx) = std::sync::mpsc::channel::<pill::PillEvent>();
     let tray_pill_tx = pill_tx.clone();
-    let trigger = std::sync::Arc::new(std::sync::Mutex::new(config::Config::load().trigger));
-    rivals::spawn(pill_tx.clone());
+    let config = config::Config::load();
+    let trigger = std::sync::Arc::new(std::sync::Mutex::new(config.trigger));
+    let history = history::History::start(config.history);
+    let status = std::sync::Arc::new(std::sync::Mutex::new(session::EngineStatus::Loading {
+        phase: engine::Phase::Downloading,
+        pct: None,
+    }));
+    let rivals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    rivals::spawn(pill_tx.clone(), rivals.clone());
     let controller = session::spawn(
         session::Wiring {
             mic,
@@ -72,6 +80,8 @@ fn main() {
             paste: paste::Paste::system(),
             pill: pill_tx,
             trail: session::Trail::from_env(),
+            history: history.clone(),
+            status: status.clone(),
         },
         (tx.clone(), rx),
     );
@@ -79,6 +89,9 @@ fn main() {
     let setup_tx = tx.clone();
     let setup_watcher_tx = tx.clone();
     let setup_trigger = trigger.clone();
+    let setup_history = history;
+    let setup_status = status;
+    let setup_rivals = rivals;
     let app = tauri::Builder::default()
         .plugin(hotkeys::plugin(tx.clone()))
         .plugin(tauri_plugin_autostart::init(
@@ -88,12 +101,19 @@ fn main() {
         .setup(move |app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             pill::attach(app.handle(), pill_rx);
-            tray::install(app.handle(), setup_tx, setup_trigger.clone(), tray_pill_tx)?;
+            tray::install(
+                app.handle(),
+                setup_tx,
+                setup_trigger.clone(),
+                tray_pill_tx,
+                setup_history,
+                setup_status,
+                setup_rivals,
+            )?;
             let selected = *setup_trigger
                 .lock()
                 .expect("trigger mutex poisoned at startup");
-            if let Err(error) = hotkeys::set_chords_registered(app.handle(), !selected.uses_tap())
-            {
+            if let Err(error) = hotkeys::set_chords_registered(app.handle(), !selected.uses_tap()) {
                 eprintln!("hotkey unavailable at startup: {error}");
             }
             paste::accessibility_trusted(true);

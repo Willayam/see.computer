@@ -13,10 +13,13 @@ pub enum Row {
     Section(String),
     /// A footnote belonging to the group above it. No space of its own.
     Hint(String),
+    /// An empty `id` is passed to AppKit as null, making the row inert. A
+    /// checked item uses `checkmark`; otherwise `symbol` names its SF Symbol.
     Item {
         id: &'static str,
         label: String,
         checked: bool,
+        symbol: Option<&'static str>,
     },
     /// A hairline. Only where a group starts without a `Section`.
     Separator,
@@ -27,7 +30,7 @@ struct NativeRow {
     id: *const c_char,
     label: *const c_char,
     kind: c_int,
-    checked: c_int,
+    symbol: *const c_char,
 }
 
 extern "C" {
@@ -82,25 +85,37 @@ fn native<T>(rows: &[Row], call: impl FnOnce(*const NativeRow, c_int) -> T) -> T
                     id: std::ptr::null(),
                     label: keep(label),
                     kind: 1,
-                    checked: 0,
+                    symbol: std::ptr::null(),
                 },
                 Row::Hint(label) => NativeRow {
                     id: std::ptr::null(),
                     label: keep(label),
                     kind: 2,
-                    checked: 0,
+                    symbol: std::ptr::null(),
                 },
-                Row::Item { id, label, checked } => NativeRow {
-                    id: keep(id),
-                    label: keep(label),
-                    kind: 0,
-                    checked: *checked as c_int,
-                },
+                Row::Item {
+                    id,
+                    label,
+                    checked,
+                    symbol,
+                } => {
+                    let symbol = if *checked { Some("checkmark") } else { *symbol };
+                    NativeRow {
+                        id: if id.is_empty() {
+                            std::ptr::null()
+                        } else {
+                            keep(id)
+                        },
+                        label: keep(label),
+                        kind: 0,
+                        symbol: symbol.map_or(std::ptr::null(), &mut keep),
+                    }
+                }
                 Row::Separator => NativeRow {
                     id: std::ptr::null(),
                     label: keep(""),
                     kind: 3,
-                    checked: 0,
+                    symbol: std::ptr::null(),
                 },
             }
         })

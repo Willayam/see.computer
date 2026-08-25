@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::pill::{Notice, PillEvent};
@@ -52,12 +53,16 @@ fn running_process_paths() -> Vec<String> {
         .collect()
 }
 
-pub fn spawn(pill: Sender<PillEvent>) {
+pub fn spawn(pill: Sender<PillEvent>, current: Arc<Mutex<Vec<&'static str>>>) {
     crate::qos::spawn("see-rivals", crate::qos::Class::Upkeep, move || {
         let mut previous = HashSet::new();
         loop {
-            let current = detect(&running_process_paths());
-            for name in current
+            let detected = detect(&running_process_paths());
+            match current.lock() {
+                Ok(mut current) => *current = detected.clone(),
+                Err(poisoned) => *poisoned.into_inner() = detected.clone(),
+            }
+            for name in detected
                 .iter()
                 .copied()
                 .filter(|name| !previous.contains(name))
@@ -70,7 +75,7 @@ pub fn spawn(pill: Sender<PillEvent>) {
                 }
                 eprintln!("rival dictation app running: {name}");
             }
-            previous = current.into_iter().collect();
+            previous = detected.into_iter().collect();
             std::thread::sleep(Duration::from_secs(10));
         }
     });

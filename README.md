@@ -15,6 +15,14 @@ Dictation runs NVIDIA Parakeet TDT 0.6b v3 (INT8, ONNX) on the CPU. On an M3 Max
 
 The link is a `file://` URL in v1. Recordings land in `~/Movies/see.computer/`.
 
+## Dictation history
+
+Transcripts are written to disk as plain text by default, with one markdown file per day in `~/Documents/see.computer/`. If macOS denies Documents access, they go to `~/Library/Application Support/see.computer/history/` instead.
+
+Turn history off with **Save Dictation History** in the tray's **Settings**. There is no auto-pruning; these are plain files you can open or delete.
+
+The audio-never-leaves-the-machine promise does not extend to transcript files in Documents when iCloud Desktop & Documents syncing is on.
+
 ## Build and run
 
 Requires macOS 14 or later on Apple Silicon, Xcode command line tools, Rust 1.85 or later, and `cargo install tauri-cli --version "^2"`.
@@ -42,10 +50,11 @@ Another dictation app listening on the same key doubles every input. see.compute
 
 ## Verify it without a microphone
 
-Two environment variables exist for deterministic checks. Both are read once in `main.rs` and nowhere else.
+Environment variables provide deterministic seams for local checks.
 
 - `SEE_COMPUTER_AUDIO_FILE=<wav>` replaces the microphone. Every dictation returns that file's audio.
 - `SEE_COMPUTER_STATE_LOG=<path>` appends one line per state transition: `<unix ms>\t<from>\t<message>\t<to>`.
+- `SEE_COMPUTER_HISTORY_DIR=<directory>` writes dictation history directly to that directory without fallback or healing.
 
 `scripts/launch-for-verification.sh [wav] [trail]` launches the built bundle with both set. `scripts/press-hotkey.swift` posts the chords as real keyboard events so a script can drive the app, and `scripts/click-tray.swift` opens the menu panel the same way. `see-computer transcribe <wav>` (the binary inside the bundle) transcribes a file and prints the text without starting the GUI.
 
@@ -60,7 +69,7 @@ cd src-tauri && cargo test
 
 Tauri v2 with a Rust backend. The only web content is `ui/pill.html`, the small overlay at the bottom of the screen; there is no bundler and no Node toolchain.
 
-The menu behind the tray icon is a non-activating `NSPanel` filled with `NSGlassEffectView`, built in `native/menu.m` from a row list `tray.rs` rebuilds on every open. It never becomes key, so the app being dictated into keeps its focus. An `NSMenu` would have run a modal tracking loop on the main thread and could not have carried the material.
+The menu behind the tray icon is a non-activating `NSPanel` filled with `NSGlassEffectView`, built in `native/menu.m` from a row list `tray.rs` rebuilds on every open. Its main view centers recent dictations and recordings; trigger, folder, startup, model, and permission controls live in an in-place Settings view. It never becomes key, so the app being dictated into keeps its focus. An `NSMenu` would have run a modal tracking loop on the main thread and could not have carried the material.
 
 One controller thread owns the app's state, an enum with one variant per thing the app can be doing (`Idle`, `Dictating`, `Transcribing`, `Recording`, `Finalizing`, `Pasting`). Everything else sends it a message: the global-shortcut handler, the engine worker that owns the Parakeet model, the thread that waits for `screencapture` to finish, and the paste thread that owns the clipboard. Nothing slow runs on the hotkey thread, and dictating while recording cannot be expressed. Every thread names its scheduling class in `qos.rs` rather than taking the default, which the macOS scheduler ranks below anything the user is looking at: the event tap, the controller and the paste run user-interactive, the engine runs user-initiated, and upkeep runs utility. The pill window is created non-focusable and ordered in once with `orderFrontRegardless`, so it can never take the keystroke that pastes.
 

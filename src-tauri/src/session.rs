@@ -11,6 +11,16 @@ use crate::pill::{Activity, Notice, PillEvent};
 use crate::recorder::{self, Recorder};
 use crate::share::Share;
 
+#[derive(Clone, PartialEq, Debug)]
+pub enum EngineStatus {
+    Loading {
+        phase: crate::engine::Phase,
+        pct: Option<u8>,
+    },
+    Ready,
+    Broken,
+}
+
 pub enum Session {
     Idle,
     Dictating { armed: mic::Armed, since: Instant },
@@ -58,6 +68,8 @@ pub struct Wiring {
     pub paste: paste::Paste,
     pub pill: Sender<PillEvent>,
     pub trail: Trail,
+    pub history: crate::history::History,
+    pub status: std::sync::Arc<std::sync::Mutex<EngineStatus>>,
 }
 
 pub fn spawn(wiring: Wiring, inbox: (Sender<Msg>, Receiver<Msg>)) -> std::thread::JoinHandle<()> {
@@ -88,6 +100,8 @@ struct Controller {
     paste: paste::Paste,
     pill: Sender<PillEvent>,
     trail: Trail,
+    history: crate::history::History,
+    status: std::sync::Arc<std::sync::Mutex<EngineStatus>>,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     next_turn: u64,
@@ -115,6 +129,8 @@ impl Controller {
             paste: wiring.paste,
             pill: wiring.pill,
             trail: wiring.trail,
+            history: wiring.history,
+            status: wiring.status,
             tx: inbox.0,
             rx: inbox.1,
             next_turn: 0,
@@ -176,12 +192,17 @@ impl Controller {
                     phase: progress.phase,
                     pct: progress.percent(),
                 };
+                self.publish_status(EngineStatus::Loading {
+                    phase: progress.phase,
+                    pct: progress.percent(),
+                });
                 self.readiness = Readiness::Loading(progress);
                 if matches!(self.session, Session::Idle) {
                     self.show(activity);
                 }
             }
             Msg::Engine(engine::Event::Ready(Ok(()))) => {
+                self.publish_status(EngineStatus::Ready);
                 self.readiness = Readiness::Ready;
                 if matches!(self.session, Session::Idle) {
                     let _ = self.pill.send(PillEvent::Hide);
@@ -189,6 +210,7 @@ impl Controller {
             }
             Msg::Engine(engine::Event::Ready(Err(error))) => {
                 let text = error.to_string();
+                self.publish_status(EngineStatus::Broken);
                 self.readiness = Readiness::Broken(error);
                 if matches!(self.session, Session::Idle) {
                     self.finish(Notice::Unavailable(text));
@@ -196,6 +218,10 @@ impl Controller {
             }
             Msg::RetryEngine => {
                 if matches!(self.readiness, Readiness::Broken(_)) {
+                    self.publish_status(EngineStatus::Loading {
+                        phase: engine::Phase::Downloading,
+                        pct: None,
+                    });
                     self.readiness = Readiness::Loading(Progress {
                         phase: engine::Phase::Downloading,
                         done: 0,
@@ -315,6 +341,7 @@ impl Controller {
             (Session::Transcribing { .. }, Msg::Engine(engine::Event::Done(_, result))) => {
                 match result {
                     Ok(Some(text)) => {
+                        self.history.record(text.as_str());
                         self.begin_paste(text.followed_by_space(), paste::Clipboard::RestorePrior)
                     }
                     Ok(None) => {
@@ -359,7 +386,7 @@ impl Controller {
                     Session::Idle
                 }
                 Err(paste::Error::AccessibilityDenied) => {
-                    self.finish(Notice::Copied);
+                    self.finish(Notice::CopiedNoPaste);
                     Session::Idle
                 }
                 Err(error) => {
@@ -463,6 +490,13 @@ impl Controller {
 
     fn finish(&self, notice: Notice) {
         let _ = self.pill.send(PillEvent::Finish(notice));
+    }
+
+    fn publish_status(&self, status: EngineStatus) {
+        match self.status.lock() {
+            Ok(mut current) => *current = status,
+            Err(poisoned) => *poisoned.into_inner() = status,
+        }
     }
 }
 
@@ -585,6 +619,8 @@ mod tests {
             paste: paste::Paste::dry(),
             pill: pill_tx,
             trail: Trail::off(),
+            history: crate::history::History::off(),
+            status: std::sync::Arc::new(std::sync::Mutex::new(EngineStatus::Ready)),
         });
         controller.readiness = Readiness::Ready;
         (controller, pill_rx, dir)
