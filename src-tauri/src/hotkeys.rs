@@ -82,8 +82,11 @@ pub fn translate(shortcut: &Shortcut, state: ShortcutState) -> Option<Msg> {
             ShortcutState::Released => Some(Msg::MainReleased),
         };
     }
-    if shortcut == &video_chord() && state == ShortcutState::Pressed {
-        return Some(Msg::VideoPressed);
+    if shortcut == &video_chord() {
+        return match state {
+            ShortcutState::Pressed => Some(Msg::VideoPressed),
+            ShortcutState::Released => Some(Msg::VideoReleased),
+        };
     }
     if shortcut == &cancel_chord() && state == ShortcutState::Pressed {
         return Some(Msg::Cancel);
@@ -109,6 +112,9 @@ mod tests {
             translate(&video_chord(), ShortcutState::Pressed),
             Some(Msg::VideoPressed)
         ));
-        assert!(translate(&video_chord(), ShortcutState::Released).is_none());
+        assert!(matches!(
+            translate(&video_chord(), ShortcutState::Released),
+            Some(Msg::VideoReleased)
+        ));
     }
 }
