@@ -7,6 +7,7 @@ mod hotkeys;
 mod mic;
 mod paste;
 mod pill;
+mod qos;
 mod recorder;
 mod rivals;
 mod session;

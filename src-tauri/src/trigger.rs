@@ -205,6 +205,7 @@ pub fn dictation_gesture_held() -> bool {
 }
 
 fn watcher_thread(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<AtomicBool>) {
+    crate::qos::apply(crate::qos::Class::Keystroke);
     loop {
         if !current_trigger(&trigger).uses_tap() {
             held.store(false, Ordering::SeqCst);

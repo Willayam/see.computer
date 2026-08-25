@@ -53,7 +53,7 @@ fn running_process_paths() -> Vec<String> {
 }
 
 pub fn spawn(pill: Sender<PillEvent>) {
-    std::thread::spawn(move || {
+    crate::qos::spawn("see-rivals", crate::qos::Class::Upkeep, move || {
         let mut previous = HashSet::new();
         loop {
             let current = detect(&running_process_paths());

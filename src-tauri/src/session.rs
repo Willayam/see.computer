@@ -61,7 +61,9 @@ pub struct Wiring {
 }
 
 pub fn spawn(wiring: Wiring, inbox: (Sender<Msg>, Receiver<Msg>)) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || Controller::new(wiring, inbox).run())
+    crate::qos::spawn("see-controller", crate::qos::Class::Keystroke, move || {
+        Controller::new(wiring, inbox).run()
+    })
 }
 
 pub const MAX_DICTATION: Duration = Duration::from_secs(120);

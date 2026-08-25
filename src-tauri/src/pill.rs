@@ -114,7 +114,7 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
     };
     configure_hud(&window);
     let app = app.clone();
-    std::thread::spawn(move || {
+    crate::qos::spawn("see-pill", crate::qos::Class::Upkeep, move || {
         let mut current = None;
         let mut cancel_armed = false;
         while let Ok(event) = rx.recv() {
