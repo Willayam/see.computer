@@ -2,9 +2,18 @@
 
 use std::sync::{mpsc::Sender, Arc, Mutex};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_autostart::ManagerExt;
+
+#[cfg(target_os = "macos")]
+use objc2::{runtime::AnyObject, MainThreadMarker};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{
+    NSButton, NSControlStateValueOff, NSControlStateValueOn, NSMenu as NativeMenu, NSMenuItem,
+};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSSize, NSString};
 
 use crate::config::Config;
 use crate::pill::{Notice, PillEvent};
@@ -169,7 +178,7 @@ pub fn install(
     )?;
     app.manage(StatusItem(status));
     let image = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
-    TrayIconBuilder::with_id("main")
+    let tray = TrayIconBuilder::with_id("main")
         .icon(image)
         .icon_as_template(true)
         .tooltip("see.computer")
@@ -203,13 +212,14 @@ pub fn install(
                 match result {
                     Ok(()) => {
                         let _ = open_at_login.set_checked(!was_enabled);
+                        set_open_at_login_control(app, !was_enabled);
                     }
                     Err(error) => {
                         eprintln!("could not update open-at-login status: {error}");
                         let _ = open_at_login.set_checked(was_enabled);
+                        set_open_at_login_control(app, was_enabled);
                     }
                 }
-                reopen_menu(app);
             }
             id => {
                 if let Some(selected) = trigger_from_id(id) {
@@ -227,18 +237,95 @@ pub fn install(
             }
         })
         .build(app)?;
+    install_open_at_login_control(&tray, open_at_login_enabled)?;
     Ok(())
 }
 
-fn reopen_menu(app: &AppHandle) {
+#[cfg(target_os = "macos")]
+fn install_open_at_login_control(tray: &TrayIcon<tauri::Wry>, checked: bool) -> tauri::Result<()> {
+    let installed = with_open_at_login_item(tray, move |item, menu, mtm| {
+        let title = NSString::from_str("Open at Login");
+        let Some(target) = item.target() else {
+            return false;
+        };
+        let Some(action) = item.action() else {
+            return false;
+        };
+        // A control hosted by an NSMenuItem receives clicks without ending
+        // the menu's tracking session. Reuse the item's existing action so
+        // the normal Tauri menu event continues to own the setting change.
+        let checkbox = unsafe {
+            NSButton::checkboxWithTitle_target_action(&title, Some(&target), Some(action), mtm)
+        };
+        checkbox.setState(if checked {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
+        checkbox.sizeToFit();
+        checkbox.setFrameSize(NSSize::new(menu.size().width.max(220.0), 24.0));
+        item.setView(Some(checkbox.as_ref()));
+        true
+    })?
+    .unwrap_or(false);
+
+    if installed {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("could not install Open at Login control").into())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_open_at_login_control(
+    _tray: &TrayIcon<tauri::Wry>,
+    _checked: bool,
+) -> tauri::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn set_open_at_login_control(app: &AppHandle, checked: bool) {
     let Some(tray) = app.tray_by_id("main") else {
         return;
     };
-    std::thread::spawn(move || {
-        // Let AppKit finish the current menu-tracking cycle before showing it again.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let _ = tray.with_inner_tray_icon(|tray| tray.show_menu());
+    let _ = with_open_at_login_item(&tray, move |item, _, _| {
+        let Some(view) = item.view() else {
+            return;
+        };
+        let object: &AnyObject = view.as_ref();
+        let Some(checkbox) = object.downcast_ref::<NSButton>() else {
+            return;
+        };
+        checkbox.setState(if checked {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
     });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_open_at_login_control(_app: &AppHandle, _checked: bool) {}
+
+#[cfg(target_os = "macos")]
+fn with_open_at_login_item<T>(
+    tray: &TrayIcon<tauri::Wry>,
+    action: impl FnOnce(&NSMenuItem, &NativeMenu, MainThreadMarker) -> T + Send + 'static,
+) -> tauri::Result<Option<T>>
+where
+    T: Send + 'static,
+{
+    tray.with_inner_tray_icon(move |tray| {
+        let mtm = MainThreadMarker::new()?;
+        let status_item = tray.ns_status_item()?;
+        let menu = status_item.menu(mtm)?;
+        let item = menu
+            .itemArray()
+            .iter()
+            .find(|item| item.title().to_string() == "Open at Login")?;
+        Some(action(&item, &menu, mtm))
+    })
 }
 
 fn trigger_from_id(id: &str) -> Option<Trigger> {
