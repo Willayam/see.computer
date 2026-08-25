@@ -209,6 +209,7 @@ pub fn install(
                         let _ = open_at_login.set_checked(was_enabled);
                     }
                 }
+                reopen_menu(app);
             }
             id => {
                 if let Some(selected) = trigger_from_id(id) {
@@ -227,6 +228,17 @@ pub fn install(
         })
         .build(app)?;
     Ok(())
+}
+
+fn reopen_menu(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id("main") else {
+        return;
+    };
+    std::thread::spawn(move || {
+        // Let AppKit finish the current menu-tracking cycle before showing it again.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let _ = tray.with_inner_tray_icon(|tray| tray.show_menu());
+    });
 }
 
 fn trigger_from_id(id: &str) -> Option<Trigger> {
