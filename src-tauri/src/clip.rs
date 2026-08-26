@@ -20,10 +20,13 @@ use std::process::Stdio;
 use crate::engine::{Segment, Transcription};
 use crate::mic::Audio16k;
 
-/// Matches the cap and spacing Clips uses for its recommended frames.
+/// Matches the count cap Clips uses for its recommended frames.
 pub const MAX_FRAMES: usize = 16;
 const MIN_FRAME_GAP_MS: u64 = 3_000;
-const FRAME_MAX_WIDTH: i32 = 1_280;
+/// A deliberate in-clip shot has to remain useful on Retina displays; 1280 px
+/// made the H.264 source's fidelity loss needlessly more visible.
+const FRAME_MAX_WIDTH: i32 = 2_560;
+const NEARBY_FRAME_TOLERANCE_MS: i32 = 500;
 
 extern "C" {
     fn sc_clip_duration_seconds(path: *const c_char) -> f64;
@@ -31,6 +34,7 @@ extern "C" {
         path: *const c_char,
         at_ms: c_longlong,
         max_width: c_int,
+        tolerance_ms: c_int,
         out_path: *const c_char,
     ) -> c_int;
 }
@@ -122,6 +126,21 @@ pub struct Shot {
     pub path: PathBuf,
 }
 
+pub struct SessionClip {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    /// The movie starts after the decoder commits the hold, while the logical
+    /// clip starts at the finger-down instant.
+    pub recording_start_ms: u64,
+    pub path: PathBuf,
+    pub shots_ms: Vec<u64>,
+}
+
+pub enum SessionCapture {
+    Shot(Shot),
+    Clip(SessionClip),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PackageError {
     #[error("recording has no file stem")]
@@ -131,6 +150,14 @@ pub enum PackageError {
 }
 
 pub fn package(mov: &Path, transcription: &Transcription) -> Result<Packaged, PackageError> {
+    package_recorded(mov, transcription, None)
+}
+
+pub fn package_recorded(
+    mov: &Path,
+    transcription: &Transcription,
+    recorded_duration_ms: Option<u64>,
+) -> Result<Packaged, PackageError> {
     let dir = mov.with_extension("");
     if dir == mov || mov.file_stem().is_none() {
         return Err(PackageError::NoStem);
@@ -139,11 +166,11 @@ pub fn package(mov: &Path, transcription: &Transcription) -> Result<Packaged, Pa
     let _ = std::fs::remove_dir_all(&frames_dir);
     std::fs::create_dir_all(&frames_dir)?;
 
-    let duration_ms = duration_ms(mov, &transcription.segments);
+    let duration_ms = duration_ms(mov, &transcription.segments, recorded_duration_ms);
     let mut frames = Vec::new();
     for at in frame_times(duration_ms, &transcription.segments) {
         let file = frames_dir.join(format!("{at:07}.jpg"));
-        if extract_frame(mov, at, &file) {
+        if extract_frame(mov, at, NEARBY_FRAME_TOLERANCE_MS, &file) {
             frames.push(at);
         }
     }
@@ -241,6 +268,308 @@ pub fn shots_paste_line(duration_ms: u64, full_text: Option<&str>, markdown: &Pa
             markdown.display()
         ),
     }
+}
+
+pub fn package_session(
+    dir: &Path,
+    duration_ms: u64,
+    transcription: &Transcription,
+    captures: &[SessionCapture],
+) -> Result<Packaged, PackageError> {
+    let frames_dir = dir.join("frames");
+    let shots_dir = dir.join("shots");
+    let _ = std::fs::remove_dir_all(&frames_dir);
+    std::fs::create_dir_all(&frames_dir)?;
+    std::fs::create_dir_all(&shots_dir)?;
+
+    let duration_ms = duration_ms.max(
+        transcription
+            .segments
+            .last()
+            .map(|segment| segment.end_ms)
+            .unwrap_or(0),
+    );
+    let mut artifacts = Vec::new();
+    let mut json_captures = Vec::new();
+    let mut clip_number = 0;
+    let mut shot_number = 0;
+
+    for capture in captures {
+        match capture {
+            SessionCapture::Shot(shot) => {
+                shot_number += 1;
+                let file = path_from(dir, &shot.path);
+                artifacts.push(Artifact::image(shot.at_ms, file.clone()));
+                json_captures.push(serde_json::json!({
+                    "type": "shot",
+                    "atMs": shot.at_ms,
+                    "timestamp": timestamp(shot.at_ms),
+                    "file": file,
+                }));
+            }
+            SessionCapture::Clip(clip) => {
+                clip_number += 1;
+                let video = path_from(dir, &clip.path);
+                artifacts.push(Artifact::clip(
+                    clip.start_ms,
+                    clip.end_ms.saturating_sub(clip.start_ms),
+                    video.clone(),
+                ));
+
+                let readable_start = clip.recording_start_ms.max(clip.start_ms);
+                let readable_duration = clip.end_ms.saturating_sub(readable_start);
+                let local_segments = transcription
+                    .segments
+                    .iter()
+                    .filter(|segment| {
+                        segment.end_ms > readable_start && segment.start_ms < clip.end_ms
+                    })
+                    .map(|segment| Segment {
+                        start_ms: segment.start_ms.saturating_sub(readable_start),
+                        end_ms: segment
+                            .end_ms
+                            .min(clip.end_ms)
+                            .saturating_sub(readable_start),
+                        text: segment.text.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let mut frames = Vec::new();
+                for local_at in frame_times(readable_duration, &local_segments) {
+                    let session_at = readable_start.saturating_add(local_at);
+                    let file =
+                        frames_dir.join(format!("clip-{clip_number:03}-{session_at:07}.jpg"));
+                    if extract_frame(&clip.path, local_at, NEARBY_FRAME_TOLERANCE_MS, &file) {
+                        let relative = path_from(dir, &file);
+                        artifacts.push(Artifact::image(session_at, relative.clone()));
+                        frames.push(serde_json::json!({
+                            "atMs": session_at,
+                            "timestamp": timestamp(session_at),
+                            "file": relative,
+                        }));
+                    }
+                }
+
+                let mut shots = Vec::new();
+                for at_ms in &clip.shots_ms {
+                    shot_number += 1;
+                    let file = shots_dir.join(format!("{shot_number:03}.jpg"));
+                    let local_at = at_ms.saturating_sub(clip.recording_start_ms);
+                    if extract_frame(&clip.path, local_at, 0, &file) {
+                        let relative = path_from(dir, &file);
+                        artifacts.push(Artifact::image(*at_ms, relative.clone()));
+                        shots.push(serde_json::json!({
+                            "atMs": at_ms,
+                            "timestamp": timestamp(*at_ms),
+                            "file": relative,
+                        }));
+                    }
+                }
+                json_captures.push(serde_json::json!({
+                    "type": "clip",
+                    "startMs": clip.start_ms,
+                    "endMs": clip.end_ms,
+                    "durationMs": clip.end_ms.saturating_sub(clip.start_ms),
+                    "video": video,
+                    "frames": frames,
+                    "shots": shots,
+                }));
+            }
+        }
+    }
+
+    artifacts.sort_by_key(|artifact| artifact.at_ms);
+    json_captures.sort_by_key(|capture| {
+        capture
+            .get("atMs")
+            .or_else(|| capture.get("startMs"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    });
+    std::fs::write(
+        dir.join("transcript.json"),
+        session_transcript_json(duration_ms, transcription, json_captures),
+    )?;
+    let markdown = dir.join("session.md");
+    std::fs::write(
+        &markdown,
+        session_markdown_index(duration_ms, &transcription.segments, &artifacts),
+    )?;
+    let paste = session_paste_line(
+        duration_ms,
+        transcription.text.as_ref().map(|text| text.as_str()),
+        &markdown,
+    );
+    Ok(Packaged { markdown, paste })
+}
+
+pub fn package_single_clip(
+    duration_ms: u64,
+    transcription: &Transcription,
+    clip: SessionClip,
+) -> Result<Packaged, PackageError> {
+    let dir = clip.path.with_extension("");
+    if dir == clip.path || clip.path.file_stem().is_none() {
+        return Err(PackageError::NoStem);
+    }
+    let packaged = package_session(
+        &dir,
+        duration_ms,
+        transcription,
+        &[SessionCapture::Clip(clip)],
+    )?;
+    let _ = std::fs::remove_dir(dir.join("shots"));
+    let markdown = dir.join("clip.md");
+    std::fs::rename(packaged.markdown, &markdown)?;
+    let paste = paste_line(
+        duration_ms,
+        transcription.text.as_ref().map(|text| text.as_str()),
+        &markdown,
+    );
+    Ok(Packaged { markdown, paste })
+}
+
+pub fn session_paste_line(duration_ms: u64, full_text: Option<&str>, markdown: &Path) -> String {
+    let length = if duration_ms > 0 {
+        format!(" ({})", timestamp(duration_ms))
+    } else {
+        String::new()
+    };
+    match full_text {
+        Some(text) if !text.is_empty() => format!(
+            "Screen session{length}: \"{text}\" \u{2014} screen frames and video: {}",
+            markdown.display()
+        ),
+        _ => format!(
+            "Screen session{length}, no narration \u{2014} screen frames and video: {}",
+            markdown.display()
+        ),
+    }
+}
+
+struct Artifact {
+    at_ms: u64,
+    markdown: String,
+}
+
+impl Artifact {
+    fn image(at_ms: u64, file: String) -> Artifact {
+        Artifact {
+            at_ms,
+            markdown: format!("![{}]({file})", timestamp(at_ms)),
+        }
+    }
+
+    fn clip(at_ms: u64, duration_ms: u64, file: String) -> Artifact {
+        Artifact {
+            at_ms,
+            markdown: format!(
+                "[Video clip at {} ({} long)]({file})",
+                timestamp(at_ms),
+                timestamp(duration_ms)
+            ),
+        }
+    }
+}
+
+fn path_from(dir: &Path, path: &Path) -> String {
+    if let Ok(relative) = path.strip_prefix(dir) {
+        return relative.to_string_lossy().into_owned();
+    }
+    if dir.parent() == path.parent() {
+        return path
+            .file_name()
+            .map(|file| format!("../{}", file.to_string_lossy()))
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    }
+    path.to_string_lossy().into_owned()
+}
+
+fn session_markdown_index(
+    duration_ms: u64,
+    segments: &[Segment],
+    artifacts: &[Artifact],
+) -> String {
+    let mut md = String::new();
+    let _ = writeln!(md, "# Screen session with narration\n");
+    let length = if duration_ms > 0 {
+        format!("{} long, ", timestamp(duration_ms))
+    } else {
+        String::new()
+    };
+    let _ = writeln!(
+        md,
+        "{length}captured with see.computer. The transcript below is timestamped, and every \
+         screenshot, video, and extracted frame sits with the sentence being spoken when it \
+         was captured. The timings and paths are also in \
+         [`transcript.json`](transcript.json).\n"
+    );
+    let _ = writeln!(md, "## Transcript\n");
+    if segments.is_empty() {
+        let _ = writeln!(md, "No speech was detected.\n");
+        for artifact in artifacts {
+            let _ = writeln!(md, "{}\n", artifact.markdown);
+        }
+        return md;
+    }
+
+    let mut remaining = artifacts.iter().peekable();
+    for segment in segments {
+        while let Some(artifact) = remaining.peek() {
+            if artifact.at_ms < segment.start_ms {
+                let _ = writeln!(md, "{}\n", artifact.markdown);
+                remaining.next();
+            } else {
+                break;
+            }
+        }
+        let _ = writeln!(
+            md,
+            "**{}\u{2013}{}** {}\n",
+            timestamp(segment.start_ms),
+            timestamp(segment.end_ms),
+            segment.text
+        );
+        while let Some(artifact) = remaining.peek() {
+            if artifact.at_ms < segment.end_ms {
+                let _ = writeln!(md, "{}\n", artifact.markdown);
+                remaining.next();
+            } else {
+                break;
+            }
+        }
+    }
+    for artifact in remaining {
+        let _ = writeln!(md, "{}\n", artifact.markdown);
+    }
+    md
+}
+
+fn session_transcript_json(
+    duration_ms: u64,
+    transcription: &Transcription,
+    captures: Vec<serde_json::Value>,
+) -> String {
+    let segments = transcription
+        .segments
+        .iter()
+        .map(|segment| {
+            serde_json::json!({
+                "startMs": segment.start_ms,
+                "endMs": segment.end_ms,
+                "range": format!("{}-{}", timestamp(segment.start_ms), timestamp(segment.end_ms)),
+                "text": segment.text,
+            })
+        })
+        .collect::<Vec<_>>();
+    let value = serde_json::json!({
+        "type": "see-computer.session",
+        "version": 1,
+        "durationMs": duration_ms,
+        "fullText": transcription.text.as_ref().map(|text| text.as_str()).unwrap_or(""),
+        "segments": segments,
+        "captures": captures,
+    });
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_owned())
 }
 
 fn shots_markdown_index(
@@ -356,7 +685,7 @@ fn shots_transcript_json(
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_owned())
 }
 
-fn extract_frame(mov: &Path, at_ms: u64, out: &Path) -> bool {
+fn extract_frame(mov: &Path, at_ms: u64, tolerance_ms: i32, out: &Path) -> bool {
     let (Some(mov), Some(out)) = (c_path(mov), c_path(out)) else {
         return false;
     };
@@ -365,17 +694,29 @@ fn extract_frame(mov: &Path, at_ms: u64, out: &Path) -> bool {
             mov.as_ptr(),
             at_ms as c_longlong,
             FRAME_MAX_WIDTH,
+            tolerance_ms,
             out.as_ptr(),
         ) == 0
     }
 }
 
-fn duration_ms(mov: &Path, segments: &[Segment]) -> u64 {
+fn duration_ms(mov: &Path, segments: &[Segment], recorded_duration_ms: Option<u64>) -> u64 {
     let native = c_path(mov)
         .map(|path| unsafe { sc_clip_duration_seconds(path.as_ptr()) })
         .unwrap_or(-1.0);
-    if native > 0.0 {
-        return (native * 1000.0).round() as u64;
+    preferred_duration_ms(recorded_duration_ms, native, segments)
+}
+
+fn preferred_duration_ms(
+    recorded_duration_ms: Option<u64>,
+    native_seconds: f64,
+    segments: &[Segment],
+) -> u64 {
+    if let Some(recorded) = recorded_duration_ms {
+        return recorded;
+    }
+    if native_seconds > 0.0 {
+        return (native_seconds * 1000.0).round() as u64;
     }
     segments.last().map(|segment| segment.end_ms).unwrap_or(0)
 }
@@ -643,6 +984,101 @@ mod tests {
         let second = md.find("Second thing.").unwrap();
         let shot_two = md.find("shots/002.png").unwrap();
         assert!(first < shot_one && shot_one < second && second < shot_two);
+    }
+
+    #[test]
+    fn a_recorded_end_wins_over_the_movies_tail() {
+        let segments = [segment(0, 1_500, "The transcript is longer too.")];
+        assert_eq!(preferred_duration_ms(Some(800), 2.4, &segments), 800);
+    }
+
+    #[test]
+    fn mixed_session_keeps_one_plain_paste_and_interleaves_captures() {
+        let dir = std::env::temp_dir().join(format!(
+            "see-computer-mixed-clip-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("shots")).unwrap();
+        let shot = dir.join("shots/001.png");
+        std::fs::write(&shot, b"screenshot").unwrap();
+        let mov = dir.with_extension("mov");
+        std::fs::write(&mov, b"not a movie").unwrap();
+        let transcription = Transcription {
+            text: Text::parse("First thing. Second thing."),
+            segments: vec![
+                segment(0, 4_000, "First thing."),
+                segment(4_000, 8_000, "Second thing."),
+            ],
+        };
+        let captures = [
+            SessionCapture::Shot(Shot {
+                at_ms: 1_000,
+                path: shot,
+            }),
+            SessionCapture::Clip(SessionClip {
+                start_ms: 5_000,
+                end_ms: 7_000,
+                recording_start_ms: 5_250,
+                path: mov.clone(),
+                shots_ms: Vec::new(),
+            }),
+        ];
+
+        let packaged = package_session(&dir, 8_000, &transcription, &captures).unwrap();
+        assert_eq!(
+            packaged.paste,
+            format!(
+                "Screen session (0:08): \"First thing. Second thing.\" \u{2014} screen frames and video: {}",
+                dir.join("session.md").display()
+            )
+        );
+        let markdown = std::fs::read_to_string(packaged.markdown).unwrap();
+        let first = markdown.find("First thing.").unwrap();
+        let shot = markdown.find("shots/001.png").unwrap();
+        let second = markdown.find("Second thing.").unwrap();
+        let clip = markdown.find("Video clip at 0:05").unwrap();
+        assert!(first < shot && shot < second && second < clip);
+
+        std::fs::remove_file(mov).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn one_clip_without_shots_keeps_the_flat_clip_layout() {
+        let root = std::env::temp_dir().join(format!(
+            "see-computer-flat-session-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mov = root.join("capture.mov");
+        std::fs::write(&mov, b"not a movie").unwrap();
+        let transcription = Transcription {
+            text: Text::parse("Keep the common layout."),
+            segments: vec![segment(0, 1_000, "Keep the common layout.")],
+        };
+
+        let packaged = package_single_clip(
+            1_000,
+            &transcription,
+            SessionClip {
+                start_ms: 0,
+                end_ms: 1_000,
+                recording_start_ms: 250,
+                path: mov.clone(),
+                shots_ms: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(packaged.markdown, root.join("capture/clip.md"));
+        assert!(mov.is_file());
+        assert!(root.join("capture/frames").is_dir());
+        assert!(root.join("capture/transcript.json").is_file());
+        assert!(!root.join("capture/session.md").exists());
+        assert!(!root.join("capture/shots").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

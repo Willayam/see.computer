@@ -30,6 +30,7 @@ pub enum Session {
         since: Instant,
         capture_dir: Option<PathBuf>,
         captures: Vec<Capture>,
+        active_clip: Option<ActiveClip>,
     },
     Transcribing {
         job: JobId,
@@ -65,13 +66,30 @@ pub enum Session {
     },
 }
 
-pub struct Capture {
-    at_ms: u64,
-    pending: recorder::PendingShot,
+pub enum Capture {
+    Shot {
+        at_ms: u64,
+        pending: recorder::PendingShot,
+    },
+    Clip {
+        start_ms: u64,
+        end_ms: u64,
+        recording_start_ms: u64,
+        path: PathBuf,
+        shots_ms: Vec<u64>,
+        finished: Receiver<recorder::Finished>,
+    },
+}
+
+pub struct ActiveClip {
+    active: recorder::Active,
+    started: Instant,
+    recording_start_ms: u64,
+    shots_ms: Vec<u64>,
 }
 
 pub struct ShotSession {
-    dir: PathBuf,
+    dir: Option<PathBuf>,
     captures: Vec<Capture>,
 }
 
@@ -308,6 +326,11 @@ impl Controller {
 
     fn step_session(&mut self, msg: Msg) {
         let current = std::mem::replace(&mut self.session, Session::Idle);
+        let current = if matches!(&msg, Msg::MainReleased) {
+            self.close_dictating_clip(current, Instant::now())
+        } else {
+            current
+        };
         self.session = match (current, msg) {
             (Session::Idle, Msg::MainPressed) => match &self.readiness {
                 Readiness::Loading(progress) => {
@@ -338,6 +361,7 @@ impl Controller {
                                 since: Instant::now(),
                                 capture_dir: None,
                                 captures: Vec::new(),
+                                active_clip: None,
                             }
                         }
                         None => Session::Idle,
@@ -360,7 +384,10 @@ impl Controller {
             },
             (
                 Session::Dictating {
-                    armed, captures, ..
+                    armed,
+                    captures,
+                    active_clip: None,
+                    ..
                 },
                 Msg::MainReleased,
             ) if captures.is_empty() => {
@@ -392,8 +419,9 @@ impl Controller {
             (
                 Session::Dictating {
                     armed,
-                    capture_dir: Some(dir),
+                    capture_dir,
                     captures,
+                    active_clip: None,
                     ..
                 },
                 Msg::MainReleased,
@@ -403,8 +431,22 @@ impl Controller {
                     .as_ref()
                     .map(audio_duration_ms)
                     .unwrap_or_default()
-                    .max(captures.last().map(|capture| capture.at_ms).unwrap_or(0));
-                let shots = ShotSession { dir, captures };
+                    .max(captures.iter().map(capture_end_ms).max().unwrap_or(0));
+                let capture_dir = if capture_dir.is_none() && !is_flat_clip(&captures) {
+                    match self.recorder.session_dir() {
+                        Ok(dir) => Some(dir),
+                        Err(error) => {
+                            self.flash(Notice::ScreenRecordingFailed(error.to_string()));
+                            None
+                        }
+                    }
+                } else {
+                    capture_dir
+                };
+                let shots = ShotSession {
+                    dir: capture_dir,
+                    captures,
+                };
                 match audio.map(|audio| self.engine.submit(audio)) {
                     Some(Ok(job)) => {
                         self.show(Activity::Transcribing);
@@ -427,60 +469,93 @@ impl Controller {
                     since,
                     mut capture_dir,
                     mut captures,
+                    mut active_clip,
                 },
                 Msg::ShotTaken(at),
             ) => {
                 let at_ms = capture_offset_ms(since, at);
-                let dir = match capture_dir.clone() {
-                    Some(dir) => Ok(dir),
-                    None => self.recorder.session_dir(),
-                };
-                match dir {
-                    Ok(dir) => {
-                        let path = dir
-                            .join("shots")
-                            .join(format!("{:03}.png", captures.len() + 1));
-                        match self.recorder.screenshot(&path) {
-                            Ok(pending) => {
-                                capture_dir = Some(dir);
-                                captures.push(Capture { at_ms, pending });
-                            }
-                            Err(error) => {
-                                if captures.is_empty() {
-                                    let _ = std::fs::remove_dir_all(dir);
-                                }
-                                self.flash(Notice::ScreenRecordingFailed(error.to_string()));
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        self.flash(Notice::ScreenRecordingFailed(error.to_string()));
-                    }
+                if let Some(clip) = active_clip.as_mut() {
+                    clip.shots_ms.push(at_ms);
+                } else {
+                    self.take_screenshot(&mut capture_dir, &mut captures, at_ms);
                 }
                 Session::Dictating {
                     armed,
                     since,
                     capture_dir,
                     captures,
+                    active_clip,
                 }
             }
-            // TODO(step 3): clips become captures nested inside Dictating.
-            (state @ Session::Dictating { .. }, Msg::ClipStarted(at) | Msg::ClipEnded(at)) => {
-                let _ = at;
-                state
+            (
+                Session::Dictating {
+                    armed,
+                    since,
+                    capture_dir,
+                    captures,
+                    active_clip,
+                },
+                Msg::ClipStarted(at),
+            ) => {
+                let active_clip = if active_clip.is_some() {
+                    active_clip
+                } else {
+                    match self.recorder.start() {
+                        Ok(active) => Some(ActiveClip {
+                            active,
+                            started: at,
+                            recording_start_ms: capture_offset_ms(since, Instant::now()),
+                            shots_ms: Vec::new(),
+                        }),
+                        Err(error) => {
+                            self.flash(Notice::ScreenRecordingFailed(error.to_string()));
+                            None
+                        }
+                    }
+                };
+                Session::Dictating {
+                    armed,
+                    since,
+                    capture_dir,
+                    captures,
+                    active_clip,
+                }
             }
+            (
+                Session::Dictating {
+                    armed,
+                    since,
+                    capture_dir,
+                    captures,
+                    active_clip,
+                },
+                Msg::ClipEnded(at),
+            ) => self.close_dictating_clip(
+                Session::Dictating {
+                    armed,
+                    since,
+                    capture_dir,
+                    captures,
+                    active_clip,
+                },
+                at,
+            ),
             (state @ Session::Dictating { .. }, Msg::VideoPressed) => state,
             (
                 Session::Dictating {
                     armed,
                     capture_dir,
                     captures,
+                    active_clip,
                     ..
                 },
                 Msg::Cancel,
             ) => {
                 if let Some(mic) = self.mic.as_mut() {
                     let _ = mic.disarm(armed);
+                }
+                if let Some(clip) = active_clip {
+                    clip.active.abort();
                 }
                 discard_captures(capture_dir, captures);
                 self.finish(Notice::Cancelled);
@@ -687,6 +762,81 @@ impl Controller {
         };
     }
 
+    fn take_screenshot(
+        &mut self,
+        capture_dir: &mut Option<PathBuf>,
+        captures: &mut Vec<Capture>,
+        at_ms: u64,
+    ) {
+        let dir = match capture_dir.clone() {
+            Some(dir) => Ok(dir),
+            None => self.recorder.session_dir(),
+        };
+        match dir {
+            Ok(dir) => {
+                let path = dir
+                    .join("shots")
+                    .join(format!("{:03}.png", captures.len() + 1));
+                match self.recorder.screenshot(&path) {
+                    Ok(pending) => {
+                        *capture_dir = Some(dir);
+                        captures.push(Capture::Shot { at_ms, pending });
+                    }
+                    Err(error) => {
+                        if captures.is_empty() {
+                            let _ = std::fs::remove_dir_all(dir);
+                        }
+                        self.flash(Notice::ScreenRecordingFailed(error.to_string()));
+                    }
+                }
+            }
+            Err(error) => self.flash(Notice::ScreenRecordingFailed(error.to_string())),
+        }
+    }
+
+    fn close_dictating_clip(&mut self, state: Session, at: Instant) -> Session {
+        let Session::Dictating {
+            armed,
+            since,
+            mut capture_dir,
+            mut captures,
+            active_clip,
+        } = state
+        else {
+            return state;
+        };
+        if let Some(clip) = active_clip {
+            if at.saturating_duration_since(clip.started) < MIN_RECORDING {
+                clip.active.abort();
+                let at_ms = capture_offset_ms(since, clip.started);
+                self.take_screenshot(&mut capture_dir, &mut captures, at_ms);
+            } else {
+                let start_ms = capture_offset_ms(since, clip.started);
+                let end_ms = capture_offset_ms(since, at);
+                let path = clip.active.path().to_path_buf();
+                let (finished_tx, finished) = std::sync::mpsc::channel();
+                clip.active.stop(move |result| {
+                    let _ = finished_tx.send(result);
+                });
+                captures.push(Capture::Clip {
+                    start_ms,
+                    end_ms,
+                    recording_start_ms: clip.recording_start_ms,
+                    path,
+                    shots_ms: clip.shots_ms,
+                    finished,
+                });
+            }
+        }
+        Session::Dictating {
+            armed,
+            since,
+            capture_dir,
+            captures,
+            active_clip: None,
+        }
+    }
+
     fn deadline(&self) -> Option<Instant> {
         match &self.session {
             Session::Dictating { since, .. } => {
@@ -822,19 +972,67 @@ impl Controller {
         let turn = self.mint_turn();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let captured = shots
-                .captures
-                .into_iter()
-                .filter_map(|capture| {
-                    capture.pending.finish().map(|path| clip::Shot {
-                        at_ms: capture.at_ms,
+            let flat = is_flat_clip(&shots.captures);
+            let shots_only = captures_only_shots(&shots.captures);
+            let mut captured = Vec::new();
+            for capture in shots.captures {
+                match capture {
+                    Capture::Shot { at_ms, pending } => {
+                        if let Some(path) = pending.finish() {
+                            captured.push(clip::SessionCapture::Shot(clip::Shot { at_ms, path }));
+                        }
+                    }
+                    Capture::Clip {
+                        start_ms,
+                        end_ms,
+                        recording_start_ms,
                         path,
+                        shots_ms,
+                        finished,
+                    } => {
+                        if matches!(finished.recv(), Ok(recorder::Finished(Ok(_)))) {
+                            captured.push(clip::SessionCapture::Clip(clip::SessionClip {
+                                start_ms,
+                                end_ms,
+                                recording_start_ms,
+                                path,
+                                shots_ms,
+                            }));
+                        }
+                    }
+                }
+            }
+            let result = if shots_only {
+                let plain_shots = captured
+                    .iter()
+                    .filter_map(|capture| match capture {
+                        clip::SessionCapture::Shot(shot) => Some(clip::Shot {
+                            at_ms: shot.at_ms,
+                            path: shot.path.clone(),
+                        }),
+                        clip::SessionCapture::Clip(_) => None,
                     })
-                })
-                .collect::<Vec<_>>();
-            let result = clip::package_shots(&shots.dir, duration_ms, &transcription, &captured)
-                .map(|packaged| packaged.paste)
-                .map_err(|error| error.to_string());
+                    .collect::<Vec<_>>();
+                match shots.dir.as_deref() {
+                    Some(dir) => {
+                        clip::package_shots(dir, duration_ms, &transcription, &plain_shots)
+                    }
+                    None => Err(clip::PackageError::NoStem),
+                }
+            } else if flat {
+                match captured.into_iter().next() {
+                    Some(clip::SessionCapture::Clip(clip)) => {
+                        clip::package_single_clip(duration_ms, &transcription, clip)
+                    }
+                    _ => Err(clip::PackageError::NoStem),
+                }
+            } else if let Some(dir) = shots.dir {
+                clip::package_session(&dir, duration_ms, &transcription, &captured)
+            } else {
+                Err(clip::PackageError::NoStem)
+            }
+            .map(|packaged| packaged.paste)
+            .map_err(|error| error.to_string());
             let _ = tx.send(Msg::Packaged(turn, result));
         });
         self.show(Activity::Finalizing);
@@ -870,10 +1068,14 @@ impl Controller {
                 armed,
                 capture_dir,
                 captures,
+                active_clip,
                 ..
             } => {
                 if let Some(mic) = self.mic.as_mut() {
                     let _ = mic.disarm(armed);
+                }
+                if let Some(clip) = active_clip {
+                    clip.active.abort();
                 }
                 discard_captures(capture_dir, captures);
             }
@@ -915,19 +1117,49 @@ fn audio_duration_ms(audio: &mic::Audio16k) -> u64 {
     (audio.seconds() * 1_000.0).round() as u64
 }
 
+fn capture_end_ms(capture: &Capture) -> u64 {
+    match capture {
+        Capture::Shot { at_ms, .. } => *at_ms,
+        Capture::Clip { end_ms, .. } => *end_ms,
+    }
+}
+
+fn captures_only_shots(captures: &[Capture]) -> bool {
+    captures
+        .iter()
+        .all(|capture| matches!(capture, Capture::Shot { .. }))
+}
+
+fn is_flat_clip(captures: &[Capture]) -> bool {
+    matches!(
+        captures,
+        [Capture::Clip {
+            shots_ms,
+            ..
+        }] if shots_ms.is_empty()
+    )
+}
+
 fn discard_captures(dir: Option<PathBuf>, captures: Vec<Capture>) {
-    let Some(dir) = dir else {
-        return;
-    };
     discard_shot_session(ShotSession { dir, captures });
 }
 
 fn discard_shot_session(shots: ShotSession) {
     std::thread::spawn(move || {
         for capture in shots.captures {
-            let _ = capture.pending.finish();
+            match capture {
+                Capture::Shot { pending, .. } => {
+                    let _ = pending.finish();
+                }
+                Capture::Clip { path, finished, .. } => {
+                    let _ = finished.recv();
+                    let _ = std::fs::remove_file(path);
+                }
+            }
         }
-        let _ = std::fs::remove_dir_all(shots.dir);
+        if let Some(dir) = shots.dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     });
 }
 
@@ -1128,6 +1360,104 @@ mod tests {
         controller.step(Msg::ClipStarted(now));
         controller.step(Msg::ClipEnded(now + Duration::from_secs(1)));
         assert!(matches!(controller.session, Session::Dictating { .. }));
+        controller.step(Msg::Cancel);
+    }
+
+    #[test]
+    fn a_blip_inside_a_clip_is_retroactive_and_does_not_spawn_a_screenshot() {
+        let (mut controller, _, dir) = test_controller();
+        controller.step(Msg::MainPressed);
+        let since = match &controller.session {
+            Session::Dictating { since, .. } => *since,
+            _ => panic!("expected dictation"),
+        };
+        controller.step(Msg::ClipStarted(since));
+        controller.step(Msg::ShotTaken(since + Duration::from_millis(500)));
+
+        let Session::Dictating {
+            capture_dir,
+            captures,
+            active_clip: Some(clip),
+            ..
+        } = &controller.session
+        else {
+            panic!("the clip must stay inside dictation");
+        };
+        assert!(capture_dir.is_none());
+        assert!(captures.is_empty());
+        assert_eq!(
+            clip.shots_ms,
+            [capture_offset_ms(since, since + Duration::from_millis(500))]
+        );
+        assert!(!std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.path().extension().is_some_and(|ext| ext == "png")));
+
+        controller.step(Msg::ClipEnded(since + Duration::from_millis(700)));
+        let Session::Dictating { captures, .. } = &controller.session else {
+            panic!("ending the clip stopped narration");
+        };
+        assert!(matches!(
+            captures.as_slice(),
+            [Capture::Clip { shots_ms, .. }] if shots_ms.len() == 1
+        ));
+        controller.step(Msg::Cancel);
+    }
+
+    #[test]
+    fn a_grammar_clip_shorter_than_the_pipeline_minimum_degrades_to_a_shot() {
+        let (mut controller, _, _) = test_controller();
+        controller.step(Msg::MainPressed);
+        let since = match &controller.session {
+            Session::Dictating { since, .. } => *since,
+            _ => panic!("expected dictation"),
+        };
+        controller.step(Msg::ClipStarted(since));
+        controller.step(Msg::ClipEnded(since + Duration::from_millis(400)));
+
+        let Session::Dictating {
+            captures,
+            active_clip,
+            ..
+        } = &controller.session
+        else {
+            panic!("the degraded shot stopped narration");
+        };
+        assert!(active_clip.is_none());
+        assert!(matches!(
+            captures.as_slice(),
+            [Capture::Shot { at_ms, .. }] if *at_ms == capture_offset_ms(since, since)
+        ));
+        controller.step(Msg::Cancel);
+    }
+
+    #[test]
+    fn a_clip_uses_the_finger_release_instant_as_its_end() {
+        let (mut controller, _, _) = test_controller();
+        controller.step(Msg::MainPressed);
+        let since = match &controller.session {
+            Session::Dictating { since, .. } => *since,
+            _ => panic!("expected dictation"),
+        };
+        let pressed = since + Duration::from_millis(100);
+        let released = pressed + Duration::from_millis(900);
+        controller.step(Msg::ClipStarted(pressed));
+        controller.step(Msg::ClipEnded(released));
+
+        let Session::Dictating { captures, .. } = &controller.session else {
+            panic!("ending the clip stopped narration");
+        };
+        assert!(matches!(
+            captures.as_slice(),
+            [Capture::Clip {
+                start_ms,
+                end_ms,
+                ..
+            }] if *start_ms == capture_offset_ms(since, pressed)
+                && *end_ms == capture_offset_ms(since, released)
+                && end_ms - start_ms == 900
+        ));
         controller.step(Msg::Cancel);
     }
 

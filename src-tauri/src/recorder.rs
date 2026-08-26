@@ -178,7 +178,6 @@ pub struct Active {
 }
 
 impl Active {
-    #[cfg(test)]
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
