@@ -30,7 +30,6 @@ pub enum Notice {
     NothingHeard,
     StillTranscribing,
     RecordingInProgress,
-    RecordingNeedsIdle,
     Cancelled,
     Loading(Option<u8>),
     TriggerChanged(String),
@@ -58,7 +57,6 @@ impl Notice {
             Notice::NothingHeard
             | Notice::StillTranscribing
             | Notice::RecordingInProgress
-            | Notice::RecordingNeedsIdle
             | Notice::Cancelled
             | Notice::Loading(_)
             | Notice::TriggerChanged(_)
@@ -79,7 +77,6 @@ impl Notice {
             Notice::NothingHeard => "Nothing heard".to_owned(),
             Notice::StillTranscribing => "Still transcribing".to_owned(),
             Notice::RecordingInProgress => "Screen recording in progress".to_owned(),
-            Notice::RecordingNeedsIdle => "Finish dictation before recording".to_owned(),
             Notice::Cancelled => "Cancelled".to_owned(),
             Notice::Loading(Some(percent)) => format!("Model loading {percent}%"),
             Notice::Loading(None) => "Model loading".to_owned(),

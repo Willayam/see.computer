@@ -1,7 +1,7 @@
 //! Screen recording through `/usr/sbin/screencapture`.
 
 use chrono::Local;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -41,20 +41,7 @@ impl Recorder {
             dir,
             preflight,
         } = self;
-        if *preflight {
-            #[link(name = "CoreGraphics", kind = "framework")]
-            extern "C" {
-                fn CGPreflightScreenCaptureAccess() -> bool;
-                fn CGRequestScreenCaptureAccess() -> bool;
-            }
-            let trusted = unsafe { CGPreflightScreenCaptureAccess() };
-            if !trusted {
-                unsafe {
-                    CGRequestScreenCaptureAccess();
-                }
-                return Err(Error::ScreenRecordingDenied);
-            }
-        }
+        ensure_access(*preflight)?;
         std::fs::create_dir_all(dir).map_err(|source| Error::Spawn {
             program: program.clone(),
             source,
@@ -62,7 +49,7 @@ impl Recorder {
         let stamp = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
         let mut path = dir.join(format!("{stamp}.mov"));
         let mut suffix = 2;
-        while path.exists() {
+        while path.exists() || path.with_extension("").exists() {
             path = dir.join(format!("{stamp}-{suffix}.mov"));
             suffix += 1;
         }
@@ -83,6 +70,103 @@ impl Recorder {
             started: Instant::now(),
             exited: None,
         })
+    }
+
+    pub fn session_dir(&self) -> std::io::Result<PathBuf> {
+        let Recorder::ScreenCapture { dir, .. } = self;
+        std::fs::create_dir_all(dir)?;
+        let stamp = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
+        let mut suffix = 1;
+        loop {
+            let name = if suffix == 1 {
+                stamp.clone()
+            } else {
+                format!("{stamp}-{suffix}")
+            };
+            suffix += 1;
+            let path = dir.join(name);
+            if path.with_extension("mov").exists() {
+                continue;
+            }
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    pub fn screenshot(&self, path: &Path) -> Result<PendingShot, Error> {
+        let Recorder::ScreenCapture {
+            program, preflight, ..
+        } = self;
+        ensure_access(*preflight)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| Error::Spawn {
+                program: program.clone(),
+                source,
+            })?;
+        }
+        let child = std::process::Command::new(program)
+            .arg("-x")
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|source| Error::Spawn {
+                program: program.clone(),
+                source,
+            })?;
+        Ok(PendingShot {
+            child,
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+fn ensure_access(preflight: bool) -> Result<(), Error> {
+    if !preflight {
+        return Ok(());
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
+    }
+    if unsafe { CGPreflightScreenCaptureAccess() } {
+        return Ok(());
+    }
+    unsafe {
+        CGRequestScreenCaptureAccess();
+    }
+    Err(Error::ScreenRecordingDenied)
+}
+
+pub struct PendingShot {
+    child: Child,
+    path: PathBuf,
+}
+
+impl PendingShot {
+    pub fn finish(mut self) -> Option<PathBuf> {
+        let status = wait_bounded(&mut self.child, Duration::from_secs(5));
+        if status.is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        let valid = status.is_some_and(|status| status.success())
+            && self
+                .path
+                .metadata()
+                .map(|metadata| metadata.len() > 0)
+                .unwrap_or(false);
+        if valid {
+            Some(self.path)
+        } else {
+            let _ = std::fs::remove_file(self.path);
+            None
+        }
     }
 }
 

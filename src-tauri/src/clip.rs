@@ -117,6 +117,11 @@ pub struct Packaged {
     pub paste: String,
 }
 
+pub struct Shot {
+    pub at_ms: u64,
+    pub path: PathBuf,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PackageError {
     #[error("recording has no file stem")]
@@ -183,6 +188,172 @@ pub fn paste_line(duration_ms: u64, full_text: Option<&str>, markdown: &Path) ->
             markdown.display()
         ),
     }
+}
+
+pub fn package_shots(
+    dir: &Path,
+    duration_ms: u64,
+    transcription: &Transcription,
+    shots: &[Shot],
+) -> Result<Packaged, PackageError> {
+    std::fs::create_dir_all(dir.join("shots"))?;
+    let mut shots = shots.iter().collect::<Vec<_>>();
+    shots.sort_by_key(|shot| shot.at_ms);
+    let duration_ms = duration_ms.max(
+        transcription
+            .segments
+            .last()
+            .map(|segment| segment.end_ms)
+            .unwrap_or(0),
+    );
+    std::fs::write(
+        dir.join("transcript.json"),
+        shots_transcript_json(dir, duration_ms, transcription, &shots),
+    )?;
+    let markdown = dir.join("session.md");
+    std::fs::write(
+        &markdown,
+        shots_markdown_index(dir, duration_ms, &transcription.segments, &shots),
+    )?;
+    let paste = shots_paste_line(
+        duration_ms,
+        transcription.text.as_ref().map(|text| text.as_str()),
+        &markdown,
+    );
+    Ok(Packaged { markdown, paste })
+}
+
+/// The folder carries the capture structure so the cursor only needs the
+/// narration and one path, the shape that made agents inspect selectively.
+pub fn shots_paste_line(duration_ms: u64, full_text: Option<&str>, markdown: &Path) -> String {
+    let length = if duration_ms > 0 {
+        format!(" ({})", timestamp(duration_ms))
+    } else {
+        String::new()
+    };
+    match full_text {
+        Some(text) if !text.is_empty() => format!(
+            "Screen session{length}: \"{text}\" \u{2014} screenshots: {}",
+            markdown.display()
+        ),
+        _ => format!(
+            "Screen session{length}, no narration \u{2014} screenshots: {}",
+            markdown.display()
+        ),
+    }
+}
+
+fn shots_markdown_index(
+    dir: &Path,
+    duration_ms: u64,
+    segments: &[Segment],
+    shots: &[&Shot],
+) -> String {
+    let mut md = String::new();
+    let _ = writeln!(md, "# Screen session with screenshots\n");
+    let length = if duration_ms > 0 {
+        format!("{} long, ", timestamp(duration_ms))
+    } else {
+        String::new()
+    };
+    let _ = writeln!(
+        md,
+        "{length}captured with see.computer. The transcript below is timestamped, and each \
+         screenshot sits with the sentence being spoken when it was taken. The timings and \
+         paths are also in [`transcript.json`](transcript.json).\n",
+    );
+    let _ = writeln!(md, "## Transcript\n");
+    if segments.is_empty() {
+        let _ = writeln!(md, "No speech was detected.\n");
+        for shot in shots {
+            write_shot(&mut md, dir, shot);
+        }
+        return md;
+    }
+
+    let mut remaining = shots.iter().peekable();
+    for segment in segments {
+        while let Some(shot) = remaining.peek() {
+            if shot.at_ms < segment.start_ms {
+                write_shot(&mut md, dir, shot);
+                remaining.next();
+            } else {
+                break;
+            }
+        }
+        let _ = writeln!(
+            md,
+            "**{}\u{2013}{}** {}\n",
+            timestamp(segment.start_ms),
+            timestamp(segment.end_ms),
+            segment.text
+        );
+        while let Some(shot) = remaining.peek() {
+            if shot.at_ms < segment.end_ms {
+                write_shot(&mut md, dir, shot);
+                remaining.next();
+            } else {
+                break;
+            }
+        }
+    }
+    for shot in remaining {
+        write_shot(&mut md, dir, shot);
+    }
+    md
+}
+
+fn write_shot(md: &mut String, dir: &Path, shot: &Shot) {
+    let file = shot_file(dir, shot);
+    let _ = writeln!(md, "![{}]({file})\n", timestamp(shot.at_ms));
+}
+
+fn shot_file(dir: &Path, shot: &Shot) -> String {
+    shot.path
+        .strip_prefix(dir)
+        .unwrap_or(&shot.path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn shots_transcript_json(
+    dir: &Path,
+    duration_ms: u64,
+    transcription: &Transcription,
+    shots: &[&Shot],
+) -> String {
+    let segments: Vec<serde_json::Value> = transcription
+        .segments
+        .iter()
+        .map(|segment| {
+            serde_json::json!({
+                "startMs": segment.start_ms,
+                "endMs": segment.end_ms,
+                "range": format!("{}-{}", timestamp(segment.start_ms), timestamp(segment.end_ms)),
+                "text": segment.text,
+            })
+        })
+        .collect();
+    let captures: Vec<serde_json::Value> = shots
+        .iter()
+        .map(|shot| {
+            serde_json::json!({
+                "type": "shot",
+                "atMs": shot.at_ms,
+                "timestamp": timestamp(shot.at_ms),
+                "file": shot_file(dir, shot),
+            })
+        })
+        .collect();
+    let value = serde_json::json!({
+        "type": "see-computer.session",
+        "version": 1,
+        "durationMs": duration_ms,
+        "fullText": transcription.text.as_ref().map(|text| text.as_str()).unwrap_or(""),
+        "segments": segments,
+        "captures": captures,
+    });
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_owned())
 }
 
 fn extract_frame(mov: &Path, at_ms: u64, out: &Path) -> bool {
@@ -431,6 +602,47 @@ mod tests {
             silent,
             "Screen recording, no narration \u{2014} screen frames and video: /tmp/demo/clip.md"
         );
+    }
+
+    #[test]
+    fn shot_session_paste_is_one_plain_paragraph_with_one_path() {
+        let md = Path::new("/tmp/demo/session.md");
+        let spoken = shots_paste_line(25_000, Some("Look at the misaligned button."), md);
+        assert_eq!(
+            spoken,
+            "Screen session (0:25): \"Look at the misaligned button.\" \u{2014} screenshots: /tmp/demo/session.md"
+        );
+        let silent = shots_paste_line(0, None, md);
+        assert_eq!(
+            silent,
+            "Screen session, no narration \u{2014} screenshots: /tmp/demo/session.md"
+        );
+    }
+
+    #[test]
+    fn shot_markdown_pairs_each_image_with_its_sentence() {
+        let dir = Path::new("/tmp/demo");
+        let shots = [
+            Shot {
+                at_ms: 1_000,
+                path: dir.join("shots/001.png"),
+            },
+            Shot {
+                at_ms: 5_000,
+                path: dir.join("shots/002.png"),
+            },
+        ];
+        let shots = shots.iter().collect::<Vec<_>>();
+        let segments = [
+            segment(0, 4_000, "First thing."),
+            segment(4_200, 9_000, "Second thing."),
+        ];
+        let md = shots_markdown_index(dir, 10_000, &segments, &shots);
+        let first = md.find("First thing.").unwrap();
+        let shot_one = md.find("shots/001.png").unwrap();
+        let second = md.find("Second thing.").unwrap();
+        let shot_two = md.find("shots/002.png").unwrap();
+        assert!(first < shot_one && shot_one < second && second < shot_two);
     }
 
     #[test]
