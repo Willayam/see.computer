@@ -1,0 +1,53 @@
+# Vendored copy of parakeet-rs 0.3.7 (MIT OR Apache-2.0, https://github.com/altunenes/parakeet-rs)
+# carrying one local addition: a token-bias hook in the TDT greedy decoder.
+# See FORK.md. Examples and dev-dependencies are dropped; everything else is
+# upstream verbatim so the delta stays reviewable and upstreamable.
+[package]
+name = "parakeet-rs"
+version = "0.3.7"
+edition = "2024"
+authors = ["altunenes"]
+description = "Fast ASR & Speaker Diarization with NVIDIA Parakeet via ONNX"
+repository = "https://github.com/altunenes/parakeet-rs"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "parakeet_rs"
+path = "src/lib.rs"
+
+[features]
+default = ["cpu", "ort-defaults", "api-28"]
+api-24 = ["ort/api-24"]
+api-25 = ["ort/api-25"]
+api-26 = ["ort/api-26"]
+api-27 = ["ort/api-27"]
+api-28 = ["ort/api-28"]
+cohere = []
+coreml = ["ort/coreml"]
+cpu = []
+cuda = ["ort/cuda"]
+directml = ["ort/directml"]
+load-dynamic = ["ort/load-dynamic"]
+migraphx = ["ort/migraphx"]
+multitalker = ["sortformer"]
+nnapi = ["ort/nnapi"]
+openvino = ["ort/openvino"]
+ort-defaults = ["ort/default"]
+preload-dylibs = ["ort/preload-dylibs"]
+sortformer = []
+tensorrt = ["ort/tensorrt"]
+webgpu = ["ort/webgpu"]
+
+[dependencies]
+eyre = "0.6"
+hound = "3.5"
+ndarray = "0.17"
+realfft = "3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokenizers = { version = "0.23.1", features = ["onig"], default-features = false }
+
+[dependencies.ort]
+version = "2.0.0-rc.13"
+features = ["std", "ndarray"]
+default-features = false
