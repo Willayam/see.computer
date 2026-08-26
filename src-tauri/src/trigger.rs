@@ -41,12 +41,16 @@ impl Trigger {
 
     pub fn gestures(&self) -> String {
         match self {
-            Self::LeftOption => "Hold Left Option to talk · Left Option+Shift records".to_owned(),
-            Self::RightOption => {
-                "Hold Right Option to talk · Right Option+Shift records".to_owned()
+            Self::LeftOption => {
+                "Hold Left Option to talk · hold Left Option+Shift to record".to_owned()
             }
-            Self::Fn => "Hold Fn to talk · Fn+Shift records".to_owned(),
-            Self::Chord => "Hold Option+Space to talk · Cmd+Shift+Option+Space records".to_owned(),
+            Self::RightOption => {
+                "Hold Right Option to talk · hold Right Option+Shift to record".to_owned()
+            }
+            Self::Fn => "Hold Fn to talk · hold Fn+Shift to record".to_owned(),
+            Self::Chord => {
+                "Hold Option+Space to talk · hold Cmd+Shift+Option+Space to record".to_owned()
+            }
         }
     }
 
@@ -75,7 +79,7 @@ pub struct Decoder {
     trigger: Trigger,
     arming_since: Option<Instant>,
     dictating: bool,
-    video_latched: bool,
+    video_held: bool,
     video_cooldown_until: Option<Instant>,
 }
 
@@ -91,7 +95,7 @@ impl Decoder {
             trigger,
             arming_since: None,
             dictating: false,
-            video_latched: false,
+            video_held: false,
             video_cooldown_until: None,
         }
     }
@@ -100,7 +104,7 @@ impl Decoder {
         self.trigger = trigger;
         self.arming_since = None;
         self.dictating = false;
-        self.video_latched = false;
+        self.video_held = false;
         self.video_cooldown_until = None;
     }
 
@@ -135,13 +139,14 @@ impl Decoder {
         if video_combo {
             self.arming_since = None;
             self.video_cooldown_until = Some(now + VIDEO_COOLDOWN);
-            if !self.video_latched {
-                self.video_latched = true;
+            if !self.video_held {
+                self.video_held = true;
                 self.dictating = false;
                 return Some(Msg::VideoPressed);
             }
-        } else {
-            self.video_latched = false;
+        } else if self.video_held {
+            self.video_held = false;
+            return Some(Msg::VideoReleased);
         }
 
         if !dict_target {
@@ -417,7 +422,8 @@ mod tests {
         ] {
             let gestures = trigger.gestures();
             let label_key = trigger.label().replace(" (Globe)", "").replace(" + ", "+");
-            assert!(gestures.contains("records"));
+            assert!(gestures.contains("hold"));
+            assert!(gestures.contains("to record"));
             assert!(gestures.contains(&label_key));
         }
     }
@@ -490,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn video_combo_toggles_only_on_rising_edges() {
+    fn video_combo_emits_press_then_release() {
         let start = Instant::now();
         let mut decoder = Decoder::new(Trigger::LeftOption);
         let combo = LEFT_OPTION | RIGHT_SHIFT;
@@ -501,11 +507,30 @@ mod tests {
         assert!(decoder
             .step(Input::Flags(combo), after(start, 10))
             .is_none());
-        assert!(decoder.step(Input::Flags(0), after(start, 20)).is_none());
+        assert!(matches!(
+            decoder.step(Input::Flags(0), after(start, 20)),
+            Some(Msg::VideoReleased)
+        ));
         assert!(matches!(
             decoder.step(Input::Flags(combo), after(start, 30)),
             Some(Msg::VideoPressed)
         ));
+    }
+
+    #[test]
+    fn releasing_shift_first_releases_video() {
+        let start = Instant::now();
+        let mut decoder = Decoder::new(Trigger::LeftOption);
+        let combo = LEFT_OPTION | LEFT_SHIFT;
+        assert!(matches!(
+            decoder.step(Input::Flags(combo), start),
+            Some(Msg::VideoPressed)
+        ));
+        assert!(matches!(
+            decoder.step(Input::Flags(LEFT_OPTION), after(start, 100)),
+            Some(Msg::VideoReleased)
+        ));
+        assert!(decoder.step(Input::Flags(0), after(start, 110)).is_none());
     }
 
     #[test]
@@ -550,9 +575,10 @@ mod tests {
             decoder.step(Input::Flags(combo), start),
             Some(Msg::VideoPressed)
         ));
-        assert!(decoder
-            .step(Input::Flags(LEFT_OPTION), after(start, 100))
-            .is_none());
+        assert!(matches!(
+            decoder.step(Input::Flags(LEFT_OPTION), after(start, 100)),
+            Some(Msg::VideoReleased)
+        ));
         assert!(decoder.step(Input::Tick, after(start, 300)).is_none());
         assert!(decoder.step(Input::Flags(0), after(start, 350)).is_none());
         assert!(decoder

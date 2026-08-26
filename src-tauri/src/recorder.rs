@@ -201,7 +201,7 @@ fn wait_to_signal(started: Instant) {
 }
 
 pub fn default_dir() -> PathBuf {
-    dirs::video_dir()
+    dirs::document_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_else(std::env::temp_dir)
         .join("see.computer")

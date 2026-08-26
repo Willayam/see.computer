@@ -118,6 +118,8 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
         return;
     };
     configure_hud(&window);
+    let levels_on = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    spawn_level_emitter(app.clone(), levels_on.clone());
     let app = app.clone();
     crate::qos::spawn("see-pill", crate::qos::Class::Upkeep, move || {
         let mut current = None;
@@ -148,6 +150,10 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
                 let window = window.clone();
                 let _ = dispatcher.run_on_main_thread(move || move_to_cursor_monitor(&window));
             }
+            levels_on.store(
+                matches!(current, Some(Activity::Listening | Activity::Recording)),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             let armed = matches!(
                 current,
                 Some(
@@ -197,9 +203,77 @@ fn configure_hud(window: &WebviewWindow) {
         let _: () = msg_send![window, setCollectionBehavior: behavior];
         let _: () = msg_send![window, setIgnoresMouseEvents: true];
         let _: () = msg_send![window, setHidesOnDeactivate: false];
-        let _: () = msg_send![window, setSharingType: SHARING_NONE];
+        // Kept out of screenshots and recordings, except when a verification
+        // run needs to see it (the seam mirrors the ones read in main.rs).
+        if std::env::var_os("SEE_COMPUTER_CAPTURABLE").is_none() {
+            let _: () = msg_send![window, setSharingType: SHARING_NONE];
+        }
         let _: () = msg_send![window, orderFrontRegardless];
     }
+}
+
+/// Per-frame band energies for the pill's spectrum, on the prototype's scale:
+/// 24 log-spaced bands 85 Hz..8 kHz, each already normalized 0..1.
+#[derive(Clone, Serialize)]
+struct Levels {
+    b: [f32; 24],
+    avg: f32,
+    peak: f32,
+}
+
+/// ~30 Hz while the pill shows Listening or Recording; silent otherwise.
+fn spawn_level_emitter(app: AppHandle, on: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    crate::qos::spawn("see-levels", crate::qos::Class::Upkeep, move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(33));
+        if !on.load(std::sync::atomic::Ordering::Relaxed) {
+            continue;
+        }
+        let (window, rate) = crate::mic::level_tap().window();
+        if window.len() < 256 || rate == 0 {
+            continue;
+        }
+        let _ = app.emit_to("pill", "levels", analyze(&window, rate));
+    });
+}
+
+fn analyze(samples: &[f32], rate: u32) -> Levels {
+    let n = samples.len().min(2048);
+    let tail = &samples[samples.len() - n..];
+    let mut sum = 0.0f32;
+    let mut peak = 0.0f32;
+    for &value in tail {
+        sum += value * value;
+        peak = peak.max(value.abs());
+    }
+    let rms = (sum / n as f32).sqrt();
+    let mut b = [0.0f32; 24];
+    for (k, out) in b.iter_mut().enumerate() {
+        let freq = 85.0 * (8000.0f32 / 85.0).powf((k as f32 + 0.5) / 24.0);
+        let db = 20.0 * (goertzel(tail, rate as f32, freq) + 1e-9).log10();
+        *out = ((db + 78.0) / 48.0).clamp(0.0, 1.0).powf(1.4);
+    }
+    Levels {
+        b,
+        avg: (rms * 6.0).min(1.0),
+        peak: (peak * 3.0).min(1.0),
+    }
+}
+
+/// Hann-windowed Goertzel, returning the tone's amplitude at `freq`.
+fn goertzel(samples: &[f32], rate: f32, freq: f32) -> f32 {
+    let n = samples.len();
+    let omega = 2.0 * std::f32::consts::PI * freq / rate;
+    let coeff = 2.0 * omega.cos();
+    let (mut s1, mut s2) = (0.0f32, 0.0f32);
+    for (i, &x) in samples.iter().enumerate() {
+        let hann = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (n as f32 - 1.0)).cos();
+        let s0 = x * hann + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    let power = (s1 * s1 + s2 * s2 - coeff * s1 * s2).max(0.0);
+    // 2/N for the DFT scale, /0.5 for the Hann coherent gain.
+    power.sqrt() * 4.0 / n as f32
 }
 
 fn move_to_cursor_monitor(window: &WebviewWindow) {
@@ -227,6 +301,9 @@ fn move_to_cursor_monitor(window: &WebviewWindow) {
     let origin = monitor.position();
     let screen = monitor.size();
     let x = origin.x + (screen.width.saturating_sub(size.width) / 2) as i32;
-    let y = origin.y + screen.height.saturating_sub(size.height + 96) as i32;
+    // Top-center, tucked under the menu bar. The window is transparent and
+    // click-through, so a notch-height menu bar overlapping its empty top
+    // edge is invisible; the drawn chip sits centered in the 48 pt strip.
+    let y = origin.y + (28.0 * monitor.scale_factor()) as i32;
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }

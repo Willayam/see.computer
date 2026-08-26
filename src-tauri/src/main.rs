@@ -1,6 +1,7 @@
 //! Process entry point and actor wiring.
 
 mod cli;
+mod clip;
 mod config;
 mod engine;
 mod history;

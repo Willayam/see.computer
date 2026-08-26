@@ -7,13 +7,13 @@ Two gestures. That is the whole interface.
 | Gesture | What happens |
 |---|---|
 | Hold **Left Option**, speak, release | The spoken text is pasted at your cursor, in any app. Audio never leaves the machine. |
-| **Left Option+Shift** | Press once to start a screen and microphone recording, press again to stop (it is a toggle, not hold-to-record). On stop, a link to the `.mov` is on your clipboard and pasted at your cursor. |
+| Hold **Left Option+Shift**, release to stop | Records the screen and microphone while held. On release, the recording is packaged into an agent-readable clip folder and one paragraph is pasted at your cursor: the narration in quotes, then the path to the folder's `clip.md`. Releasing before about 0.6 seconds discards the recording. |
 
-Choose Left Option, Right Option, Fn (Globe), or the legacy Option+Space trigger from the tray. Right Option is AltGr on the Swedish keyboard layout. The recording gesture always follows the trigger: whatever key you pick, add Shift to record. The legacy Option+Space and Command+Shift+Option+Space chords are active only when the Option+Space trigger is selected.
+Choose Left Option, Right Option, Fn (Globe), or the legacy Option+Space trigger from the tray. Right Option is AltGr on the Swedish keyboard layout. The recording gesture always follows the trigger: whatever key you pick, hold it with Shift to record and release to stop. The legacy Option+Space and Command+Shift+Option+Space chords are active only when the Option+Space trigger is selected.
 
 Dictation runs NVIDIA Parakeet TDT 0.6b v3 (INT8, ONNX) on the CPU. On an M3 Max a six-second Swedish sentence comes back in about 155 ms. The model is 670 MB and downloads on first launch into `~/Library/Application Support/see.computer/models/`.
 
-The link is a `file://` URL in v1. Recordings land in `~/Movies/see.computer/`.
+Recordings land in `~/Documents/see.computer/`, next to the dictation history. Next to each `<stamp>.mov` the app writes `<stamp>/` containing `clip.md` (a timestamped transcript with a screen frame inline at each sentence), `transcript.json` (the same segments, machine-readable), and `frames/` (JPEG stills, at most 16, extracted with AVFoundation). The pasted paragraph is the narration in quotes followed by the `clip.md` path, so a human or a web chatbox gets the words even where a local path is dead, and any agent that can read files can open the exact frames where each thing was said, without decoding the video. If transcription or packaging fails or times out, the plain `file://` link to the `.mov` is pasted instead. `see-computer clip <mov>` (the binary inside the bundle) rebuilds the folder for any existing recording and prints the `clip.md` path.
 
 ## Dictation history
 
@@ -58,7 +58,7 @@ Environment variables provide deterministic seams for local checks.
 
 `scripts/launch-for-verification.sh [wav] [trail]` launches the built bundle with both set. `scripts/press-hotkey.swift` posts the chords as real keyboard events so a script can drive the app, and `scripts/click-tray.swift` opens the menu panel the same way. `see-computer transcribe <wav>` (the binary inside the bundle) transcribes a file and prints the text without starting the GUI.
 
-`scripts/bench-footprint.sh` is the memory and latency ruler. `scripts/bench-under-load.sh [runs] [hogs] [qos]` runs the same transcription while `scripts/busy.swift` keeps the machine busy, which is where the thread scheduling classes earn their keep.
+`scripts/bench-footprint.sh` is the memory and latency ruler. `scripts/bench-under-load.sh [runs] [hogs] [qos]` runs the same transcription while `scripts/busy.swift` keeps the machine busy, which is where the thread scheduling classes earn their keep. `scripts/bench-cold-recording.sh` evicts the memory-mapped model weights and measures the first recording afterwards, which is where the press-time engine warm earns its keep.
 
 ```sh
 cd src-tauri && cargo test

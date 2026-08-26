@@ -12,7 +12,29 @@ use crate::paste::Text;
 pub mod parakeet;
 
 pub trait Engine: Send {
-    fn transcribe(&mut self, audio: &Audio16k) -> Result<Option<Text>, EngineError>;
+    fn transcribe(&mut self, audio: &Audio16k) -> Result<Transcription, EngineError>;
+}
+
+/// One spoken sentence with its position in the audio.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Segment {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}
+
+pub struct Transcription {
+    pub text: Option<Text>,
+    pub segments: Vec<Segment>,
+}
+
+impl Transcription {
+    pub fn empty() -> Transcription {
+        Transcription {
+            text: None,
+            segments: Vec::new(),
+        }
+    }
 }
 
 pub struct ModelFile {
@@ -219,11 +241,20 @@ pub struct JobId(u64);
 pub enum Event {
     Progress(Progress),
     Ready(Result<(), EngineError>),
-    Done(JobId, Result<Option<Text>, EngineError>),
+    Done(JobId, Result<Transcription, EngineError>),
+}
+
+enum Job {
+    /// Page the evicted model weights back in before the audio arrives, by
+    /// running the same silence inference the loader warms up with. macOS
+    /// reclaims the mmapped weights while the app sits idle, and paying the
+    /// page-in during the recording hides it from the release-to-paste path.
+    Warm,
+    Transcribe(JobId, Audio16k),
 }
 
 pub struct Worker {
-    jobs: Sender<(JobId, Audio16k)>,
+    jobs: Sender<Job>,
     next: u64,
 }
 
@@ -269,10 +300,17 @@ impl Worker {
                     return;
                 }
             };
-            while let Ok((job, audio)) = rx.recv() {
-                let result = engine.transcribe(&audio);
-                if reply.send(Event::Done(job, result).into()).is_err() {
-                    break;
+            while let Ok(job) = rx.recv() {
+                match job {
+                    Job::Warm => {
+                        let _ = engine.transcribe(&Audio16k::silence(1.0));
+                    }
+                    Job::Transcribe(job, audio) => {
+                        let result = engine.transcribe(&audio);
+                        if reply.send(Event::Done(job, result).into()).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         });
@@ -283,9 +321,15 @@ impl Worker {
         self.next = self.next.wrapping_add(1);
         let job = JobId(self.next);
         self.jobs
-            .send((job, audio))
+            .send(Job::Transcribe(job, audio))
             .map_err(|_| EngineError::Inference("transcription worker stopped".to_owned()))?;
         Ok(job)
+    }
+
+    /// Best-effort: a worker that is still loading warms itself, and a dead
+    /// worker already surfaced its error through `Event::Ready`.
+    pub fn warm(&self) {
+        let _ = self.jobs.send(Job::Warm);
     }
 }
 
@@ -294,8 +338,44 @@ struct Canned(String);
 
 #[cfg(test)]
 impl Engine for Canned {
-    fn transcribe(&mut self, _audio: &Audio16k) -> Result<Option<Text>, EngineError> {
-        Ok(Text::parse(self.0.clone()))
+    fn transcribe(&mut self, audio: &Audio16k) -> Result<Transcription, EngineError> {
+        let text = Text::parse(self.0.clone());
+        let segments = text
+            .as_ref()
+            .map(|text| {
+                vec![Segment {
+                    start_ms: 0,
+                    end_ms: (audio.seconds() * 1000.0) as u64,
+                    text: text.as_str().to_owned(),
+                }]
+            })
+            .unwrap_or_default();
+        Ok(Transcription { text, segments })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn warm_does_not_disturb_the_job_queue() {
+        let (reply, events) = std::sync::mpsc::channel::<Event>();
+        let mut worker = Worker::spawn(Loader::Canned("hello".to_owned()), reply);
+        worker.warm();
+        let job = worker.submit(Audio16k::silence(0.3)).expect("submit");
+        loop {
+            match events.recv_timeout(Duration::from_secs(5)).expect("event") {
+                Event::Done(done, result) => {
+                    assert_eq!(done, job);
+                    let text = result.expect("transcription").text.expect("text");
+                    assert_eq!(text.as_str(), "hello");
+                    break;
+                }
+                Event::Ready(result) => result.expect("ready"),
+                Event::Progress(_) => {}
+            }
+        }
     }
 }
 

@@ -5,5 +5,15 @@ fn main() {
         .compile("seemenu");
     println!("cargo:rustc-link-lib=framework=AppKit");
     println!("cargo:rerun-if-changed=native/menu.m");
+    cc::Build::new()
+        .file("native/frame.m")
+        .flag("-fobjc-arc")
+        .compile("scframe");
+    println!("cargo:rustc-link-lib=framework=AVFoundation");
+    println!("cargo:rustc-link-lib=framework=CoreMedia");
+    println!("cargo:rustc-link-lib=framework=CoreGraphics");
+    println!("cargo:rustc-link-lib=framework=ImageIO");
+    println!("cargo:rustc-link-lib=framework=Foundation");
+    println!("cargo:rerun-if-changed=native/frame.m");
     tauri_build::build();
 }

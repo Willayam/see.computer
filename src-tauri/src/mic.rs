@@ -227,6 +227,53 @@ fn append_input(shared: &Shared, data: &[f32], rate: u32, channels: u16) {
             buf.extend_from_slice(data);
         }
     }
+    level_tap().push(data, rate, channels);
+}
+
+/// The last ~100 ms of mono input, read by the pill's level emitter at ~30 Hz.
+/// A process-wide static rather than a `Wiring` field because it is tap-only
+/// telemetry: nothing in the capture or transcription path depends on it.
+pub struct LevelTap {
+    ring: Mutex<VecDeque<f32>>,
+    rate: std::sync::atomic::AtomicU32,
+}
+
+pub fn level_tap() -> &'static LevelTap {
+    static TAP: std::sync::OnceLock<LevelTap> = std::sync::OnceLock::new();
+    TAP.get_or_init(|| LevelTap {
+        ring: Mutex::new(VecDeque::new()),
+        rate: std::sync::atomic::AtomicU32::new(48_000),
+    })
+}
+
+impl LevelTap {
+    fn push(&self, interleaved: &[f32], rate: u32, channels: u16) {
+        self.rate.store(rate, Ordering::Relaxed);
+        let Ok(mut ring) = self.ring.lock() else {
+            return;
+        };
+        let channels = channels.max(1) as usize;
+        ring.extend(
+            interleaved
+                .chunks_exact(channels)
+                .map(|frame| frame.iter().sum::<f32>() / channels as f32),
+        );
+        let cap = rate as usize / 10;
+        while ring.len() > cap {
+            ring.pop_front();
+        }
+    }
+
+    /// Snapshot of the buffered window and its sample rate.
+    pub fn window(&self) -> (Vec<f32>, u32) {
+        let rate = self.rate.load(Ordering::Relaxed);
+        let samples = self
+            .ring
+            .lock()
+            .map(|ring| ring.iter().copied().collect())
+            .unwrap_or_default();
+        (samples, rate)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

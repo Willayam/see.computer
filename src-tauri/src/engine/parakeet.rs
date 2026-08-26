@@ -11,9 +11,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use parakeet_rs::Transcriber;
+use parakeet_rs::{TimestampMode, Transcriber};
 
-use super::{Engine, EngineError, ModelFiles};
+use super::{Engine, EngineError, ModelFiles, Segment, Transcription};
 use crate::mic::Audio16k;
 use crate::paste::Text;
 
@@ -89,10 +89,29 @@ fn write_external(original: &Path, prepared: &Path) -> ort::Result<()> {
 }
 
 impl Engine for Parakeet {
-    fn transcribe(&mut self, audio: &Audio16k) -> Result<Option<Text>, EngineError> {
+    fn transcribe(&mut self, audio: &Audio16k) -> Result<Transcription, EngineError> {
         self.model
-            .transcribe_samples(audio.samples().to_vec(), 16_000, 1, None)
-            .map(|result| Text::parse(result.text))
+            .transcribe_samples(
+                audio.samples().to_vec(),
+                16_000,
+                1,
+                Some(TimestampMode::Sentences),
+            )
+            .map(|result| Transcription {
+                segments: result
+                    .tokens
+                    .iter()
+                    .filter_map(|token| {
+                        let text = token.text.trim();
+                        (!text.is_empty()).then(|| Segment {
+                            start_ms: (token.start.max(0.0) * 1000.0).round() as u64,
+                            end_ms: (token.end.max(0.0) * 1000.0).round() as u64,
+                            text: text.to_owned(),
+                        })
+                    })
+                    .collect(),
+                text: Text::parse(result.text),
+            })
             .map_err(|error| EngineError::Inference(error.to_string()))
     }
 }

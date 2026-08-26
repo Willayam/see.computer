@@ -191,7 +191,9 @@ impl Panel {
         rows.extend(
             TRIGGERS.map(|(id, option)| item(id, option.label(), option == selected, None)),
         );
-        rows.push(Row::Hint("Hold to talk · add Shift to record".to_owned()));
+        rows.push(Row::Hint(
+            "Hold to talk · hold with Shift to record".to_owned(),
+        ));
         rows.push(Row::Separator);
         rows.push(item("recordings", "Open Recordings Folder", false, None));
         rows.push(item("history-folder", "Open History Folder", false, None));
