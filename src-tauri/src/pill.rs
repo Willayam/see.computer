@@ -7,6 +7,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 #[derive(Clone, Debug, PartialEq)]
 pub enum PillEvent {
     Show(Activity),
+    Shot,
     Flash(Notice),
     Finish(Notice),
     Hide,
@@ -102,6 +103,7 @@ impl Notice {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum Wire {
     Show(Activity),
+    Shot,
     Flash {
         tone: Tone,
         text: String,
@@ -126,10 +128,11 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
             match &event {
                 PillEvent::Show(activity) => current = Some(*activity),
                 PillEvent::Finish(_) | PillEvent::Hide => current = None,
-                PillEvent::Flash(_) => {}
+                PillEvent::Shot | PillEvent::Flash(_) => {}
             }
             let wire = match event {
                 PillEvent::Show(activity) => Wire::Show(activity),
+                PillEvent::Shot => Wire::Shot,
                 PillEvent::Flash(notice) => Wire::Flash {
                     tone: notice.tone(),
                     text: notice.text(),

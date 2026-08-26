@@ -90,11 +90,15 @@ enum Capture {
     Off,
     /// Shift is down and the [`TAP_WINDOW`] has not expired, so this is still
     /// either one screenshot or the opening of a clip.
-    Pending { pressed: Instant },
+    Pending {
+        pressed: Instant,
+    },
     Clip,
     /// Shift came up during a clip and the [`BLIP_WINDOW`] has not expired, so
     /// this is still either a shot inside the clip or the clip's end.
-    Gap { released: Instant },
+    Gap {
+        released: Instant,
+    },
 }
 
 pub struct Decoder {
@@ -187,55 +191,66 @@ impl Decoder {
 
     /// The Shift edge itself, once [`Decoder::expire_capture`] has aged out any
     /// fork the tick loop was too slow to resolve.
-    fn shift_edge(&mut self, shift_held: bool, now: Instant) -> Option<Msg> {
+    fn shift_edge(&mut self, shift_held: bool, now: Instant) -> Vec<Msg> {
         match (self.capture, shift_held) {
             (Capture::Off, true) => {
                 self.capture = Capture::Pending { pressed: now };
-                None
+                self.live(Msg::CaptureStarted).into_iter().collect()
             }
             (Capture::Gap { released }, true) => {
                 self.capture = Capture::Clip;
-                self.live(Msg::ShotTaken(released))
+                self.live(Msg::ShotTaken(released)).into_iter().collect()
             }
             (Capture::Pending { pressed }, false) => {
                 self.capture = Capture::Off;
-                self.live(Msg::ShotTaken(pressed))
+                [Msg::ShotTaken(pressed), Msg::CaptureEnded]
+                    .into_iter()
+                    .filter_map(|msg| self.live(msg))
+                    .collect()
             }
             (Capture::Clip, false) => {
                 self.capture = Capture::Gap { released: now };
-                None
+                Vec::new()
             }
-            _ => None,
+            _ => Vec::new(),
         }
     }
 
     /// A fork whose window has run out. A pending Shift becomes a clip, a gap
     /// becomes the clip's end, and both are stamped where the finger moved
     /// rather than where the window happened to close.
-    fn expire_capture(&mut self, now: Instant) -> Option<Msg> {
+    fn expire_capture(&mut self, now: Instant) -> Vec<Msg> {
         match self.capture {
-            Capture::Pending { pressed } if now.saturating_duration_since(pressed) >= TAP_WINDOW => {
+            Capture::Pending { pressed }
+                if now.saturating_duration_since(pressed) >= TAP_WINDOW =>
+            {
                 self.capture = Capture::Clip;
-                self.live(Msg::ClipStarted(pressed))
+                self.live(Msg::ClipStarted(pressed)).into_iter().collect()
             }
             Capture::Gap { released } if now.saturating_duration_since(released) >= BLIP_WINDOW => {
                 self.capture = Capture::Off;
-                self.live(Msg::ClipEnded(released))
+                [Msg::ClipEnded(released), Msg::CaptureEnded]
+                    .into_iter()
+                    .filter_map(|msg| self.live(msg))
+                    .collect()
             }
-            _ => None,
+            _ => Vec::new(),
         }
     }
 
     /// The session is ending, so every fork resolves the way it currently leans.
-    fn close_capture(&mut self, now: Instant) -> Option<Msg> {
-        let msg = match self.capture {
-            Capture::Off => None,
-            Capture::Pending { pressed } => Some(Msg::ShotTaken(pressed)),
-            Capture::Clip => Some(Msg::ClipEnded(now)),
-            Capture::Gap { released } => Some(Msg::ClipEnded(released)),
+    fn close_capture(&mut self, now: Instant) -> Vec<Msg> {
+        let messages = match self.capture {
+            Capture::Off => return Vec::new(),
+            Capture::Pending { pressed } => [Msg::ShotTaken(pressed), Msg::CaptureEnded],
+            Capture::Clip => [Msg::ClipEnded(now), Msg::CaptureEnded],
+            Capture::Gap { released } => [Msg::ClipEnded(released), Msg::CaptureEnded],
         };
         self.capture = Capture::Off;
-        msg.and_then(|msg| self.live(msg))
+        messages
+            .into_iter()
+            .filter_map(|msg| self.live(msg))
+            .collect()
     }
 
     /// Captures only exist inside a session. A Shift brushed against a trigger
@@ -244,14 +259,20 @@ impl Decoder {
         self.dictating.then_some(msg)
     }
 
-    fn maybe_begin_dictation(&mut self, now: Instant) -> Option<Msg> {
-        let since = self.arming_since?;
+    fn maybe_begin_dictation(&mut self, now: Instant) -> Vec<Msg> {
+        let Some(since) = self.arming_since else {
+            return Vec::new();
+        };
         if now.saturating_duration_since(since) < HOLD_THRESHOLD {
-            return None;
+            return Vec::new();
         }
         self.arming_since = None;
         self.dictating = true;
-        Some(Msg::MainPressed)
+        let mut messages = vec![Msg::MainPressed];
+        if !matches!(self.capture, Capture::Off) {
+            messages.push(Msg::CaptureStarted);
+        }
+        messages
     }
 }
 
@@ -618,7 +639,10 @@ mod tests {
         assert!(out(&right.step(Input::Tick, after(start, 180))).is_empty());
         assert!(out(&left.step(Input::Flags(LEFT_OPTION), start)).is_empty());
         assert!(out(&right.step(Input::Flags(RIGHT_OPTION), start)).is_empty());
-        assert_eq!(out(&left.step(Input::Tick, after(start, 180))), ["MainPressed"]);
+        assert_eq!(
+            out(&left.step(Input::Tick, after(start, 180))),
+            ["MainPressed"]
+        );
         assert_eq!(
             out(&right.step(Input::Tick, after(start, 180))),
             ["MainPressed"]
@@ -664,10 +688,13 @@ mod tests {
     #[test]
     fn shift_tap_is_one_shot_stamped_at_the_press() {
         let (mut decoder, start) = dictating();
-        assert!(out(&decoder.step(Input::Flags(SHIFTED), after(start, 1_000))).is_empty());
+        assert_eq!(
+            out(&decoder.step(Input::Flags(SHIFTED), after(start, 1_000))),
+            ["CaptureStarted"]
+        );
         assert!(out(&decoder.step(Input::Tick, after(start, 1_100))).is_empty());
         let taken = decoder.step(Input::Flags(LEFT_OPTION), after(start, 1_200));
-        assert_eq!(out(&taken), ["ShotTaken"]);
+        assert_eq!(out(&taken), ["ShotTaken", "CaptureEnded"]);
         assert_eq!(at(&taken, 0), after(start, 1_000));
         // The session is untouched by the capture.
         assert!(decoder.dictating());
@@ -680,7 +707,10 @@ mod tests {
     #[test]
     fn shift_held_past_the_window_starts_a_clip_at_the_press() {
         let (mut decoder, start) = dictating();
-        assert!(out(&decoder.step(Input::Flags(SHIFTED), after(start, 1_000))).is_empty());
+        assert_eq!(
+            out(&decoder.step(Input::Flags(SHIFTED), after(start, 1_000))),
+            ["CaptureStarted"]
+        );
         assert!(out(&decoder.step(Input::Tick, after(start, 1_249))).is_empty());
         let started = decoder.step(Input::Tick, after(start, 1_250));
         assert_eq!(out(&started), ["ClipStarted"]);
@@ -702,7 +732,7 @@ mod tests {
         );
         assert_eq!(
             out(&decoder.step(Input::Tick, after(start, 4_300))),
-            ["ClipEnded"]
+            ["ClipEnded", "CaptureEnded"]
         );
         // No cooldown, no re-arm: the same session runs on to its own release.
         assert!(decoder.dictating());
@@ -730,7 +760,7 @@ mod tests {
         // The gap closed into the same clip, so ticks past the window say nothing.
         assert!(out(&decoder.step(Input::Tick, after(start, 3_400))).is_empty());
         let ended = decoder.step(Input::Flags(0), after(start, 5_000));
-        assert_eq!(out(&ended), ["ClipEnded", "MainReleased"]);
+        assert_eq!(out(&ended), ["ClipEnded", "CaptureEnded", "MainReleased"]);
         assert_eq!(at(&ended, 0), after(start, 5_000));
     }
 
@@ -743,7 +773,7 @@ mod tests {
             ["ClipStarted"]
         );
         let ended = decoder.step(Input::Flags(0), after(start, 9_000));
-        assert_eq!(out(&ended), ["ClipEnded", "MainReleased"]);
+        assert_eq!(out(&ended), ["ClipEnded", "CaptureEnded", "MainReleased"]);
         assert_eq!(at(&ended, 0), after(start, 9_000));
         assert!(!decoder.dictating());
     }
@@ -755,7 +785,7 @@ mod tests {
         decoder.step(Input::Tick, after(start, 1_300));
         assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), after(start, 5_000))).is_empty());
         let ended = decoder.step(Input::Flags(0), after(start, 5_100));
-        assert_eq!(out(&ended), ["ClipEnded", "MainReleased"]);
+        assert_eq!(out(&ended), ["ClipEnded", "CaptureEnded", "MainReleased"]);
         assert_eq!(
             at(&ended, 0),
             after(start, 5_000),
@@ -768,7 +798,7 @@ mod tests {
         let (mut decoder, start) = dictating();
         decoder.step(Input::Flags(SHIFTED), after(start, 1_000));
         let ended = decoder.step(Input::Flags(0), after(start, 1_120));
-        assert_eq!(out(&ended), ["ShotTaken", "MainReleased"]);
+        assert_eq!(out(&ended), ["ShotTaken", "CaptureEnded", "MainReleased"]);
         assert_eq!(at(&ended, 0), after(start, 1_000));
     }
 
@@ -792,10 +822,16 @@ mod tests {
         assert_eq!(
             seen,
             [
+                "CaptureStarted",
                 "ShotTaken",
+                "CaptureEnded",
+                "CaptureStarted",
                 "ClipStarted",
                 "ClipEnded",
+                "CaptureEnded",
+                "CaptureStarted",
                 "ShotTaken",
+                "CaptureEnded",
                 "MainReleased"
             ]
         );
@@ -808,7 +844,7 @@ mod tests {
         assert!(out(&decoder.step(Input::Flags(SHIFTED), start)).is_empty());
         assert_eq!(
             out(&decoder.step(Input::Tick, after(start, 200))),
-            ["MainPressed"]
+            ["MainPressed", "CaptureStarted"]
         );
         assert_eq!(
             out(&decoder.step(Input::Tick, after(start, 260))),
@@ -828,7 +864,10 @@ mod tests {
     #[test]
     fn a_slow_tick_still_forks_a_long_hold_into_a_clip() {
         let (mut decoder, start) = dictating();
-        assert!(out(&decoder.step(Input::Flags(SHIFTED), after(start, 1_000))).is_empty());
+        assert_eq!(
+            out(&decoder.step(Input::Flags(SHIFTED), after(start, 1_000))),
+            ["CaptureStarted"]
+        );
         // No tick lands for 400 ms, then Shift comes up. The window expired
         // while nobody was looking, so this is a clip and not a shot.
         let late = decoder.step(Input::Flags(LEFT_OPTION), after(start, 1_400));
@@ -836,7 +875,7 @@ mod tests {
         assert_eq!(at(&late, 0), after(start, 1_000));
         assert_eq!(
             out(&decoder.step(Input::Tick, after(start, 1_700))),
-            ["ClipEnded"]
+            ["ClipEnded", "CaptureEnded"]
         );
     }
 
@@ -848,7 +887,7 @@ mod tests {
         // Shift comes up after the arm is due but before any tick reads it.
         assert_eq!(
             out(&decoder.step(Input::Flags(LEFT_OPTION), after(start, 190))),
-            ["MainPressed", "ShotTaken"],
+            ["MainPressed", "CaptureStarted", "ShotTaken", "CaptureEnded"],
             "the session has to be open before the shot inside it"
         );
     }
@@ -860,7 +899,7 @@ mod tests {
         decoder.step(Input::Tick, after(start, 1_300));
         assert_eq!(
             out(&decoder.step(Input::Flags(SHIFTED | COMMAND), after(start, 2_000))),
-            ["ClipEnded", "MainReleased"]
+            ["ClipEnded", "CaptureEnded", "MainReleased"]
         );
     }
 }

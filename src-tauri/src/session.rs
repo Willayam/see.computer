@@ -113,9 +113,11 @@ pub enum Msg {
     /// grammar below instead.
     VideoPressed,
     VideoReleased,
-    /// The capture grammar, from `trigger::Decoder`. Each carries the instant
-    /// the finger moved, not the instant the fork resolved, so a capture is
-    /// stamped where the user meant it.
+    /// The visual edges bracket the whole tap/hold fork, while the artifact
+    /// messages carry the instant the finger moved so captures are stamped
+    /// where the user meant them, not when the fork resolved.
+    CaptureStarted,
+    CaptureEnded,
     ShotTaken(Instant),
     ClipStarted(Instant),
     ClipEnded(Instant),
@@ -463,6 +465,14 @@ impl Controller {
                 }
             }
             (state @ Session::Dictating { .. }, Msg::MainPressed) => state,
+            (state @ Session::Dictating { .. }, Msg::CaptureStarted) => {
+                self.show(Activity::Recording);
+                state
+            }
+            (state @ Session::Dictating { .. }, Msg::CaptureEnded) => {
+                self.show(Activity::Listening);
+                state
+            }
             (
                 Session::Dictating {
                     armed,
@@ -476,6 +486,7 @@ impl Controller {
                 let at_ms = capture_offset_ms(since, at);
                 if let Some(clip) = active_clip.as_mut() {
                     clip.shots_ms.push(at_ms);
+                    self.shot();
                 } else {
                     self.take_screenshot(&mut capture_dir, &mut captures, at_ms);
                 }
@@ -781,6 +792,7 @@ impl Controller {
                     Ok(pending) => {
                         *capture_dir = Some(dir);
                         captures.push(Capture::Shot { at_ms, pending });
+                        self.shot();
                     }
                     Err(error) => {
                         if captures.is_empty() {
@@ -1088,6 +1100,10 @@ impl Controller {
         let _ = self.pill.send(PillEvent::Show(activity));
     }
 
+    fn shot(&self) {
+        let _ = self.pill.send(PillEvent::Shot);
+    }
+
     fn flash(&self, notice: Notice) {
         let _ = self.pill.send(PillEvent::Flash(notice));
     }
@@ -1183,6 +1199,8 @@ pub fn msg_label(message: &Msg) -> &'static str {
         Msg::MainReleased => "MainReleased",
         Msg::VideoPressed => "VideoPressed",
         Msg::VideoReleased => "VideoReleased",
+        Msg::CaptureStarted => "CaptureStarted",
+        Msg::CaptureEnded => "CaptureEnded",
         Msg::ShotTaken(_) => "ShotTaken",
         Msg::ClipStarted(_) => "ClipStarted",
         Msg::ClipEnded(_) => "ClipEnded",
@@ -1346,9 +1364,35 @@ mod tests {
             panic!("a shot interrupted dictation");
         };
         assert_eq!(captures.len(), 2);
-        assert!(!pill
-            .try_iter()
-            .any(|event| event == PillEvent::Show(Activity::Transcribing)));
+        let events = pill.try_iter().collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| **event == PillEvent::Shot)
+                .count(),
+            2
+        );
+        assert!(!events.contains(&PillEvent::Show(Activity::Transcribing)));
+        controller.step(Msg::Cancel);
+    }
+
+    #[test]
+    fn capture_edges_recolor_the_live_dictation_pill() {
+        let (mut controller, pill, _) = test_controller();
+        controller.step(Msg::MainPressed);
+        let _ = pill.try_iter().collect::<Vec<_>>();
+
+        controller.step(Msg::CaptureStarted);
+        controller.step(Msg::CaptureEnded);
+
+        assert!(matches!(controller.session, Session::Dictating { .. }));
+        assert_eq!(
+            pill.try_iter().collect::<Vec<_>>(),
+            [
+                PillEvent::Show(Activity::Recording),
+                PillEvent::Show(Activity::Listening)
+            ]
+        );
         controller.step(Msg::Cancel);
     }
 
@@ -1365,7 +1409,7 @@ mod tests {
 
     #[test]
     fn a_blip_inside_a_clip_is_retroactive_and_does_not_spawn_a_screenshot() {
-        let (mut controller, _, dir) = test_controller();
+        let (mut controller, pill, dir) = test_controller();
         controller.step(Msg::MainPressed);
         let since = match &controller.session {
             Session::Dictating { since, .. } => *since,
@@ -1389,6 +1433,7 @@ mod tests {
             clip.shots_ms,
             [capture_offset_ms(since, since + Duration::from_millis(500))]
         );
+        assert!(pill.try_iter().any(|event| event == PillEvent::Shot));
         assert!(!std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -1407,7 +1452,7 @@ mod tests {
 
     #[test]
     fn a_grammar_clip_shorter_than_the_pipeline_minimum_degrades_to_a_shot() {
-        let (mut controller, _, _) = test_controller();
+        let (mut controller, pill, _) = test_controller();
         controller.step(Msg::MainPressed);
         let since = match &controller.session {
             Session::Dictating { since, .. } => *since,
@@ -1429,6 +1474,7 @@ mod tests {
             captures.as_slice(),
             [Capture::Shot { at_ms, .. }] if *at_ms == capture_offset_ms(since, since)
         ));
+        assert!(pill.try_iter().any(|event| event == PillEvent::Shot));
         controller.step(Msg::Cancel);
     }
 
