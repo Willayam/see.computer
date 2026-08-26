@@ -69,6 +69,9 @@ pub fn extract_audio(mov: &Path) -> Option<Audio16k> {
 
 pub struct Packaged {
     pub markdown: PathBuf,
+    /// What lands at the cursor: the spoken words first, so the paste reads as
+    /// a message anywhere, then the `clip.md` path for agents that can follow it.
+    pub paste: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,7 +113,33 @@ pub fn package(mov: &Path, transcription: &Transcription) -> Result<Packaged, Pa
         &markdown,
         markdown_index(&mov_name, duration_ms, &transcription.segments, &frames),
     )?;
-    Ok(Packaged { markdown })
+    let paste = paste_line(
+        duration_ms,
+        transcription.text.as_ref().map(|text| text.as_str()),
+        &markdown,
+    );
+    Ok(Packaged { markdown, paste })
+}
+
+/// One plain paragraph: quoted narration, then the folder path. Humans and
+/// web chatboxes get the words even where a local path is dead; file-capable
+/// agents take the path to the frames and video.
+pub fn paste_line(duration_ms: u64, full_text: Option<&str>, markdown: &Path) -> String {
+    let length = if duration_ms > 0 {
+        format!(" ({})", timestamp(duration_ms))
+    } else {
+        String::new()
+    };
+    match full_text {
+        Some(text) if !text.is_empty() => format!(
+            "Screen recording{length}: \"{text}\" \u{2014} screen frames and video: {}",
+            markdown.display()
+        ),
+        _ => format!(
+            "Screen recording{length}, no narration \u{2014} screen frames and video: {}",
+            markdown.display()
+        ),
+    }
 }
 
 fn extract_frame(mov: &Path, at_ms: u64, out: &Path) -> bool {
@@ -344,6 +373,21 @@ mod tests {
         let json = std::fs::read_to_string(dir.join("fake").join("transcript.json")).unwrap();
         assert!(json.contains("\"startMs\": 0"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn paste_line_reads_as_a_message_with_the_path_last() {
+        let md = Path::new("/tmp/demo/clip.md");
+        let spoken = paste_line(25_000, Some("Look at the misaligned button."), md);
+        assert_eq!(
+            spoken,
+            "Screen recording (0:25): \"Look at the misaligned button.\" \u{2014} screen frames and video: /tmp/demo/clip.md"
+        );
+        let silent = paste_line(0, None, md);
+        assert_eq!(
+            silent,
+            "Screen recording, no narration \u{2014} screen frames and video: /tmp/demo/clip.md"
+        );
     }
 
     #[test]

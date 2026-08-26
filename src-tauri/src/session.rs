@@ -76,7 +76,7 @@ pub enum Msg {
     Engine(engine::Event),
     Recorder(Turn, recorder::Finished),
     ClipAudio(Turn, Option<mic::Audio16k>),
-    Packaged(Turn, Result<PathBuf, String>),
+    Packaged(Turn, Result<String, String>),
     Paste(Turn, paste::Outcome),
 }
 
@@ -500,7 +500,7 @@ impl Controller {
                     }
                 } else {
                     let text = match result {
-                        Ok(markdown) => paste::Text::literal(markdown.display().to_string()),
+                        Ok(paste) => paste::Text::literal(paste),
                         Err(_) => self.share.link(&recorder::Recording { path }).into_text(),
                     };
                     self.begin_paste(text, paste::Clipboard::Keep)
@@ -623,7 +623,7 @@ impl Controller {
         let mov = path.clone();
         std::thread::spawn(move || {
             let result = clip::package(&mov, &transcription)
-                .map(|packaged| packaged.markdown)
+                .map(|packaged| packaged.paste)
                 .map_err(|error| error.to_string());
             let _ = tx.send(Msg::Packaged(turn, result));
         });
