@@ -68,8 +68,21 @@ pub enum Readiness {
 pub enum Msg {
     MainPressed,
     MainReleased,
+    /// The legacy `Trigger::Chord` pairing, which still opens a bare recording
+    /// with no session around it. The bare-modifier triggers speak the capture
+    /// grammar below instead.
     VideoPressed,
     VideoReleased,
+    /// The capture grammar, from `trigger::Decoder`. Each carries the instant
+    /// the finger moved, not the instant the fork resolved, so a capture is
+    /// stamped where the user meant it. The decoder lands one commit ahead of
+    /// the session state that reads these stamps.
+    #[allow(dead_code)]
+    ShotTaken(Instant),
+    #[allow(dead_code)]
+    ClipStarted(Instant),
+    #[allow(dead_code)]
+    ClipEnded(Instant),
     Cancel,
     Quit,
     RetryEngine,
@@ -701,12 +714,15 @@ fn session_label(session: &Session) -> &'static str {
     }
 }
 
-fn msg_label(message: &Msg) -> &'static str {
+pub fn msg_label(message: &Msg) -> &'static str {
     match message {
         Msg::MainPressed => "MainPressed",
         Msg::MainReleased => "MainReleased",
         Msg::VideoPressed => "VideoPressed",
         Msg::VideoReleased => "VideoReleased",
+        Msg::ShotTaken(_) => "ShotTaken",
+        Msg::ClipStarted(_) => "ClipStarted",
+        Msg::ClipEnded(_) => "ClipEnded",
         Msg::Cancel => "Cancel",
         Msg::Quit => "Quit",
         Msg::RetryEngine => "RetryEngine",
