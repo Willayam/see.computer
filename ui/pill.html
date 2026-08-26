@@ -2,38 +2,224 @@
 <meta charset="utf-8">
 <style>
   html, body { margin: 0; background: transparent; overflow: hidden; }
+  #cv { position: fixed; inset: 0; width: 260px; height: 48px; }
   #pill {
-    position: fixed; left: 50%; bottom: 8px; transform: translateX(-50%) translateY(6px);
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%) translateY(4px);
     padding: 8px 14px; border-radius: 999px; color: #fff; font: 500 13px/1 -apple-system, system-ui;
     background: rgba(20,20,22,.92); opacity: 0; transition: opacity .12s ease-out, transform .12s ease-out;
     display: flex; align-items: center; gap: 8px; white-space: nowrap;
   }
-  #pill.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #pill.on { opacity: 1; transform: translate(-50%, -50%); }
   #dot { width: 8px; height: 8px; border-radius: 50%; background: #5ac8fa; }
-  .listening #dot { background: #ff453a; animation: pulse 1s infinite; }
-  .recording #dot { background: #ff453a; }
-  .transcribing #dot, .finalizing #dot, .preparing #dot { background: #5ac8fa; animation: pulse .6s infinite; }
+  .preparing #dot { background: #5ac8fa; animation: pulse .6s infinite; }
   .error { background: rgba(120,30,30,.94); }
   @keyframes pulse { 50% { opacity: .3; } }
 </style>
+<canvas id="cv"></canvas>
 <div id="pill"><span id="dot"></span><span id="text"></span></div>
 <script>
-  const pill = document.getElementById('pill'), text = document.getElementById('text');
-  const labels = { listening: 'Listening', transcribing: 'Transcribing', recording: 'Recording', finalizing: 'Saving' };
-  const preparing = { downloading: 'Downloading model', loading: 'Loading model', warming: 'Warming up' };
-  let hideTimer, activity = null;
-  function render(cls, msg) { clearTimeout(hideTimer); pill.className = 'on ' + cls; text.textContent = msg; }
-  function hide() { clearTimeout(hideTimer); pill.className = ''; }
-  function show(p) {
-    const a = p.activity;
-    if (a === 'preparing') return render('preparing', preparing[p.phase] + (p.phase === 'downloading' && p.pct != null ? ' ' + p.pct + '%' : ''));
-    render(a, labels[a]);
+'use strict';
+/* The breathing-bloom indicator (prototype: .context/proto/bloom-4.html,
+   "Breathing bloom" row). The container is two springs; speech blooms it,
+   silence wilts it, loading collapses it to a circle that breathes. */
+
+/* ---------- springs ---------- */
+function makeSpring(K, C, v0) { return { x: v0, v: 0, K, C }; }
+function stepSpring(s, target, dt) {
+  const h = 1 / 240; let r = Math.min(dt, 0.1);
+  if (!isFinite(s.x) || !isFinite(s.v)) { s.x = target; s.v = 0; }
+  while (r > 0) { const st = Math.min(h, r);
+    s.v += (s.K * (target - s.x) - s.C * s.v) * st; s.x += s.v * st; r -= st; }
+  return s.x;
+}
+const K_BOUNCY = Math.pow(2 * Math.PI / 0.3, 2), C_BOUNCY = 2 * 0.70 * Math.sqrt(K_BOUNCY);
+const TUNE = { resp: 0.3, damp: 0.7, wilt: 0.5, thresh: 0.05, load: 1.5 };
+const DIMS = {
+  armed: { w: 14, h: 14 }, rest: { w: 46, h: 19 },
+  full: { w: 76, h: 24 }, load: { w: 20, h: 20 },
+};
+const RED = [255, 59, 48], CYAN = [80, 200, 245], AMBER = [255, 179, 64];
+const css = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+
+/* ---------- state from the backend ---------- */
+let st = 'hidden';           // hidden | listen | transcribe | record | save
+let notice = null;           // text mode: {cls, msg} replaces the chip
+let activity = null;         // last Show payload, to restore after a flash
+let hideTimer;
+const N = 24;
+const bandT = new Float32Array(N);
+let avgT = 0, lastLevels = 0, silentFor = 0, lastT = 0;
+const ACT_MAP = { listening: 'listen', transcribing: 'transcribe', recording: 'record', finalizing: 'save' };
+const preparing = { downloading: 'Downloading model', loading: 'Loading model', warming: 'Warming up' };
+const pillEl = document.getElementById('pill'), textEl = document.getElementById('text');
+function showText(cls, msg) { pillEl.className = 'on ' + cls; textEl.textContent = msg; }
+function clearText() { pillEl.className = ''; notice = null; }
+function applyActivity(p) {
+  if (p.activity === 'preparing') {
+    st = 'hidden';
+    notice = true;
+    showText('preparing', preparing[p.phase] + (p.phase === 'downloading' && p.pct != null ? ' ' + p.pct + '%' : ''));
+    return;
   }
-  window.__TAURI__.event.listen('pill', ({ payload: p }) => {
-    if (p.kind === 'hide') { activity = null; return hide(); }
-    if (p.kind === 'show') { activity = p; return show(p); }
-    if (p.ends) activity = null;
-    render(p.tone, p.text);
-    hideTimer = setTimeout(() => activity ? show(activity) : hide(), p.tone === 'error' ? 3000 : 1600);
-  });
+  clearText();
+  st = ACT_MAP[p.activity] || 'hidden';
+}
+window.__TAURI__.event.listen('pill', ({ payload: p }) => {
+  clearTimeout(hideTimer);
+  if (p.kind === 'hide') { activity = null; st = 'hidden'; clearText(); return; }
+  if (p.kind === 'show') { activity = p; applyActivity(p); return; }
+  if (p.ends) { activity = null; st = 'hidden'; }
+  notice = true;
+  showText(p.tone, p.text);
+  hideTimer = setTimeout(() => {
+    activity ? applyActivity(activity) : (clearText(), st = 'hidden');
+  }, p.tone === 'error' ? 3000 : 1600);
+});
+window.__TAURI__.event.listen('levels', ({ payload: p }) => {
+  for (let i = 0; i < N; i++) bandT[i] = p.b[i];
+  avgT = p.avg;
+  lastLevels = performance.now();
+});
+
+/* ---------- band smoothing (attack 28, release 6) + synthetic fallback ---------- */
+const bands = new Float32Array(N);
+function tickBands(t, dt, active) {
+  if (active && performance.now() - lastLevels > 350) {
+    /* no live levels (replay seam, or mic owned elsewhere): keep the chip alive */
+    const env = 0.22 + 0.12 * Math.sin(t * 1.3);
+    for (let i = 0; i < N; i++)
+      bandT[i] = Math.max(0, env * (0.5 + 0.5 * Math.sin(t * 9 + i * 1.7)) * Math.exp(-i / N * 1.6));
+    avgT = env;
+  }
+  for (let i = 0; i < N; i++) {
+    const tv = active ? bandT[i] : 0;
+    if (tv > bands[i]) bands[i] += (tv - bands[i]) * Math.min(1, dt * 28);
+    else bands[i] += (tv - bands[i]) * Math.min(1, dt * 6);
+  }
+}
+function balancedBands(n, gain, tilt, mirror) {
+  const out = new Array(n), mid = (n - 1) / 2;
+  const pick = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.floor(i / n * N), z = Math.max(a + 1, Math.ceil((i + 1) / n * N));
+    let m = 0;
+    for (let j = a; j < z; j++) m = Math.max(m, bands[j]);
+    pick[i] = Math.min(1, Math.min(1, m * gain) * (0.7 + tilt * (i / Math.max(1, n - 1))));
+  }
+  if (!mirror) return pick;
+  for (let j = 0; j < n; j++) {
+    const u = Math.abs(j - mid) / mid;
+    out[j] = pick[Math.min(n - 1, Math.round(u * (n - 1)))];
+  }
+  return out;
+}
+
+/* ---------- geometry ---------- */
+const store = { pres: 0, sw: makeSpring(K_BOUNCY, C_BOUNCY, DIMS.armed.w),
+                sh: makeSpring(K_BOUNCY, C_BOUNCY, DIMS.armed.h),
+                sc: makeSpring(K_BOUNCY, C_BOUNCY, 0) };
+function geom(dt) {
+  const talking = avgT > TUNE.thresh;
+  const listening = st === 'listen' || st === 'record';
+  const loading = st === 'transcribe' || st === 'save';
+  store.pres += ((listening && talking ? 1 : 0) - store.pres) * Math.min(1, dt * (talking ? 7 : TUNE.wilt));
+  const resp = TUNE.resp * (loading ? 0.72 : 1);
+  const K = Math.pow(2 * Math.PI / resp, 2), C = 2 * TUNE.damp * Math.sqrt(K);
+  store.sw.K = K; store.sw.C = C; store.sh.K = K; store.sh.C = C;
+  let tw, th;
+  if (listening) {
+    tw = DIMS.rest.w + (DIMS.full.w - DIMS.rest.w) * store.pres;
+    th = DIMS.rest.h + (DIMS.full.h - DIMS.rest.h) * store.pres;
+  } else if (loading) { tw = DIMS.load.w; th = DIMS.load.h; }
+  else { tw = DIMS.armed.w; th = DIMS.armed.h; }
+  const sc = stepSpring(store.sc, st === 'hidden' || notice ? 0 : 1, dt);
+  return { W: Math.max(4, stepSpring(store.sw, tw, dt)),
+           H: Math.max(4, stepSpring(store.sh, th, dt)), sc: Math.max(0, sc) };
+}
+
+/* ---------- drawing ---------- */
+const cv = document.getElementById('cv');
+const dpr = window.devicePixelRatio || 2;
+cv.width = 260 * dpr; cv.height = 48 * dpr;
+const ctx = cv.getContext('2d');
+function bodyShell(cx, cy, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+  ctx.fillStyle = 'rgba(13,14,18,0.97)';
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.stroke();
+}
+function fillGlow(x, y, w, h, r, a, col) {
+  ctx.save();
+  ctx.shadowColor = css(col, 0.8); ctx.shadowBlur = 5;
+  ctx.fillStyle = css(col, a);
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill();
+  ctx.restore();
+}
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const t = now / 1000;
+  const active = st === 'listen' || st === 'record';
+  if (!active) silentFor = 0;
+  else if (avgT < 0.045) silentFor += dt;
+  else silentFor = 0;
+  tickBands(t, dt, active);
+  const g = geom(dt);
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height);
+  if (g.sc > 0.02) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalAlpha = Math.min(1, g.sc);
+    draw(t, g.W, g.H);
+    ctx.globalAlpha = 1;
+  }
+  requestAnimationFrame(frame);
+}
+function draw(t, W, H) {
+  const cx = 130, cy = 25;
+  const wilted = (st === 'listen' || st === 'record') && silentFor > 1.2;
+  const accent = wilted ? AMBER : st === 'record' ? RED : CYAN;
+  bodyShell(cx, cy, W, H, Math.min(W, H) / 2);
+  const pad = Math.min(10, Math.max(4, W * 0.1)), innerW = Math.max(6, W - pad * 2);
+  const maxBarH = H - 10, x0 = cx - innerW / 2, lineTh = 2.5;
+  if (st === 'transcribe' || st === 'save') {
+    /* breathing bloom: swells and settles, no rotation */
+    const speed = (st === 'save' ? 1.7 : 1) * TUNE.load;
+    const r = Math.max(3, Math.min(W, H) / 2 - 5);
+    const p = 0.5 + 0.5 * Math.sin(t * speed * Math.PI * 1.6);
+    const grad = ctx.createRadialGradient(cx, cy, 0.4, cx, cy, r * (0.5 + 0.6 * p));
+    grad.addColorStop(0, css(accent, 0.55 + 0.35 * p)); grad.addColorStop(1, css(accent, 0));
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(cx, cy, r + 3, 0, 7); ctx.fill();
+    ctx.save();
+    ctx.shadowColor = css(accent, 0.9); ctx.shadowBlur = 7;
+    ctx.fillStyle = css(accent, 0.75 + 0.25 * p);
+    ctx.beginPath(); ctx.arc(cx, cy, 1.9, 0, 7); ctx.fill();
+    ctx.restore();
+    return;
+  }
+  /* baseline: silence is just a line */
+  fillGlow(x0, cy - lineTh / 2, innerW, lineTh, lineTh / 2, wilted ? 0.55 : 0.4, accent);
+  if (wilted) {
+    const p = (t * 0.55) % 1, hx = x0 + p * innerW;
+    const grad = ctx.createLinearGradient(hx - 20, 0, hx + 20, 0);
+    grad.addColorStop(0, css(accent, 0)); grad.addColorStop(0.5, css(accent, 1)); grad.addColorStop(1, css(accent, 0));
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.roundRect(x0, cy - lineTh / 2 - 0.5, innerW, lineTh + 1, lineTh / 2); ctx.fill();
+    return;
+  }
+  /* spectrum bars; recording is the same spectrum in red */
+  const n = Math.max(5, Math.min(21, 1 + 2 * Math.floor(innerW / 9)));
+  const gap = 2, bw = Math.max(1.5, (innerW - (n - 1) * gap) / n);
+  const vs = balancedBands(n, 1.5, 1.6, true);
+  for (let i = 0; i < n; i++) {
+    const bh = lineTh + vs[i] * (maxBarH - lineTh);
+    if (bh <= lineTh + 0.4) continue;
+    fillGlow(x0 + i * (bw + gap), cy - bh / 2, bw, bh, Math.min(bw / 2, 2),
+             0.9 * (0.45 + 0.55 * Math.min(1, vs[i] * 1.4)), accent);
+  }
+}
+requestAnimationFrame(frame);
 </script>
