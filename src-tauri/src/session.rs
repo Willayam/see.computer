@@ -300,6 +300,7 @@ impl Controller {
                     match self.mic.as_mut() {
                         Some(mic) => {
                             let armed = mic.arm();
+                            self.engine.warm();
                             self.show(Activity::Listening);
                             Session::Dictating {
                                 armed,
@@ -312,6 +313,7 @@ impl Controller {
             },
             (Session::Idle, Msg::VideoPressed) => match self.recorder.start() {
                 Ok(active) => {
+                    self.engine.warm();
                     self.show(Activity::Recording);
                     Session::Recording {
                         active,
