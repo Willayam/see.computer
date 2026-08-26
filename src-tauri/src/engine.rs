@@ -223,7 +223,7 @@ impl Progress {
 }
 
 pub fn load(files: ModelFiles) -> Result<Box<dyn Engine>, EngineError> {
-    let mut engine = parakeet::Parakeet::load(&files)?;
+    let mut engine = parakeet::Parakeet::load(&files, crate::boost::Lexicon::default_path())?;
     engine.transcribe(&Audio16k::silence(1.0))?;
     Ok(Box::new(engine))
 }
