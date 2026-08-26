@@ -301,9 +301,9 @@ fn move_to_cursor_monitor(window: &WebviewWindow) {
     let origin = monitor.position();
     let screen = monitor.size();
     let x = origin.x + (screen.width.saturating_sub(size.width) / 2) as i32;
-    // Top-center, tucked under the menu bar. The window is transparent and
-    // click-through, so a notch-height menu bar overlapping its empty top
-    // edge is invisible; the drawn chip sits centered in the 48 pt strip.
-    let y = origin.y + (28.0 * monitor.scale_factor()) as i32;
+    // Bottom-center, hovering where Wispr Flow's bar lives. The window is
+    // transparent and click-through, so overlapping the Dock's edge is fine.
+    let margin = (44.0 * monitor.scale_factor()) as u32;
+    let y = origin.y + screen.height.saturating_sub(size.height + margin) as i32;
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }
