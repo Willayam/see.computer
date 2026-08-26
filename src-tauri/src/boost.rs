@@ -17,30 +17,43 @@ use std::time::SystemTime;
 
 use parakeet_rs::TokenBias;
 
-/// Bonus for the first token of a term, in logit units.
-const CONTEXT_SCORE: f32 = 1.0;
-/// How much further into a term is worth more than its start. A term's opening
-/// token gets a nudge; by the third token the acoustic evidence has piled up
-/// and committing is cheap, which is what keeps a half-matched term from
-/// dragging the decoder somewhere it should not have gone.
-const DEPTH_SCALING: f32 = 2.0;
-
-/// How hard to push overall, in the units the joint logits happen to use.
+/// How far below the model's own best token a candidate may sit and still be
+/// eligible for a bonus, in the units the joint logits happen to use.
 ///
-/// Six is where a sweep over two synthesised jargon clips and the two clean
-/// fixtures landed: below four the terms do not come through, above ten the
-/// decoder starts opening sentences with a boosted term that was never said,
-/// and the clean fixtures are untouched throughout. Provisional until the
-/// evals have a real corpus to say otherwise, which is why it is an env seam
-/// and not a recompile.
-const DEFAULT_SCALE: f32 = 6.0;
+/// This is the load-bearing one. Without it the bonus goes to every term's
+/// opening token whatever the audio said, so the longer the list the likelier
+/// one of them wins a step it had no business winning: a sixty-term vocabulary
+/// turned `pnpm build` into `PNPM Buildship` and opened a sentence with
+/// `Wispr Flow`. With the gate, a term the acoustics rule out is never in the
+/// running, and the list's size stops mattering.
+const DEFAULT_MARGIN: f32 = 3.0;
 
-fn scale() -> f32 {
-    std::env::var("SEE_COMPUTER_BOOST_SCALE")
+/// How hard to push a candidate that is in the running.
+///
+/// Eight sits in the middle of a plateau: with the margin at three, four
+/// through twelve all produce identical output on the jargon clips and leave
+/// both fixtures byte-identical, because the gate binds before the scale does.
+/// Widening the margin narrows that plateau — at ten it ends by scale six.
+const DEFAULT_SCALE: f32 = 8.0;
+
+/// How much more a token deeper inside a term is worth than the one that
+/// started it.
+///
+/// Zero. Growing the bonus with depth is what NeMo's context graph does, and it
+/// does help a genuine term finish — but it also entrenches a term the speaker
+/// never began, since abandoning one costs more the further in it got. That was
+/// how `Buildship` survived. The margin gate now stops most wrong turns from
+/// being taken at all, so the extra push has nothing left to buy; it stays a
+/// seam rather than a deletion in case a real corpus disagrees.
+const DEFAULT_DEPTH: f32 = 0.0;
+
+/// All three are env seams so the eval gate can sweep them without a recompile.
+fn tunable(name: &str, default: f32) -> f32 {
+    std::env::var(name)
         .ok()
         .and_then(|raw| raw.parse::<f32>().ok())
         .filter(|value| value.is_finite() && *value >= 0.0)
-        .unwrap_or(DEFAULT_SCALE)
+        .unwrap_or(default)
 }
 
 /// The model's sentencepiece inventory, read from the `vocab.txt` that ships
@@ -229,6 +242,8 @@ pub struct Boost {
     active: Vec<usize>,
     scratch: Vec<(usize, f32)>,
     scale: f32,
+    depth_scaling: f32,
+    margin: f32,
     /// Terms that could not be spelled out of the model's vocabulary.
     unencodable: Vec<String>,
 }
@@ -245,7 +260,9 @@ impl Boost {
             }],
             active: Vec::new(),
             scratch: Vec::new(),
-            scale: scale(),
+            scale: tunable("SEE_COMPUTER_BOOST_SCALE", DEFAULT_SCALE),
+            depth_scaling: tunable("SEE_COMPUTER_BOOST_DEPTH", DEFAULT_DEPTH),
+            margin: tunable("SEE_COMPUTER_BOOST_MARGIN", DEFAULT_MARGIN),
             unencodable: Vec::new(),
         };
         for term in terms {
@@ -304,6 +321,16 @@ impl TokenBias for Boost {
 
     fn bias(&mut self, logits: &mut [f32]) {
         self.scratch.clear();
+        // Only tokens the model was already considering are eligible. Without
+        // this the bonus is handed to every term's opening token whatever the
+        // audio said, so the more terms in the list the likelier one of them
+        // wins a step it had no business winning — which is how `pnpm build`
+        // became `PNPM Buildship`. Gating on the margin makes the list's size
+        // stop mattering: a term the acoustics rule out is never in the running
+        // to be boosted at all.
+        let best = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let floor = best - self.margin;
+
         // The root is always live: a term can start at any token.
         for index in 0..=self.active.len() {
             let node = if index == self.active.len() {
@@ -312,9 +339,9 @@ impl TokenBias for Boost {
                 self.active[index]
             };
             let depth = self.nodes[node].depth as f32;
-            let step = CONTEXT_SCORE * (1.0 + DEPTH_SCALING * depth) * self.scale;
+            let step = self.scale * (1.0 + self.depth_scaling * depth);
             for &(token, child) in &self.nodes[node].children {
-                if token >= logits.len() {
+                if token >= logits.len() || logits[token] < floor {
                     continue;
                 }
                 let bonus = step * self.nodes[child].weight;
@@ -398,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn the_bonus_grows_as_a_term_is_committed_to() {
+    fn only_the_token_a_term_is_waiting_for_is_boosted() {
         let mut boost = Boost::build(&pieces(), &[term("Tauri")]);
         boost.reset();
 
@@ -411,11 +438,50 @@ mod tests {
         boost.emitted(10);
         let mut logits = vec![0.0; 20];
         boost.bias(&mut logits);
+        assert_eq!(
+            logits[11], opening,
+            "and by default the bonus is flat, so a term the speaker never \
+             started stays as cheap to abandon as it was to enter"
+        );
+    }
+
+    #[test]
+    fn the_depth_seam_makes_a_term_harder_to_abandon() {
+        let mut boost = Boost::build(&pieces(), &[term("Tauri")]);
+        boost.depth_scaling = 2.0;
+        boost.reset();
+
+        let mut logits = vec![0.0; 20];
+        boost.bias(&mut logits);
+        let opening = logits[10];
+
+        boost.emitted(10);
+        let mut logits = vec![0.0; 20];
+        boost.bias(&mut logits);
         assert!(
             logits[11] > opening,
             "committing costs less once the term is under way: {} vs {opening}",
             logits[11]
         );
+    }
+
+    #[test]
+    fn a_term_the_audio_rules_out_is_never_in_the_running() {
+        let mut boost = Boost::build(&pieces(), &[term("Tauri")]);
+        boost.reset();
+
+        let mut logits = vec![0.0; 20];
+        logits[17] = 100.0; // the model is certain it heard something else
+        boost.bias(&mut logits);
+        assert_eq!(
+            logits[10], 0.0,
+            "a hopeless candidate gets nothing, however long the vocabulary"
+        );
+
+        let mut logits = vec![0.0; 20];
+        logits[17] = boost.margin / 2.0; // now it is merely ahead, not certain
+        boost.bias(&mut logits);
+        assert!(logits[10] > 0.0, "a near miss is still worth pushing");
     }
 
     #[test]
