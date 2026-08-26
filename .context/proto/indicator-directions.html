@@ -1,0 +1,327 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>see.computer — pill indicator directions (throwaway prototype)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #1a1c22; color: #d7d9de; font: 14px/1.45 -apple-system, system-ui; }
+  header { position: sticky; top: 0; z-index: 5; background: #1a1c22ee; backdrop-filter: blur(6px);
+           padding: 14px 22px; border-bottom: 1px solid #2c2f38; display: flex; gap: 18px; align-items: center; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .hint { color: #8b8f9a; font-size: 12.5px; }
+  button#mic { background: #2f6fed; color: #fff; border: 0; border-radius: 7px; padding: 7px 14px; font: 600 13px -apple-system; cursor: pointer; }
+  button#mic.live { background: #d84b45; }
+  table { border-collapse: collapse; margin: 10px 18px 60px; }
+  th { font-size: 11.5px; font-weight: 600; color: #9aa0ab; text-transform: uppercase; letter-spacing: .06em; padding: 14px 10px 6px; text-align: center; }
+  td.name { min-width: 190px; max-width: 210px; padding: 0 14px; vertical-align: middle; }
+  td.name b { display: block; font-size: 13.5px; color: #e8eaee; }
+  td.name span { font-size: 12px; color: #8b8f9a; }
+  td.cell { padding: 10px; }
+  .stage { width: 260px; height: 64px; border-radius: 12px; display: flex; align-items: center; justify-content: center;
+           background: linear-gradient(180deg,#23252d,#1e2026); border: 1px solid #2c2f38; }
+  tr.vrow:hover .stage { border-color: #3a3e4a; }
+  canvas { display: block; }
+</style>
+<header>
+  <h1>see.computer · 10 indicator directions</h1>
+  <span class="hint">Speaking columns run a fake speech loop (talk-pause-talk). Silent columns are true silence.</span>
+  <button id="mic">Use my microphone</button>
+  <span class="hint" id="micState"></span>
+</header>
+<table id="grid"></table>
+<script>
+'use strict';
+/* ---------- shared signals ---------- */
+let micAnalyser = null, micData = null;
+document.getElementById('mic').onclick = async (e) => {
+  if (micAnalyser) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ac = new AudioContext();
+    const src = ac.createMediaStreamSource(stream);
+    micAnalyser = ac.createAnalyser(); micAnalyser.fftSize = 512;
+    src.connect(micAnalyser);
+    micData = new Float32Array(micAnalyser.fftSize);
+    e.target.classList.add('live'); e.target.textContent = 'Live mic on';
+    document.getElementById('micState').textContent = 'speaking columns now follow your voice';
+  } catch (err) { document.getElementById('micState').textContent = 'mic denied: ' + err.name; }
+};
+function micLevel() {
+  micAnalyser.getFloatTimeDomainData(micData);
+  let sum = 0, peak = 0;
+  for (const v of micData) { sum += v * v; peak = Math.max(peak, Math.abs(v)); }
+  return { level: Math.min(1, Math.sqrt(sum / micData.length) * 6), peak: Math.min(1, peak * 3) };
+}
+/* fake speech: bursts of syllables with pauses, deterministic-ish */
+function fakeLevel(t) {
+  const phrase = (t % 7);
+  let env = 0;
+  if (phrase < 4.4) {
+    const syll = Math.max(0, Math.sin(t * 7.3) * 0.6 + Math.sin(t * 13.1) * 0.4);
+    const breath = 0.55 + 0.45 * Math.sin(t * 1.1);
+    env = Math.max(0.06, syll * breath);
+  } else if (phrase < 4.9) env = 0.03;
+  else if (phrase < 6.2) env = Math.max(0.05, Math.abs(Math.sin(t * 9.7)) * 0.7);
+  else env = 0.02;
+  const level = Math.min(1, env * (0.85 + 0.3 * Math.sin(t * 31)));
+  return { level, peak: Math.min(1, level * 1.5 + 0.08 * Math.abs(Math.sin(t * 47))) };
+}
+/* per-cell smoothed signal with history ring buffer */
+function makeSignal(kind) {
+  return { kind, level: 0, peak: 0, sm: 0, silentFor: 0, hist: new Float32Array(180).fill(0), hi: 0, t0: performance.now() };
+}
+function tickSignal(s, t, dt) {
+  let raw;
+  if (s.kind === 'silent') raw = { level: 0.008 + 0.006 * Math.abs(Math.sin(t * 3)), peak: 0.01 };
+  else if (micAnalyser) raw = micLevel();
+  else raw = fakeLevel(t);
+  s.level = raw.level; s.peak = raw.peak;
+  s.sm += (raw.level - s.sm) * Math.min(1, dt * 14);
+  s.silentFor = raw.level < 0.045 ? s.silentFor + dt : 0;
+  s.hist[s.hi] = raw.level; s.hi = (s.hi + 1) % s.hist.length;
+  s.elapsed = (performance.now() - s.t0) / 1000;
+}
+/* ---------- palette ---------- */
+const DICT = '#4fc3f7', DICT_DIM = '#274b5c', REC = '#ff5f57', REC_DIM = '#5c2b28', WARN = '#ffb340',
+      INK = '#e9ebef', MUT = '#8b8f9a', BLUE = '#6ea8fe';
+const warnOn = s => s.silentFor > 1.2;
+const mmss = e => `${Math.floor(e / 60)}:${String(Math.floor(e % 60)).padStart(2, '0')}`;
+function pill(ctx, w, h, r, fill, stroke, dash) {
+  ctx.beginPath(); ctx.roundRect(0.5, 0.5, w - 1, h - 1, r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.setLineDash(dash || []); ctx.strokeStyle = stroke; ctx.lineWidth = 1.4; ctx.stroke(); ctx.setLineDash([]); }
+}
+function label(ctx, w, h, text, color, size = 11, x = w / 2, align = 'center') {
+  ctx.fillStyle = color; ctx.font = `600 ${size}px -apple-system`; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.fillText(text, x, h / 2 + 0.5);
+}
+function accent(state) { return state === 'record' ? REC : DICT; }
+/* ---------- the 10 variants ----------
+   each: draw(ctx, w, h, state, s, t)  state ∈ listen|transcribe|record|save   */
+const VARIANTS = [
+{ name: '1 · Hex glow capsule', why: 'the object is the meter: fill + halo = your voice (Hex-style)',
+  draw(ctx, w, h, st, s, t) {
+    const a = accent(st), lv = st === 'transcribe' || st === 'save' ? 0.35 + 0.1 * Math.sin(t * 3) : s.sm;
+    const cw = 46 + 90 * Math.min(1, lv * 1.6), ch = 26, x = (w - cw) / 2, y = (h - ch) / 2;
+    ctx.save();
+    if (warnOn(s) && (st === 'listen' || st === 'record')) {
+      ctx.globalAlpha = 0.9; ctx.beginPath(); ctx.roundRect(w / 2 - 26, y, 52, ch, 13);
+      ctx.strokeStyle = WARN; ctx.setLineDash([4, 4]); ctx.lineDashOffset = -t * 20; ctx.lineWidth = 1.6; ctx.stroke(); ctx.setLineDash([]);
+      label(ctx, w, h + 42, 'no sound', WARN, 10);
+      ctx.restore(); return;
+    }
+    ctx.shadowColor = a; ctx.shadowBlur = 6 + 26 * lv;
+    ctx.beginPath(); ctx.roundRect(x, y, cw, ch, ch / 2);
+    ctx.fillStyle = st === 'record' ? `rgba(214,60,52,${0.35 + 0.6 * lv})` : `rgba(38,120,160,${0.35 + 0.6 * lv})`;
+    ctx.fill();
+    ctx.shadowBlur = 0; ctx.strokeStyle = `rgba(255,255,255,${0.12 + 0.25 * lv})`; ctx.lineWidth = 1; ctx.stroke();
+    const gw = cw * (0.25 + 0.55 * s.peak);
+    const g = ctx.createRadialGradient(w / 2, h / 2, 1, w / 2, h / 2, gw / 2 + 6);
+    g.addColorStop(0, `rgba(255,255,255,${0.25 + 0.65 * lv})`); g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.roundRect(w / 2 - gw / 2, y + 4, gw, ch - 8, 10); ctx.fill();
+    if (st === 'transcribe') { const sx = (t * 160) % (cw + 60) + x - 30;
+      const sh = ctx.createLinearGradient(sx, 0, sx + 34, 0);
+      sh.addColorStop(0, 'rgba(255,255,255,0)'); sh.addColorStop(.5, 'rgba(255,255,255,0.5)'); sh.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.save(); ctx.beginPath(); ctx.roundRect(x, y, cw, ch, 13); ctx.clip(); ctx.fillStyle = sh; ctx.fillRect(x, y, cw, ch); ctx.restore(); }
+    if (st === 'save') label(ctx, w, h + 46, 'saving…', MUT, 10);
+    if (st === 'record') label(ctx, w, h + 46, mmss(s.elapsed), '#ffb4ae', 10);
+    ctx.restore();
+  } },
+{ name: '2 · Symmetric bars', why: 'the classic voice bars (Wispr-style), silence flatlines amber',
+  draw(ctx, w, h, st, s, t) {
+    pill(ctx, w, h, 14, '#15161b');
+    const a = accent(st), n = 15, gap = 5, bw = 4, x0 = w / 2 - ((n - 1) * (bw + gap)) / 2;
+    if ((st === 'listen' || st === 'record') && warnOn(s)) {
+      ctx.fillStyle = WARN; ctx.fillRect(x0, h / 2 - 1, (n - 1) * (bw + gap) + bw, 2);
+      label(ctx, w, h * 0.42, "can't hear you", WARN, 10.5, w / 2);
+      if (st === 'record') label(ctx, w, h * 1.55, mmss(s.elapsed), MUT, 9.5);
+      return;
+    }
+    for (let i = 0; i < n; i++) {
+      const d = Math.abs(i - (n - 1) / 2) / ((n - 1) / 2);
+      let v;
+      if (st === 'transcribe' || st === 'save') v = 0.25 + 0.2 * Math.sin(t * 6 - i * 0.7);
+      else v = Math.max(0.06, s.sm * (1 - d * 0.75) * (0.6 + 0.4 * Math.sin(t * 21 + i * 2.1)));
+      const bh = Math.max(3, v * (h - 22));
+      ctx.fillStyle = st === 'save' ? MUT : a;
+      ctx.beginPath(); ctx.roundRect(x0 + i * (bw + gap), h / 2 - bh / 2, bw, bh, 2); ctx.fill();
+    }
+    if (st === 'record') { ctx.fillStyle = REC; ctx.beginPath(); ctx.arc(16, h / 2, 4, 0, 7); ctx.fill();
+      label(ctx, w, h, mmss(s.elapsed), '#ffb4ae', 10, w - 24); }
+  } },
+{ name: '3 · History ribbon', why: 'scrolling 3 s waveform = proof you were heard; gaps are visible',
+  draw(ctx, w, h, st, s, t) {
+    pill(ctx, w, h, 14, '#15161b');
+    const a = accent(st), x0 = 16, x1 = w - 16, mid = h / 2, span = x1 - x0, n = s.hist.length;
+    if (st === 'transcribe' || st === 'save') {
+      ctx.strokeStyle = st === 'save' ? MUT : a; ctx.lineWidth = 2; ctx.beginPath();
+      for (let x = x0; x <= x1; x++) ctx.lineTo(x, mid + Math.sin(x / 9 - t * 8) * 4 * Math.exp(-((x1 - x) / span) * 2));
+      ctx.stroke(); label(ctx, w, h * 0.4, st === 'save' ? 'saving…' : 'transcribing', MUT, 9.5); return;
+    }
+    for (let i = 0; i < n; i++) {
+      const v = s.hist[(s.hi + i) % n], x = x0 + (i / n) * span, bh = Math.max(1.5, v * (h - 24));
+      ctx.fillStyle = v < 0.045 ? '#3a3e4a' : a;
+      ctx.fillRect(x, mid - bh / 2, Math.max(1, span / n - 0.5), bh);
+    }
+    if (warnOn(s)) label(ctx, w, h * 0.36, `no sound ${s.silentFor.toFixed(1)}s`, WARN, 10.5);
+    if (st === 'record') { ctx.fillStyle = REC; ctx.beginPath(); ctx.arc(x1 + 6, 12, 3.5, 0, 7); ctx.globalAlpha = 0.5 + 0.5 * Math.sin(t * 5); ctx.fill(); ctx.globalAlpha = 1; }
+  } },
+{ name: '4 · Breathing orb', why: 'organic blob wobbles with your voice; silence = hollow slashed ring',
+  draw(ctx, w, h, st, s, t) {
+    const a = accent(st), cx = w / 2, cy = h / 2;
+    if ((st === 'listen' || st === 'record') && warnOn(s)) {
+      ctx.strokeStyle = WARN; ctx.lineWidth = 2; ctx.setLineDash([5, 4]); ctx.lineDashOffset = -t * 14;
+      ctx.beginPath(); ctx.arc(cx, cy, 12, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(cx - 9, cy + 9); ctx.lineTo(cx + 9, cy - 9); ctx.stroke();
+      label(ctx, w, h, 'muted?', WARN, 10.5, cx + 52); return;
+    }
+    const base = st === 'transcribe' || st === 'save' ? 10 + Math.sin(t * 4) * 1.5 : 8 + 14 * s.sm;
+    ctx.save(); ctx.shadowColor = a; ctx.shadowBlur = 18 * (st === 'listen' || st === 'record' ? s.sm : 0.4);
+    ctx.beginPath();
+    for (let i = 0; i <= 40; i++) {
+      const th = (i / 40) * Math.PI * 2;
+      const wob = (st === 'listen' || st === 'record') ? (Math.sin(th * 3 + t * 9) + Math.sin(th * 5 - t * 7)) * 3.2 * s.sm : Math.sin(th * 4 + t * 3) * 0.8;
+      const r = base + wob;
+      ctx.lineTo(cx + Math.cos(th) * r * 1.15, cy + Math.sin(th) * r);
+    }
+    ctx.closePath(); ctx.fillStyle = st === 'save' ? MUT : a; ctx.globalAlpha = 0.9; ctx.fill(); ctx.restore();
+    if (st === 'record') label(ctx, w, h, mmss(s.elapsed), '#ffb4ae', 10.5, cx + 54);
+    if (st === 'transcribe') label(ctx, w, h, 'thinking…', MUT, 10.5, cx + 58);
+  } },
+{ name: '5 · Ring meter', why: 'a gauge that fills with level around a mic / REC glyph',
+  draw(ctx, w, h, st, s, t) {
+    const a = accent(st), cx = w / 2, cy = h / 2, r = 15;
+    ctx.lineWidth = 3.4; ctx.lineCap = 'round';
+    ctx.strokeStyle = '#31343d'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.stroke();
+    if ((st === 'listen' || st === 'record') && warnOn(s)) {
+      ctx.strokeStyle = WARN; ctx.globalAlpha = 0.4 + 0.6 * Math.abs(Math.sin(t * 3.5));
+      ctx.beginPath(); ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + 0.6); ctx.stroke(); ctx.globalAlpha = 1;
+      label(ctx, w, h, 'no input', WARN, 10.5, cx + 56); return;
+    }
+    const frac = st === 'transcribe' ? (t % 1.2) / 1.2 : st === 'save' ? 1 : Math.max(0.04, s.sm);
+    ctx.strokeStyle = st === 'save' ? MUT : a;
+    ctx.beginPath(); ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2); ctx.stroke();
+    if (st === 'record') { ctx.fillStyle = REC; ctx.beginPath(); ctx.arc(cx, cy, 5 + 2 * s.peak, 0, 7); ctx.fill(); label(ctx, w, h, mmss(s.elapsed), '#ffb4ae', 10.5, cx + 58); }
+    else { ctx.fillStyle = a; ctx.beginPath(); ctx.roundRect(cx - 2.5, cy - 7, 5, 9, 2.5); ctx.fill();
+      ctx.strokeStyle = a; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.arc(cx, cy - 1, 5.5, 0.4, Math.PI - 0.4); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx, cy + 5); ctx.lineTo(cx, cy + 8); ctx.stroke(); }
+  } },
+{ name: '6 · Flatline scope', why: 'ECG metaphor: alive trace when heard, dead flatline when not',
+  draw(ctx, w, h, st, s, t) {
+    pill(ctx, w, h, 14, '#101318');
+    const a = accent(st), x0 = 14, x1 = w - 14, mid = h / 2;
+    ctx.strokeStyle = (st === 'listen' || st === 'record') && warnOn(s) ? WARN : (st === 'save' ? MUT : a);
+    ctx.lineWidth = 1.8; ctx.beginPath();
+    for (let x = x0; x <= x1; x++) {
+      const ph = (x - x0) / (x1 - x0), tt = t * 3 - ph * 4;
+      let amp = st === 'transcribe' || st === 'save' ? 0.15 : s.hist[(s.hi + Math.floor(ph * s.hist.length)) % s.hist.length];
+      const y = mid + Math.sin(tt * 11 + ph * 30) * amp * (h / 2 - 10);
+      x === x0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    if ((st === 'listen' || st === 'record') && warnOn(s)) {
+      ctx.globalAlpha = 0.5 + 0.5 * Math.sin(t * 6); label(ctx, w, h * 0.38, '— no signal —', WARN, 10); ctx.globalAlpha = 1;
+    }
+    if (st === 'record') { ctx.fillStyle = REC; ctx.beginPath(); ctx.arc(x1, 13, 3.5, 0, 7); ctx.fill(); }
+  } },
+{ name: '7 · Text-forward', why: 'words carry the state; the meter is an underline. unambiguous',
+  draw(ctx, w, h, st, s, t) {
+    pill(ctx, w, h, 14, '#15161b');
+    const a = accent(st);
+    let text, color = INK;
+    if (st === 'transcribe') text = 'Transcribing…';
+    else if (st === 'save') text = 'Saving clip…';
+    else if (warnOn(s)) { text = st === 'record' ? "Recording — can't hear you" : "Can't hear you"; color = WARN; }
+    else text = st === 'record' ? `Recording ${mmss(s.elapsed)}` : 'Listening';
+    label(ctx, w, h * 0.86, text, color, 12.5);
+    const uw = (w - 60) * (st === 'listen' || st === 'record' ? Math.max(0.03, s.sm) : 0.3 + 0.2 * Math.sin(t * 5));
+    ctx.fillStyle = warnOn(s) && st !== 'transcribe' && st !== 'save' ? WARN : (st === 'save' ? MUT : a);
+    ctx.beginPath(); ctx.roundRect(w / 2 - uw / 2, h - 16, uw, 3.5, 2); ctx.fill();
+    if (st === 'record') { ctx.fillStyle = REC; ctx.globalAlpha = 0.5 + 0.5 * Math.sin(t * 5); ctx.beginPath(); ctx.arc(20, h / 2 - 4, 4, 0, 7); ctx.fill(); ctx.globalAlpha = 1; }
+  } },
+{ name: '8 · Edge glow', why: 'nothing inside the pill; its border breathes with your level',
+  draw(ctx, w, h, st, s, t) {
+    const a = accent(st), lv = st === 'listen' || st === 'record' ? s.sm : 0.3 + 0.15 * Math.sin(t * 4);
+    if ((st === 'listen' || st === 'record') && warnOn(s)) {
+      pill(ctx, w, h, 16, '#15161b', WARN, [6, 5]); label(ctx, w, h, 'no sound', WARN, 11); return;
+    }
+    ctx.save(); ctx.shadowColor = a; ctx.shadowBlur = 4 + 30 * lv;
+    pill(ctx, w, h, 16, '#15161b', st === 'save' ? MUT : a); ctx.restore();
+    ctx.globalAlpha = 0.25 + 0.7 * lv; pill(ctx, w, h, 16, null, st === 'save' ? MUT : a); ctx.globalAlpha = 1;
+    label(ctx, w, h, st === 'transcribe' ? '…' : st === 'save' ? 'saving' : st === 'record' ? `● ${mmss(s.elapsed)}` : '', st === 'record' ? '#ffb4ae' : MUT, 11.5);
+  } },
+{ name: '9 · LED meter', why: 'retro VU: segments light with volume; one amber blink = dead air',
+  draw(ctx, w, h, st, s, t) {
+    pill(ctx, w, h, 14, '#15161b');
+    const a = accent(st), n = 14, bw = 9, gap = 4.5, x0 = w / 2 - (n * (bw + gap) - gap) / 2, y = h / 2 - 6;
+    const lit = st === 'transcribe' ? Math.floor((Math.sin(t * 6) * 0.5 + 0.5) * n) : st === 'save' ? n : Math.round(Math.max(0, s.sm) * n);
+    for (let i = 0; i < n; i++) {
+      let c = '#2a2d36';
+      if ((st === 'listen' || st === 'record') && warnOn(s)) { if (i === 0 && Math.sin(t * 6) > 0) c = WARN; }
+      else if (i < lit) c = i > n - 4 ? '#ffd60a' : (st === 'save' ? MUT : a);
+      ctx.fillStyle = c; ctx.beginPath(); ctx.roundRect(x0 + i * (bw + gap), y, bw, 12, 2.5); ctx.fill();
+    }
+    if ((st === 'listen' || st === 'record') && warnOn(s)) label(ctx, w, h * 0.4, 'check your mic', WARN, 9.5);
+    if (st === 'record') { ctx.fillStyle = REC; ctx.beginPath(); ctx.arc(14, h / 2, 3.5, 0, 7); ctx.fill(); }
+  } },
+{ name: '10 · Split status', why: 'Loom-style: identity left (mic / REC+timer), live bars right',
+  draw(ctx, w, h, st, s, t) {
+    pill(ctx, w, h, 14, '#15161b');
+    const a = accent(st);
+    if (st === 'record') { ctx.fillStyle = REC; ctx.globalAlpha = 0.6 + 0.4 * Math.sin(t * 5); ctx.beginPath(); ctx.arc(22, h / 2, 5, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
+      label(ctx, w, h, mmss(s.elapsed), INK, 12, 52, 'left'); }
+    else { ctx.strokeStyle = a; ctx.lineWidth = 1.8; ctx.fillStyle = a;
+      ctx.beginPath(); ctx.roundRect(19, h / 2 - 9, 6, 11, 3); ctx.fill();
+      ctx.beginPath(); ctx.arc(22, h / 2 + 1, 7.5, 0.35, Math.PI - 0.35); ctx.stroke();
+      label(ctx, w, h, st === 'transcribe' ? 'Transcribing' : st === 'save' ? 'Saving' : 'Listening', INK, 11.5, 38, 'left'); }
+    const bx = w - 96, bn = 9, bw2 = 5, bg = 4;
+    if ((st === 'listen' || st === 'record') && warnOn(s)) {
+      ctx.fillStyle = WARN; ctx.beginPath(); ctx.arc(bx + 36, h / 2, 4 + 1.5 * Math.sin(t * 6), 0, 7); ctx.fill();
+      label(ctx, w, h, 'no audio', WARN, 10, bx + 46, 'left'); return;
+    }
+    for (let i = 0; i < bn; i++) {
+      const v = st === 'transcribe' || st === 'save' ? 0.3 + 0.2 * Math.sin(t * 7 - i) : Math.max(0.08, s.sm * (0.55 + 0.45 * Math.sin(t * 19 + i * 1.7)));
+      const bh = Math.max(3, v * (h - 26));
+      ctx.fillStyle = st === 'save' ? MUT : a;
+      ctx.beginPath(); ctx.roundRect(bx + i * (bw2 + bg), h / 2 - bh / 2, bw2, bh, 2); ctx.fill();
+    }
+  } },
+];
+/* ---------- grid ---------- */
+const STATES = [
+  ['listen', 'speak', 'Dictating · voice'],
+  ['listen', 'silent', 'Dictating · NO sound'],
+  ['transcribe', 'speak', 'Transcribing'],
+  ['record', 'speak', 'Recording · voice'],
+  ['record', 'silent', 'Recording · NO sound'],
+  ['save', 'speak', 'Saving clip'],
+];
+const table = document.getElementById('grid');
+const head = table.insertRow();
+head.innerHTML = '<th></th>' + STATES.map(s => `<th>${s[2]}</th>`).join('');
+const cells = [];
+for (const v of VARIANTS) {
+  const tr = table.insertRow(); tr.className = 'vrow';
+  const td = tr.insertCell(); td.className = 'name';
+  td.innerHTML = `<b>${v.name}</b><span>${v.why}</span>`;
+  for (const [state, sig] of STATES) {
+    const c = tr.insertCell(); c.className = 'cell';
+    const stage = document.createElement('div'); stage.className = 'stage';
+    const cv = document.createElement('canvas');
+    cv.width = 480; cv.height = 96; cv.style.width = '240px'; cv.style.height = '48px';
+    stage.appendChild(cv); c.appendChild(stage);
+    cells.push({ v, state, sig: makeSignal(sig === 'silent' ? 'silent' : 'speak'), ctx: cv.getContext('2d') });
+  }
+}
+let last = performance.now();
+(function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const t = now / 1000;
+  for (const c of cells) {
+    tickSignal(c.sig, t, dt);
+    c.ctx.save(); c.ctx.clearRect(0, 0, 480, 96); c.ctx.scale(2, 2);
+    try { c.v.draw(c.ctx, 240, 48, c.state, c.sig, t); } catch (err) { c.ctx.fillStyle = '#f66'; c.ctx.fillText(String(err), 8, 24); }
+    c.ctx.restore();
+  }
+  requestAnimationFrame(loop);
+})(last);
+</script>

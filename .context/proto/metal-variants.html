@@ -1,0 +1,808 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>see.computer — liquid metal variants (throwaway)</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 -apple-system, system-ui; overflow: hidden; }
+  #desktop { position: fixed; inset: 0; }
+  #desktop.light { background: #e9e5dc; }
+  #desktop.photo { background: linear-gradient(135deg, #f5b26b, #e2766d 50%, #7b5ea7); }
+  #desktop.dark { background: #1d1f24; }
+  #menubar { position: fixed; top: 0; left: 0; right: 0; height: 25px;
+             background: rgba(250,248,244,0.85); backdrop-filter: blur(10px);
+             display: flex; align-items: center; gap: 18px; padding: 0 14px;
+             font-size: 12.5px; color: #3c3a36; }
+  body.darkbar #menubar { background: rgba(20,21,25,0.85); color: #c9cbd1; }
+  #doc { position: absolute; left: 50%; top: 70px; transform: translateX(-50%);
+         width: 620px; height: 100vh; background: #fff; border-radius: 8px 8px 0 0;
+         box-shadow: 0 4px 24px rgba(0,0,0,0.18); padding: 46px 54px; }
+  #desktop.dark #doc { background: #26282e; }
+  #doc .line { height: 10px; border-radius: 3px; background: #dcd8cf; margin: 14px 0; }
+  #desktop.dark #doc .line { background: #34373f; }
+  #stagecv { position: fixed; top: 34px; left: 50%; transform: translateX(-50%); z-index: 5;
+             width: 320px; height: 90px; pointer-events: none; }
+  #panel { position: fixed; right: 16px; top: 40px; width: 232px; z-index: 10; max-height: calc(100vh - 60px); overflow: auto;
+           background: rgba(22,23,28,0.94); color: #d7d9de; border: 1px solid #34363e;
+           border-radius: 12px; padding: 14px; backdrop-filter: blur(8px); }
+  #panel h2 { margin: 10px 0 8px; font-size: 11.5px; text-transform: uppercase; letter-spacing: .07em; color: #9aa0ab; }
+  #panel h2:first-child { margin-top: 0; }
+  #panel button { display: block; width: 100%; margin: 4px 0; padding: 7px 10px; text-align: left;
+                  background: #2a2c33; color: #e8eaee; border: 1px solid #3a3d46; border-radius: 8px;
+                  font: 500 12.5px -apple-system; cursor: pointer; }
+  #panel button:hover { background: #33363f; }
+  #panel button.on { background: #2f6fed; border-color: #2f6fed; color: #fff; }
+  #panel .row { display: flex; gap: 6px; }
+  #panel .row button { flex: 1; text-align: center; padding: 6px 4px; font-size: 12px; }
+  #panel .sep { height: 1px; background: #34363e; margin: 10px 0; }
+</style>
+<div id="desktop" class="light"></div>
+<div id="menubar"><b></b><span>File</span><span>Edit</span><span>View</span><span>Window</span><span>Help</span></div>
+<div id="doc">
+  <div class="line" style="width:62%"></div><div class="line" style="width:88%"></div>
+  <div class="line" style="width:74%"></div><div class="line" style="width:91%"></div>
+  <div class="line" style="width:55%"></div><div class="line" style="width:83%"></div>
+</div>
+<canvas id="stagecv"></canvas>
+<div id="panel">
+  <h2>Variant</h2><div id="variants"></div>
+  <h2>State</h2><div id="states"></div>
+  <h2>Voice</h2>
+  <div class="row" id="voices">
+    <button data-v="fake" class="on">Fake</button>
+    <button data-v="silent">Silence</button>
+    <button data-v="mic">My mic</button>
+  </div>
+  <h2>Desktop</h2>
+  <div class="row" id="bgs">
+    <button data-bg="light" class="on">Light</button>
+    <button data-bg="photo">Photo</button>
+    <button data-bg="dark">Dark</button>
+  </div>
+  <div class="sep"></div>
+  <button id="cycleD">▶ Cycle a dictation</button>
+  <button id="cycleV">▶ Cycle a video take</button>
+</div>
+<script>
+'use strict';
+/* ================= springs (stable, SwiftUI-equivalent) ================= */
+function makeSpring(K, C, v0) { return { x: v0, v: 0, K, C }; }
+function stepSpring(s, target, dt) {
+  const h = 1 / 240; let r = Math.min(dt, 0.1);
+  if (!isFinite(s.x) || !isFinite(s.v)) { s.x = target; s.v = 0; }
+  while (r > 0) { const st = Math.min(h, r);
+    s.v += (s.K * (target - s.x) - s.C * s.v) * st; s.x += s.v * st; r -= st; }
+  return s.x;
+}
+const K_METER = Math.pow(2 * Math.PI / 0.15, 2), C_METER = 2 * 0.86 * Math.sqrt(K_METER);
+const K_BOUNCY = Math.pow(2 * Math.PI / 0.3, 2), C_BOUNCY = 2 * 0.70 * Math.sqrt(K_BOUNCY);
+/* ================= audio ================= */
+let micAnalyser = null, micData = null, voice = 'fake';
+let micFreq = null, micSampleRate = 48000;
+async function enableMic() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const ac = new AudioContext(); const src = ac.createMediaStreamSource(stream);
+  micSampleRate = ac.sampleRate;
+  micAnalyser = ac.createAnalyser(); micAnalyser.fftSize = 1024;
+  micAnalyser.smoothingTimeConstant = 0.5;
+  src.connect(micAnalyser);
+  micData = new Float32Array(micAnalyser.fftSize);
+  micFreq = new Float32Array(micAnalyser.frequencyBinCount);
+}
+function micLevel() {
+  micAnalyser.getFloatTimeDomainData(micData);
+  let sum = 0, peak = 0;
+  for (const v of micData) { sum += v * v; peak = Math.max(peak, Math.abs(v)); }
+  return { avg: Math.min(1, Math.sqrt(sum / micData.length) * 6), peak: Math.min(1, peak * 3) };
+}
+function fakeLevel(t) {
+  const phrase = (t % 7); let env = 0;
+  if (phrase < 4.4) env = Math.max(0.06, Math.max(0, Math.sin(t * 7.3) * 0.6 + Math.sin(t * 13.1) * 0.4) * (0.55 + 0.45 * Math.sin(t * 1.1)));
+  else if (phrase < 4.9) env = 0.03;
+  else if (phrase < 6.2) env = Math.max(0.05, Math.abs(Math.sin(t * 9.7)) * 0.7);
+  else env = 0.02;
+  const level = Math.min(1, env * (0.85 + 0.3 * Math.sin(t * 31)));
+  return { avg: level, peak: Math.min(1, level * 1.5 + 0.08 * Math.abs(Math.sin(t * 47))) };
+}
+/* live frequency bands: 24 log-spaced buckets 85 Hz..8 kHz, fast attack slow release */
+const N_BANDS = 24;
+function micBands() {
+  micAnalyser.getFloatFrequencyData(micFreq);
+  const nyq = micSampleRate / 2, bins = micFreq.length;
+  const fLo = 85, fHi = 8000, out = new Array(N_BANDS).fill(0);
+  for (let b = 0; b < N_BANDS; b++) {
+    const f0 = fLo * Math.pow(fHi / fLo, b / N_BANDS);
+    const f1 = fLo * Math.pow(fHi / fLo, (b + 1) / N_BANDS);
+    const i0 = Math.max(0, Math.floor(f0 / nyq * bins));
+    const i1 = Math.min(bins - 1, Math.max(i0 + 1, Math.ceil(f1 / nyq * bins)));
+    let sum = 0;
+    for (let i = i0; i < i1; i++) sum += micFreq[i];
+    const db = sum / (i1 - i0);
+    out[b] = Math.pow(Math.max(0, Math.min(1, (db + 78) / 48)), 1.4);
+  }
+  return out;
+}
+const gauss = (x, c, w) => Math.exp(-((x - c) * (x - c)) / (2 * w * w));
+function fakeBands(t) {
+  const env = fakeLevel(t).avg;
+  const c1 = 0.14 + 0.06 * Math.sin(t * 1.7);
+  const c2 = 0.38 + 0.13 * Math.sin(t * 0.9 + 1.2);
+  const c3 = 0.62 + 0.1 * Math.sin(t * 1.3 + 2.4);
+  const out = new Array(N_BANDS);
+  for (let b = 0; b < N_BANDS; b++) {
+    const x = b / (N_BANDS - 1);
+    const shape = 0.45 * Math.exp(-x * 2.4)
+      + 0.9 * gauss(x, c1, 0.07) + 0.7 * gauss(x, c2, 0.1) + 0.35 * gauss(x, c3, 0.09);
+    const wobble = 0.72 + 0.28 * Math.sin(t * 12 + b * 2.3);
+    out[b] = Math.min(1, env * shape * wobble * 1.5);
+  }
+  return out;
+}
+const bandState = new Float32Array(N_BANDS);
+function tickBands(t, dt, active) {
+  const target = !active ? null
+    : voice === 'silent' ? null
+    : voice === 'mic' && micAnalyser ? micBands() : fakeBands(t);
+  for (let b = 0; b < N_BANDS; b++) {
+    const tv = target ? target[b] : 0;
+    if (tv > bandState[b]) bandState[b] += (tv - bandState[b]) * Math.min(1, dt * 28);
+    else bandState[b] += (tv - bandState[b]) * Math.min(1, dt * 6);
+  }
+}
+function bandsFor(n, gain = 1) {
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.floor(i / n * N_BANDS), z = Math.max(a + 1, Math.ceil((i + 1) / n * N_BANDS));
+    let m = 0;
+    for (let j = a; j < z; j++) m = Math.max(m, bandState[j]);
+    out[i] = Math.min(1, m * gain);
+  }
+  return out;
+}
+/* tilt-compensated, mirrored bands (low frequencies at center) */
+function balancedBands(n, gain, tilt, mirror) {
+  const base = bandsFor(n, gain);
+  const comp = base.map((v, i) => Math.min(1, v * (0.7 + tilt * (i / Math.max(1, n - 1)))));
+  if (!mirror) return comp;
+  const out = new Array(n);
+  const mid = (n - 1) / 2;
+  for (let j = 0; j < n; j++) {
+    const u = Math.abs(j - mid) / mid;
+    out[j] = comp[Math.min(n - 1, Math.round(u * (n - 1)))];
+  }
+  return out;
+}
+/* ================= shared status + signal ================= */
+const STATES = [
+  ['hidden', 'Hidden'],
+  ['armed', 'Key pressed (armed)'],
+  ['listen', 'Dictating'],
+  ['transcribe', 'Transcribing'],
+  ['record', 'Video recording'],
+  ['save', 'Saving clip'],
+];
+let status = 'listen';
+const S = {
+  m: makeSpring(K_METER, C_METER, 0), p: makeSpring(K_METER, C_METER, 0),
+  sc: makeSpring(K_BOUNCY, C_BOUNCY, 1), w: makeSpring(K_BOUNCY, C_BOUNCY, 56),
+  sampleAt: 0, mT: 0, pT: 0, silentFor: 0, t0: performance.now(), c: {},
+  lastSampleT: 0,
+};
+const warn = () => S.silentFor > 1.2 && (status === 'listen' || status === 'record');
+const recPulse = (t, hz = 0.9) => 0.55 + 0.45 * Math.sin(t * Math.PI * 2 * hz);
+/* color helpers */
+const RED = [255, 59, 48], BLUE = [10, 132, 255], CYAN = [80, 200, 245], AMBER = [255, 179, 64],
+      BLACKC = [0, 0, 0], WHITE = [255, 255, 255];
+function mixc(a, b, f) { f = Math.max(0, Math.min(1, f));
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]; }
+const css = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const hexRgb = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+/* ================= liquid metal engine (port of Jakubantalik/metal-fx, effect 1 "Plasma") =================
+   The shader renders on a hidden WebGL canvas; the 2D layer stamps crops of it
+   through clip paths. Vignette is dropped (we always clip to small shapes) and
+   per-pixel alpha is dropped (every preset here ships alphas = 1). */
+const GLW = 416, GLH = 128;
+const glcv = document.createElement('canvas'); glcv.width = GLW; glcv.height = GLH;
+const gl = glcv.getContext('webgl', { preserveDrawingBuffer: true, premultipliedAlpha: true });
+let metalOK = false, uni = {};
+const FRAG = `
+precision highp float;
+uniform vec2 u_resolution;
+uniform float u_time;
+uniform vec3 u_color1; uniform vec3 u_color2; uniform vec3 u_color3;
+uniform vec3 u_color4; uniform vec3 u_color5;
+uniform float u_intensity; uniform float u_scale; uniform float u_direction;
+uniform float u_distortion; uniform float u_complexity; uniform float u_blur;
+vec3 mod289(vec3 x){ return x - floor(x*(1.0/289.0))*289.0; }
+vec2 mod289(vec2 x){ return x - floor(x*(1.0/289.0))*289.0; }
+vec3 permute(vec3 x){ return mod289(((x*34.0)+1.0)*x); }
+float snoise(vec2 v){
+  const vec4 C = vec4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439);
+  vec2 i = floor(v + dot(v, C.yy));
+  vec2 x0 = v - i + dot(i, C.xx);
+  vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+  vec4 x12 = x0.xyxy + C.xxzz; x12.xy -= i1;
+  i = mod289(i);
+  vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0)) + i.x + vec3(0.0, i1.x, 1.0));
+  vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+  m = m*m; m = m*m;
+  vec3 x = 2.0 * fract(p * C.www) - 1.0;
+  vec3 h = abs(x) - 0.5;
+  vec3 ox = floor(x + 0.5);
+  vec3 a0 = x - ox;
+  m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
+  vec3 g;
+  g.x = a0.x * x0.x + h.x * x0.y;
+  g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+  return 130.0 * dot(m, g);
+}
+float fbm(vec2 p, float oct){
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 7; i++) {
+    if (float(i) >= oct) break;
+    v += a * snoise(p);
+    p *= 2.0; a *= 0.5;
+  }
+  return v;
+}
+float nfbm(vec2 p){ return fbm(p, 3.0 + u_complexity * 4.0); }
+vec3 palette(float t){
+  t = smoothstep(0.0, 1.0, t);
+  float k = 64.0;
+  float w1 = exp(-k * t * t);
+  float w2 = exp(-k * (t - 0.25) * (t - 0.25));
+  float w3 = exp(-k * (t - 0.5)  * (t - 0.5));
+  float w4 = exp(-k * (t - 0.75) * (t - 0.75));
+  float w5 = exp(-k * (t - 1.0)  * (t - 1.0));
+  float tot = w1 + w2 + w3 + w4 + w5 + 0.0001;
+  return (u_color1*w1 + u_color2*w2 + u_color3*w3 + u_color4*w4 + u_color5*w5) / tot;
+}
+vec2 warp(vec2 p, float t){
+  float str = u_distortion * 2.0;
+  return vec2(
+    nfbm(p + vec2(t * 0.1, 0.0)),
+    nfbm(p + vec2(0.0, t * 0.12) + 5.0)
+  ) * str;
+}
+vec3 computeEffect(vec2 uv, float aspect, float t, float dist, float cpx){
+  vec2 p = (uv - 0.5) * u_scale;
+  p.x *= aspect;
+  p += vec2(cos(u_direction), sin(u_direction)) * t * 0.15;
+  float freq = 3.0 + cpx * 8.0;
+  float val = 0.0;
+  val += sin(p.x * freq + t);
+  val += sin(p.y * freq + t * 1.3);
+  val += sin((p.x + p.y) * freq * 0.7 + t * 0.7);
+  val += sin(length(p) * freq * 0.8 - t * 1.5);
+  vec2 w = warp(p, t);
+  val += (w.x + w.y) * dist;
+  val = val * 0.2 * u_intensity + 0.5;
+  return palette(clamp(val, 0.0, 1.0));
+}
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution;
+  float aspect = u_resolution.x / u_resolution.y;
+  float t = u_time;
+  vec3 col;
+  if (u_blur < 0.01) col = computeEffect(uv, aspect, t, u_distortion, u_complexity);
+  else {
+    float r = u_blur * 0.02;
+    col  = computeEffect(uv,                 aspect, t, u_distortion, u_complexity) * 0.4;
+    col += computeEffect(uv + vec2( r, 0.0), aspect, t, u_distortion, u_complexity) * 0.15;
+    col += computeEffect(uv + vec2(-r, 0.0), aspect, t, u_distortion, u_complexity) * 0.15;
+    col += computeEffect(uv + vec2(0.0,  r), aspect, t, u_distortion, u_complexity) * 0.15;
+    col += computeEffect(uv + vec2(0.0, -r), aspect, t, u_distortion, u_complexity) * 0.15;
+  }
+  col = pow(col, vec3(1.3));
+  gl_FragColor = vec4(col, 1.0);
+}`;
+try {
+  const vs = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vs, 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }');
+  gl.compileShader(vs);
+  const fs = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fs, FRAG); gl.compileShader(fs);
+  if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(fs));
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'a');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  for (const n of ['u_resolution','u_time','u_color1','u_color2','u_color3','u_color4','u_color5',
+                   'u_intensity','u_scale','u_direction','u_distortion','u_complexity','u_blur'])
+    uni[n] = gl.getUniformLocation(prog, n);
+  gl.viewport(0, 0, GLW, GLH);
+  gl.uniform2f(uni.u_resolution, GLW, GLH);
+  metalOK = true;
+} catch (e) { document.title = 'GL ERR ' + e.message; }
+/* dark-mode preset palettes (first five stops feed the plasma shader) */
+const hex2v = h => [parseInt(h.slice(1,3),16)/255, parseInt(h.slice(3,5),16)/255, parseInt(h.slice(5,7),16)/255];
+const METAL_PALETTES = {
+  silver: ['#000000', '#dedede', '#747270', '#e5e5e5', '#0d0d0d'],    /* metal-fx silver dark, verbatim */
+  chroma: ['#000000', '#aae8ff', '#c5fe9e', '#f7888d', '#0d0d0d'],    /* metal-fx chromatic dark, verbatim */
+  gold:   ['#000000', '#ffffff', '#fff3c4', '#f7d488', '#0d0d0d'],    /* metal-fx gold dark */
+  molten: ['#1a0300', '#ff8a50', '#ffd9a0', '#ff3b30', '#140000'],    /* red-hot remap of gold for recording */
+  amber:  ['#140d00', '#ffb340', '#6b5423', '#ffd98a', '#0d0d0d'],    /* deaf/warn: frozen amber */
+};
+const DEFAULT_PM = { listen: 'silver', record: 'molten', transcribe: 'chroma', save: 'gold', warnP: 'amber', idle: 'silver' };
+/* palette + motion state, lerped so state changes melt instead of snap */
+const metal = {
+  cols: METAL_PALETTES.silver.map(hex2v),
+  speed: 0.9, inten: 2, dist: 0.3, t: 0,
+};
+function metalTick(dt, d, pm) {
+  let key, speed, inten;
+  if (d.warn) { key = pm.warnP; speed = 0.07; inten = 1.6; }
+  else if (status === 'record') { key = pm.record; speed = 1.3 + d.avg * 2.2; inten = 2 + d.avg * 1.8; }
+  else if (status === 'listen') { key = pm.listen; speed = 0.7 + d.avg * 2.6; inten = 1.8 + d.avg * 2; }
+  else if (status === 'transcribe') { key = pm.transcribe; speed = 1.7; inten = 2.2; }
+  else if (status === 'save') { key = pm.save; speed = 2.4; inten = 2.4; }
+  else { key = pm.idle; speed = 0.4; inten = 1.6; }
+  const target = METAL_PALETTES[key].map(hex2v);
+  const f = Math.min(1, dt * 6);
+  for (let i = 0; i < 5; i++) for (let c = 0; c < 3; c++)
+    metal.cols[i][c] += (target[i][c] - metal.cols[i][c]) * f;
+  metal.speed += (speed - metal.speed) * f;
+  metal.inten += (inten - metal.inten) * f;
+  metal.dist += ((0.3 + d.avg * 0.5) - metal.dist) * f;
+  metal.t += dt * metal.speed * 1.2;             /* preset speed 1.2, voice-scaled */
+}
+function metalRender() {
+  if (!metalOK) return;
+  gl.uniform1f(uni.u_time, metal.t);
+  gl.uniform3fv(uni.u_color1, metal.cols[0]); gl.uniform3fv(uni.u_color2, metal.cols[1]);
+  gl.uniform3fv(uni.u_color3, metal.cols[2]); gl.uniform3fv(uni.u_color4, metal.cols[3]);
+  gl.uniform3fv(uni.u_color5, metal.cols[4]);
+  gl.uniform1f(uni.u_intensity, metal.inten);
+  /* preset scale is 2.5, but our crops land ~2.5x downscaled on screen, so
+     compensate to keep the big smooth features of the original */
+  gl.uniform1f(uni.u_scale, 1.0);
+  gl.uniform1f(uni.u_direction, 80 * Math.PI / 180);
+  gl.uniform1f(uni.u_distortion, metal.dist);
+  gl.uniform1f(uni.u_complexity, 0.68);
+  gl.uniform1f(uni.u_blur, 1);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+/* stamp an aspect-matched crop of the metal canvas into a dest rect (CSS px) */
+function metalFill(ctx, x, y, w, h) {
+  let sw = GLW, sh = GLW * h / w;
+  if (sh > GLH) { sh = GLH; sw = GLH * w / h; }
+  ctx.drawImage(glcv, (GLW - sw) / 2, (GLH - sh) / 2, sw, sh, x, y, w, h);
+}
+/* ================= shared 2D pieces ================= */
+function hexCapsule(ctx, cx, cy, w, h, accent, avg, peak, shineT) {
+  const r = h / 2;
+  const bg = mixc(mixc(accent, BLACKC, 0.5), accent, avg);
+  ctx.save();
+  ctx.shadowColor = css(accent, avg); ctx.shadowBlur = 4;
+  ctx.fillStyle = css(bg);
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.fill();
+  ctx.shadowBlur = 8; ctx.shadowColor = css(accent, avg * 0.5);
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.save(); ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.clip();
+  ctx.globalCompositeOperation = 'screen';
+  const aGlow = avg < 0.1 ? avg / 0.1 : 1;
+  let g = ctx.createRadialGradient(cx, cy, 1, cx, cy, Math.max(4, w / 2 - 4));
+  g.addColorStop(0, css(accent, aGlow * 0.9)); g.addColorStop(1, css(accent, 0));
+  ctx.fillStyle = g; ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+  const aCore = avg < 0.1 ? avg / 0.1 * 0.5 : 0.5;
+  g = ctx.createRadialGradient(cx, cy, 0.5, cx, cy, Math.max(3, w * 0.2));
+  g.addColorStop(0, `rgba(255,255,255,${aCore})`); g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g; ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+  const pw = w * (peak + 0.6), aPeak = peak < 0.1 ? peak / 0.1 * 0.5 : 0.5;
+  g = ctx.createRadialGradient(cx, cy, 0.5, cx, cy, pw / 2);
+  g.addColorStop(0, css(accent, aPeak)); g.addColorStop(1, css(accent, 0));
+  ctx.fillStyle = g; ctx.fillRect(cx - pw / 2, cy - h / 2 + 2, pw, h - 4);
+  if (shineT !== undefined) {
+    const sx = cx - w / 2 - 20 + ((shineT * (w + 40) * 1.4) % (w + 40));
+    g = ctx.createLinearGradient(sx, 0, sx + 22, 0);
+    g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(0.5, 'rgba(255,255,255,0.5)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+  }
+  ctx.restore();
+  ctx.strokeStyle = css(mixc(accent, WHITE, 0.1), 0.6); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.stroke();
+}
+function bodyShell(ctx, cx, cy, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+  ctx.fillStyle = 'rgba(13,14,18,0.97)';
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.stroke();
+}
+/* eyeline geometry, shared by the classic and the metal builds.
+   fill(ctx, rx, ry, rw, rh, rr, alpha) draws one rounded rect. */
+const EYE = { w: 104, h: 30, bars: 21, thickness: 2.5, tilt: 1.6, mirror: true, gain: 1.5,
+              pupil: 0.2, blinkEvery: 3.6, envelope: 0.8, pulseHz: 0.9 };
+function eyelineDraw(ctx, cx, cy, t, d, fill, pupilFill) {
+  const W = EYE.w, H = EYE.h;
+  bodyShell(ctx, cx, cy, W, H, 12);
+  const pad = 10, innerW = W - pad * 2;
+  const n = EYE.bars, gap = 2, bw = Math.max(1.5, (innerW - (n - 1) * gap) / n);
+  const x0 = cx - innerW / 2, lineTh = EYE.thickness;
+  /* the baseline: silence is just a line */
+  fill(ctx, x0, cy - lineTh / 2, innerW, lineTh, lineTh / 2, d.warn ? 0.55 : 0.4);
+  if (status === 'armed' || status === 'hidden') return;
+  if (d.warn) {
+    const p = (t * 0.55) % 1, hx = x0 + p * innerW;
+    const g = ctx.createLinearGradient(hx - 22, 0, hx + 22, 0);
+    g.addColorStop(0, 'rgba(255,179,64,0)'); g.addColorStop(0.5, 'rgba(255,179,64,1)'); g.addColorStop(1, 'rgba(255,179,64,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.roundRect(x0, cy - lineTh / 2 - 0.5, innerW, lineTh + 1, lineTh / 2); ctx.fill();
+    return;
+  }
+  if (status === 'transcribe' || status === 'save') {
+    const speed = status === 'save' ? 2.6 : 1.1;
+    for (let i = 0; i < n; i++) {
+      const u = i / (n - 1);
+      const wv = Math.max(0, Math.sin((u - t * speed) * Math.PI * 2)) * 0.5;
+      if (wv < 0.05) continue;
+      const bh = lineTh + wv * (H - 14 - lineTh) * 0.4;
+      fill(ctx, x0 + i * (bw + gap), cy - bh / 2, bw, bh, bw / 2, 0.35 + wv);
+    }
+    return;
+  }
+  /* listening or recording: bars fill in from the line, balanced */
+  const rec = status === 'record';
+  const bands = balancedBands(n, EYE.gain, EYE.tilt, EYE.mirror);
+  const blink = rec && ((t + 0.9) % EYE.blinkEvery) < 0.14;
+  const maxH = H - 12;
+  for (let i = 0; i < n; i++) {
+    const u = n === 1 ? 0.5 : i / (n - 1);
+    let v = bands[i], alpha = 0.9;
+    if (rec) {
+      let env = Math.pow(Math.sin(Math.PI * u), 0.8);
+      const inPupil = Math.abs(u - 0.5) < EYE.pupil / 2;
+      if (inPupil) env *= 0.12;
+      const shaped = (0.3 + 0.7 * v) * env;
+      v = v * (1 - EYE.envelope) + shaped * EYE.envelope;
+      if (inPupil) alpha = 1;
+      if (blink) v = 0;
+    }
+    const bh = lineTh + v * (maxH - lineTh);
+    if (bh <= lineTh + 0.4) continue;
+    fill(ctx, x0 + i * (bw + gap), cy - bh / 2, bw, bh, Math.min(bw / 2, 2),
+         alpha * (0.45 + 0.55 * Math.min(1, v * 1.4)));
+  }
+  if (rec && !blink) {
+    const pw = Math.max(2, EYE.pupil * innerW * 0.3);
+    (pupilFill || ((c, x, y, w2, h2, r2) => {
+      c.fillStyle = `rgba(255,255,255,${0.35 + 0.25 * recPulse(t, EYE.pulseHz)})`;
+      c.beginPath(); c.roundRect(x, y, w2, h2, r2); c.fill();
+    }))(ctx, cx - pw / 2, cy - lineTh, pw, lineTh * 2, lineTh);
+  }
+}
+/* ================= drive ================= */
+function drive(t, dt) {
+  if (t >= S.sampleAt) {
+    const raw = voice === 'silent' ? { avg: 0.004, peak: 0.006 }
+      : voice === 'mic' && micAnalyser ? micLevel() : fakeLevel(t);
+    S.mT = raw.avg; S.pT = raw.peak; S.sampleAt = t + 0.1;
+    if (raw.avg < 0.045) S.silentFor += Math.max(0, t - S.lastSampleT); else S.silentFor = 0;
+    S.lastSampleT = t;
+  }
+  const active = status === 'listen' || status === 'record';
+  const avg = Math.min(1, stepSpring(S.m, active ? S.mT : 0, dt) * 3);
+  const peak = Math.min(1, stepSpring(S.p, active ? S.pT : 0, dt) * 3);
+  tickBands(t, dt, active);
+  const sc = stepSpring(S.sc, status === 'hidden' ? 0 : 1, dt);
+  const wTarget = active ? (warn() ? 16 : 56) : status === 'transcribe' || status === 'save' ? 36 : 16;
+  const w = stepSpring(S.w, wTarget, dt);
+  return { avg, peak, sc, w, warn: warn(), elapsed: (performance.now() - S.t0) / 1000 };
+}
+/* ================= variants ================= */
+const VARIANTS = [
+/* ---- liquid metal adaptations ---- */
+{ id: 'mliquid', label: 'Liquid metal eyeline', metal: true, noScale: true,
+  palettes: DEFAULT_PM,
+  draw(ctx, cx, cy, t, d) {
+    eyelineDraw(ctx, cx, cy, t, d, (c, x, y, w, h, r, a) => {
+      c.save(); c.globalAlpha = Math.min(1, a + 0.2);
+      c.beginPath(); c.roundRect(x, y, w, h, r); c.clip();
+      metalFill(c, cx - EYE.w / 2 + 6, cy - EYE.h / 2 + 4, EYE.w - 12, EYE.h - 8);
+      c.restore();
+    });
+  } },
+{ id: 'mrim', label: 'Metal rim chip', metal: true, noScale: true,
+  palettes: DEFAULT_PM,
+  draw(ctx, cx, cy, t, d) {
+    const W = EYE.w, H = EYE.h, rim = 2.5;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+    ctx.fillStyle = 'rgba(13,14,18,0.97)';
+    ctx.beginPath(); ctx.roundRect(cx - W / 2, cy - H / 2, W, H, 12); ctx.fill();
+    ctx.restore();
+    /* the rim is the state display */
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(cx - W / 2, cy - H / 2, W, H, 12);
+    ctx.roundRect(cx - W / 2 + rim, cy - H / 2 + rim, W - rim * 2, H - rim * 2, 12 - rim);
+    ctx.clip('evenodd');
+    metalFill(ctx, cx - W / 2, cy - H / 2, W, H);
+    ctx.restore();
+    ctx.fillStyle = 'rgba(13,14,18,0.97)';
+    ctx.beginPath(); ctx.roundRect(cx - W / 2 + rim, cy - H / 2 + rim, W - rim * 2, H - rim * 2, 12 - rim); ctx.fill();
+    /* quiet monochrome eyeline inside */
+    const white = (c, x, y, w, h, r, a) => { c.fillStyle = `rgba(240,242,248,${a})`;
+      c.beginPath(); c.roundRect(x, y, w, h, r); c.fill(); };
+    const pad = 12, innerW = W - pad * 2, n = EYE.bars, gap = 2;
+    const bw = Math.max(1.5, (innerW - (n - 1) * gap) / n), x0 = cx - innerW / 2, lineTh = 2;
+    white(ctx, x0, cy - lineTh / 2, innerW, lineTh, 1, d.warn ? 0.5 : 0.3);
+    if (status === 'listen' || status === 'record') {
+      if (!d.warn) {
+        const bands = balancedBands(n, EYE.gain, EYE.tilt, EYE.mirror);
+        const maxH = H - 14;
+        for (let i = 0; i < n; i++) {
+          const v = bands[i];
+          const bh = lineTh + v * (maxH - lineTh);
+          if (bh <= lineTh + 0.4) continue;
+          white(ctx, x0 + i * (bw + gap), cy - bh / 2, bw, bh, 1.5, 0.4 + 0.5 * v);
+        }
+        if (status === 'record') {
+          ctx.fillStyle = `rgba(255,69,58,${0.6 + 0.4 * recPulse(t, EYE.pulseHz)})`;
+          ctx.beginPath(); ctx.arc(cx, cy, 2.2, 0, 7); ctx.fill();
+        }
+      }
+    } else if (status === 'transcribe' || status === 'save') {
+      const speed = status === 'save' ? 2.6 : 1.1;
+      for (let i = 0; i < n; i++) {
+        const u = i / (n - 1);
+        const wv = Math.max(0, Math.sin((u - t * speed) * Math.PI * 2)) * 0.5;
+        if (wv < 0.05) continue;
+        const bh = lineTh + wv * 8;
+        white(ctx, x0 + i * (bw + gap), cy - bh / 2, bw, bh, 1.5, 0.3 + wv);
+      }
+    }
+  } },
+{ id: 'mcapsule', label: 'Molten Hex capsule', metal: true,
+  palettes: DEFAULT_PM,
+  draw(ctx, cx, cy, t, d) {
+    const h = 16, w = d.w, r = h / 2;
+    ctx.save();
+    ctx.shadowColor = status === 'record' ? css(RED, 0.5 * d.avg + 0.2) : 'rgba(200,210,225,0.35)';
+    ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r);
+    ctx.fillStyle = '#0d0e12'; ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.clip();
+    metalFill(ctx, cx - w / 2, cy - h / 2, w, h);
+    /* Hex's white core + peak bar layered over the metal */
+    ctx.globalCompositeOperation = 'screen';
+    const aCore = d.avg < 0.1 ? d.avg / 0.1 * 0.45 : 0.45;
+    let g = ctx.createRadialGradient(cx, cy, 0.5, cx, cy, Math.max(3, w * 0.2));
+    g.addColorStop(0, `rgba(255,255,255,${aCore})`); g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+    const pw = w * (d.peak + 0.6), aPeak = d.peak < 0.1 ? d.peak / 0.1 * 0.4 : 0.4;
+    g = ctx.createRadialGradient(cx, cy, 0.5, cx, cy, pw / 2);
+    g.addColorStop(0, `rgba(255,255,255,${aPeak})`); g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(cx - pw / 2, cy - h / 2 + 2, pw, h - 4);
+    ctx.restore();
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.stroke();
+  } },
+{ id: 'meye', label: 'Molten eye', metal: true, noScale: true,
+  palettes: DEFAULT_PM,
+  draw(ctx, cx, cy, t, d) {
+    const W = 44, H = 20;
+    bodyShell(ctx, cx, cy, W, H, 10);
+    const rec = status === 'record' && !d.warn;
+    const blink = rec && ((t + 0.9) % EYE.blinkEvery) < 0.16;
+    S.c.open = (S.c.open ?? 0.1) + (((rec && !blink) ? 1 : 0.12) - (S.c.open ?? 0.1)) * Math.min(1, (1 / 60) * 14);
+    const ew = 30, eh = Math.max(2.5, 13 * S.c.open);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cx - ew / 2, cy);
+    ctx.quadraticCurveTo(cx, cy - eh, cx + ew / 2, cy);
+    ctx.quadraticCurveTo(cx, cy + eh, cx - ew / 2, cy);
+    ctx.clip();
+    metalFill(ctx, cx - ew / 2, cy - eh, ew, eh * 2);
+    ctx.restore();
+    if (rec && S.c.open > 0.55) {
+      ctx.fillStyle = 'rgba(12,4,4,0.92)';
+      ctx.beginPath(); ctx.arc(cx, cy, 3.1, 0, 7); ctx.fill();
+      ctx.strokeStyle = `rgba(255,255,255,${0.45 + 0.35 * recPulse(t, EYE.pulseHz)})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(cx, cy, 3.1, 0, 7); ctx.stroke();
+    }
+  } },
+{ id: 'mplasma', label: 'Chromatic plasma chip', metal: true, noScale: true,
+  palettes: { listen: 'chroma', record: 'molten', transcribe: 'silver', save: 'gold', warnP: 'amber', idle: 'chroma' },
+  draw(ctx, cx, cy, t, d) {
+    const W = 64, H = 22;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.45)'; ctx.shadowBlur = 9; ctx.shadowOffsetY = 3;
+    ctx.beginPath(); ctx.roundRect(cx - W / 2, cy - H / 2, W, H, 11);
+    ctx.fillStyle = '#0d0e12'; ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.beginPath(); ctx.roundRect(cx - W / 2, cy - H / 2, W, H, 11); ctx.clip();
+    metalFill(ctx, cx - W / 2, cy - H / 2, W, H);
+    /* voice presses a dark iris out of the plasma so loudness reads at a glance */
+    const quiet = 1 - Math.min(1, d.avg * 1.6);
+    if ((status === 'listen' || status === 'record') && !d.warn && quiet > 0.05) {
+      ctx.fillStyle = `rgba(10,11,15,${0.62 * quiet})`;
+      ctx.fillRect(cx - W / 2, cy - H / 2, W, H);
+      ctx.globalCompositeOperation = 'destination-over';
+    }
+    ctx.restore();
+    if (status === 'record' && !d.warn) {
+      ctx.fillStyle = `rgba(255,255,255,${0.5 + 0.4 * recPulse(t, EYE.pulseHz)})`;
+      ctx.beginPath(); ctx.arc(cx, cy, 1.9, 0, 7); ctx.fill();
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,0.28)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(cx - W / 2, cy - H / 2, W, H, 11); ctx.stroke();
+  } },
+/* ---- last round's finalists ---- */
+{ id: 'eyeline', label: 'Eyeline (classic)', noScale: true,
+  draw(ctx, cx, cy, t, d) {
+    const CYc = hexRgb('#50c8f5'), RDc = hexRgb('#ff3b30'), AMc = hexRgb('#ffb340');
+    const accent = d.warn ? AMc : status === 'record' ? RDc : CYc;
+    ctx.save();
+    ctx.shadowColor = css(accent); ctx.shadowBlur = 6;
+    eyelineDraw(ctx, cx, cy, t, d, (c, x, y, w, h, r, a) => {
+      c.fillStyle = css(accent, a);
+      c.beginPath(); c.roundRect(x, y, w, h, r); c.fill();
+    });
+    ctx.restore();
+  } },
+{ id: 'hex', label: 'Hex verbatim', draw(ctx, cx, cy, t, d) {
+    if (d.warn) { hexCapsule(ctx, cx, cy, 16, 16, RED, 0.05, 0); return; }
+    if (status === 'transcribe' || status === 'save') hexCapsule(ctx, cx, cy, d.w, 16, BLUE, 0.3, 0.1, t);
+    else if (status === 'listen' || status === 'record') hexCapsule(ctx, cx, cy, d.w, 16, RED, d.avg, d.peak);
+    else hexCapsule(ctx, cx, cy, 16, 16, BLACKC, 0, 0);
+  } },
+{ id: 'palette', label: 'Palette (cyan/red/amber)', draw(ctx, cx, cy, t, d) {
+    if (d.warn) { hexCapsule(ctx, cx, cy, 16, 16, AMBER, 0.25 + 0.2 * Math.sin(t * 2.5), 0); return; }
+    if (status === 'transcribe' || status === 'save') hexCapsule(ctx, cx, cy, d.w, 16, CYAN, 0.3, 0.1, t);
+    else if (status === 'record') hexCapsule(ctx, cx, cy, d.w, 16, RED, Math.max(d.avg, 0.3 * recPulse(t)), d.peak);
+    else if (status === 'listen') hexCapsule(ctx, cx, cy, d.w, 16, CYAN, d.avg, d.peak);
+    else hexCapsule(ctx, cx, cy, 16, 16, BLACKC, 0, 0);
+  } },
+{ id: 'pupil', label: 'The pupil', draw(ctx, cx, cy, t, d) {
+    VARIANTS.find(v => v.id === 'palette').draw(ctx, cx, cy, t, d);
+    if (status !== 'listen' && status !== 'record') {
+      if (status === 'transcribe') { ctx.fillStyle = 'rgba(10,10,12,0.85)';
+        ctx.beginPath(); ctx.roundRect(cx - 4, cy - 1, 8, 2, 1); ctx.fill(); }
+      return;
+    }
+    if (d.warn) { const lx = Math.sin(t * 2.2) * 3.5;
+      ctx.fillStyle = 'rgba(10,10,12,0.85)';
+      ctx.beginPath(); ctx.arc(cx + lx, cy, 2.6, 0, 7); ctx.fill(); return; }
+    const blink = ((t + 0.8) % 4.2) < 0.12;
+    if (blink) { ctx.fillStyle = 'rgba(10,10,12,0.85)';
+      ctx.beginPath(); ctx.roundRect(cx - 4.5, cy - 1, 9, 2, 1); ctx.fill(); return; }
+    const pr = 2 + 3 * Math.min(1, d.avg * 1.2);
+    ctx.fillStyle = 'rgba(10,10,12,0.88)';
+    ctx.beginPath(); ctx.arc(cx, cy, pr, 0, 7); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.beginPath(); ctx.arc(cx - pr * 0.35, cy - pr * 0.35, Math.max(0.5, pr * 0.22), 0, 7); ctx.fill();
+  } },
+{ id: 'jelly', label: 'Fukasawa jelly', draw(ctx, cx, cy, t, d) {
+    S.c.wob = (S.c.wob ?? 0) + (((status === 'listen' || status === 'record') && !d.warn ? S.mT : 0) - (S.c.wob ?? 0)) * 0.12;
+    S.c.sag = (S.c.sag ?? 0) + ((d.warn ? 1 : 0) - (S.c.sag ?? 0)) * 0.06;
+    const breathe = status === 'transcribe' ? Math.sin(t * 2.6) * 0.06 : 0;
+    const jump = status === 'save' ? Math.abs(Math.sin(t * 3.4)) * 5 : 0;
+    const sx2 = 1 + S.c.wob * 0.55 + breathe - S.c.sag * 0.12;
+    const sy2 = 1 - S.c.wob * 0.3 - breathe - S.c.sag * 0.28;
+    const W = 52 * sx2, H = 22 * sy2;
+    ctx.save(); ctx.translate(cx, cy + S.c.sag * 4 - jump); ctx.rotate(S.c.sag * 0.16);
+    ctx.shadowColor = 'rgba(0,0,0,0.35)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 4;
+    ctx.fillStyle = '#efece6';
+    ctx.beginPath(); ctx.roundRect(-W / 2, -H / 2, W, H, H / 2); ctx.fill();
+    ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+    ctx.strokeStyle = 'rgba(0,0,0,0.22)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(-W / 2, -H / 2, W, H, H / 2); ctx.stroke();
+    const blushA = status === 'record' ? 0.55 + 0.4 * recPulse(t) : d.warn ? 0.55 : 0;
+    if (blushA > 0.02) {
+      const bc = d.warn ? '255,179,64' : '255,59,48';
+      const g = ctx.createRadialGradient(0, 0, 1, 0, 0, W * 0.42);
+      g.addColorStop(0, `rgba(${bc},${blushA})`); g.addColorStop(1, `rgba(${bc},0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.roundRect(-W / 2, -H / 2, W, H, H / 2); ctx.fill();
+    }
+    ctx.fillStyle = '#2b2b2e';
+    const blink = ((t + 0.8) % 3.9) < 0.15 && status === 'listen' && !d.warn;
+    const eh = blink || status === 'transcribe' ? 1.2 : 4;
+    ctx.beginPath(); ctx.roundRect(-7.5, -H * 0.08 - eh / 2, 2.3, eh, 1.1); ctx.fill();
+    ctx.beginPath(); ctx.roundRect(5.2, -H * 0.08 - eh / 2, 2.3, eh, 1.1); ctx.fill();
+    ctx.restore();
+  } },
+];
+/* ================= render loop ================= */
+const cv = document.getElementById('stagecv');
+const ctx2 = cv.getContext('2d');
+cv.width = 640; cv.height = 180;
+let current = VARIANTS[0];
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const t = now / 1000;
+  const d = drive(t, dt);
+  if (current.metal) { metalTick(dt, d, current.palettes || DEFAULT_PM); metalRender(); }
+  ctx2.setTransform(1, 0, 0, 1, 0, 0); ctx2.clearRect(0, 0, 640, 180);
+  ctx2.setTransform(2, 0, 0, 2, 0, 0);
+  if (d.sc > 0.02) {
+    ctx2.save();
+    if (current.noScale) {
+      /* fixed-size variants never grow or shrink: fade only */
+      ctx2.globalAlpha = Math.max(0, Math.min(1, d.sc));
+    } else {
+      ctx2.translate(160, 26); ctx2.scale(d.sc, d.sc); ctx2.translate(-160, -26);
+      ctx2.globalAlpha = Math.max(0, Math.min(1, d.sc));
+      if (d.sc < 0.97 && ctx2.filter !== undefined) ctx2.filter = `blur(${((1 - d.sc) * 4).toFixed(1)}px)`;
+    }
+    try { current.draw(ctx2, 160, 26, t, d); } catch (e) { document.title = 'ERR ' + e; }
+    if (ctx2.filter !== undefined) ctx2.filter = 'none';
+    ctx2.restore();
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+/* ================= controls ================= */
+const vDiv = document.getElementById('variants');
+VARIANTS.forEach((v, i) => {
+  const b = document.createElement('button');
+  b.textContent = v.label; b.dataset.i = i;
+  b.onclick = () => { current = v; S.c = {};
+    document.querySelectorAll('#variants button').forEach(x => x.classList.toggle('on', x === b)); };
+  if (i === 0) b.classList.add('on');
+  vDiv.appendChild(b);
+});
+const sDiv = document.getElementById('states');
+function setStatus(next) {
+  status = next;
+  if (next === 'record' || next === 'listen') S.t0 = performance.now();
+  document.querySelectorAll('#states button').forEach(b => b.classList.toggle('on', b.dataset.s === next));
+}
+for (const [id, label] of STATES) {
+  const b = document.createElement('button');
+  b.textContent = label; b.dataset.s = id;
+  b.onclick = () => setStatus(id);
+  sDiv.appendChild(b);
+}
+setStatus('listen');
+/* #v=<id>&s=<state> preselects a variant + state (used for headless screenshots) */
+{
+  const H = new URLSearchParams(location.hash.slice(1));
+  const hv = VARIANTS.findIndex(x => x.id === H.get('v'));
+  if (hv >= 0) { current = VARIANTS[hv];
+    document.querySelectorAll('#variants button').forEach(x => x.classList.toggle('on', +x.dataset.i === hv)); }
+  if (H.get('s')) setStatus(H.get('s'));
+}
+document.getElementById('voices').onclick = async (e) => {
+  const v = e.target.dataset.v; if (!v) return;
+  if (v === 'mic' && !micAnalyser) { try { await enableMic(); } catch { return; } }
+  voice = v;
+  document.querySelectorAll('#voices button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
+};
+document.getElementById('bgs').onclick = (e) => {
+  const bg = e.target.dataset.bg; if (!bg) return;
+  document.getElementById('desktop').className = bg;
+  document.body.classList.toggle('darkbar', bg !== 'light');
+  document.querySelectorAll('#bgs button').forEach(b => b.classList.toggle('on', b.dataset.bg === bg));
+};
+let cyc = null;
+function runSeq(btn, otherBtn, seq, labelRun, labelStop) {
+  if (cyc) { clearTimeout(cyc); cyc = null; btn.textContent = labelRun; otherBtn.disabled = false; setStatus('hidden'); return; }
+  btn.textContent = labelStop; otherBtn.disabled = true;
+  let i = 0;
+  const step = () => { setStatus(seq[i][0]); cyc = setTimeout(() => { i = (i + 1) % seq.length; step(); }, seq[i][1]); };
+  step();
+}
+const bD = document.getElementById('cycleD'), bV = document.getElementById('cycleV');
+bD.onclick = () => runSeq(bD, bV,
+  [['hidden', 700], ['armed', 450], ['listen', 4200], ['transcribe', 1300], ['hidden', 1200]],
+  '▶ Cycle a dictation', '■ Stop');
+bV.onclick = () => runSeq(bV, bD,
+  [['hidden', 700], ['record', 5200], ['save', 1000], ['hidden', 1200]],
+  '▶ Cycle a video take', '■ Stop');
+</script>

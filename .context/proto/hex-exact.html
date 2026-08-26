@@ -1,0 +1,250 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Hex indicator — exact port, interactive states</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 -apple-system, system-ui; overflow: hidden; }
+  /* ---------- fake desktop ---------- */
+  #desktop { position: fixed; inset: 0; transition: background 200ms; }
+  #desktop.light { background: #e9e5dc; }
+  #desktop.photo { background: linear-gradient(135deg, #f5b26b, #e2766d 50%, #7b5ea7); }
+  #desktop.dark { background: #1d1f24; }
+  #menubar { position: fixed; top: 0; left: 0; right: 0; height: 25px;
+             background: rgba(250,248,244,0.85); backdrop-filter: blur(10px);
+             display: flex; align-items: center; gap: 18px; padding: 0 14px;
+             font-size: 12.5px; color: #3c3a36; }
+  #desktop.dark ~ #menubar, body.darkbar #menubar { background: rgba(20,21,25,0.85); color: #c9cbd1; }
+  #doc { position: absolute; left: 50%; top: 70px; transform: translateX(-50%);
+         width: 620px; height: 100vh; background: #fff; border-radius: 8px 8px 0 0;
+         box-shadow: 0 4px 24px rgba(0,0,0,0.18); padding: 46px 54px; }
+  #desktop.dark #doc { background: #26282e; }
+  #doc .line { height: 10px; border-radius: 3px; background: #dcd8cf; margin: 14px 0; }
+  #desktop.dark #doc .line { background: #34373f; }
+  /* ---------- controls ---------- */
+  #panel { position: fixed; right: 16px; top: 40px; width: 210px; z-index: 10;
+           background: rgba(22,23,28,0.94); color: #d7d9de; border: 1px solid #34363e;
+           border-radius: 12px; padding: 14px; backdrop-filter: blur(8px); }
+  #panel h2 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: #9aa0ab; }
+  #panel button { display: block; width: 100%; margin: 5px 0; padding: 8px 10px; text-align: left;
+                  background: #2a2c33; color: #e8eaee; border: 1px solid #3a3d46; border-radius: 8px;
+                  font: 500 13px -apple-system; cursor: pointer; }
+  #panel button:hover { background: #33363f; }
+  #panel button.on { background: #2f6fed; border-color: #2f6fed; color: #fff; }
+  #panel .row { display: flex; gap: 6px; }
+  #panel .row button { flex: 1; text-align: center; padding: 6px 4px; font-size: 12px; }
+  #panel .sep { height: 1px; background: #34363e; margin: 10px 0; }
+  #panel .note { font-size: 11px; color: #8b8f9a; margin-top: 8px; line-height: 1.5; }
+  /* ---------- the Hex indicator, ported layer by layer ---------- */
+  /* geometry: height 16, width 16 <-> 56, cornerRadius 8 (TranscriptionIndicatorView.swift:69-71) */
+  #hexRoot { position: fixed; top: 48px; left: 50%; z-index: 5; }
+  #capsule { position: relative; height: 16px; width: 16px; border-radius: 8px;
+             transform: translateX(-50%);
+             overflow: hidden; }
+  #capsule .stroke { position: absolute; inset: 0; border-radius: 8px; border: 1px solid transparent;
+                     mix-blend-mode: screen; pointer-events: none; }
+  /* red center overlay: padding 6, blur 2, screen (line 90-95) */
+  #capsule .accentGlow { position: absolute; inset: 6px; border-radius: 8px; filter: blur(2px);
+                         mix-blend-mode: screen; }
+  /* white core: padding 7, blur 1, screen (line 97-103) */
+  #capsule .core { position: absolute; inset: 7px; border-radius: 8px; background: #fff;
+                   filter: blur(1px); mix-blend-mode: screen; }
+  /* peak bar: width = w*(peak+0.6), blur 4, screen (line 105-113) */
+  #capsule .peak { position: absolute; top: 6px; bottom: 6px; left: 50%; border-radius: 8px;
+                   transform: translateX(-50%); filter: blur(4px); mix-blend-mode: screen; }
+  /* shine sweep while transcribing (Pow .shine, retriggered every 0.25s, duration 0.6) */
+  #capsule .shine { position: absolute; inset: 0; opacity: 0;
+                    background: linear-gradient(100deg, transparent 30%, rgba(255,255,255,0.55) 50%, transparent 70%);
+                    background-size: 250% 100%; }
+  #capsule.transcribing .shine { opacity: 1; animation: shine 0.85s linear infinite; }
+  @keyframes shine { from { background-position: 120% 0; } to { background-position: -150% 0; } }
+  /* prewarming tooltip (line 141-152): 12px medium white on black 0.8, radius 4, offset above */
+  #tooltip { position: fixed; top: 22px; left: 50%; transform: translate(-50%, 0); z-index: 6;
+             background: rgba(0,0,0,0.8); color: #fff; font: 500 12px -apple-system;
+             padding: 4px 8px; border-radius: 4px; opacity: 0; transition: opacity 200ms; }
+</style>
+<div id="desktop" class="light"></div>
+<div id="menubar"><b></b><span>File</span><span>Edit</span><span>View</span><span>Window</span><span>Help</span></div>
+<div id="doc">
+  <div class="line" style="width:62%"></div><div class="line" style="width:88%"></div>
+  <div class="line" style="width:74%"></div><div class="line" style="width:91%"></div>
+  <div class="line" style="width:55%"></div><div class="line" style="width:83%"></div>
+  <div class="line" style="width:69%"></div>
+</div>
+<div id="hexRoot"><div id="capsule">
+  <div class="accentGlow"></div>
+  <div class="core"></div>
+  <div class="peak"></div>
+  <div class="shine"></div>
+  <div class="stroke"></div>
+</div></div>
+<div id="tooltip">Model prewarming...</div>
+<div id="panel">
+  <h2>State</h2>
+  <div id="states"></div>
+  <div class="sep"></div>
+  <h2>Voice</h2>
+  <div class="row" id="voices">
+    <button data-v="fake" class="on">Fake speech</button>
+    <button data-v="silent">Silence</button>
+    <button data-v="mic">My mic</button>
+  </div>
+  <div class="sep"></div>
+  <h2>Desktop</h2>
+  <div class="row" id="bgs">
+    <button data-bg="light" class="on">Light</button>
+    <button data-bg="photo">Photo</button>
+    <button data-bg="dark">Dark</button>
+  </div>
+  <div class="sep"></div>
+  <button id="cycle">▶ Auto-cycle a dictation</button>
+  <div class="note">Ported 1:1 from Hex's TranscriptionIndicatorView.swift (MIT, Kit Langton): 16 px capsule, interactiveSpring meter, bouncy(0.3) status pops, layered screen-blend glows.</div>
+</div>
+<script>
+'use strict';
+/* ---------- springs (SwiftUI equivalents, stable integrator) ---------- */
+function makeSpring(K, C, v0) { return { x: v0, v: 0, K, C }; }
+function stepSpring(s, target, dt) {
+  const h = 1 / 240; let r = Math.min(dt, 0.1);
+  if (!isFinite(s.x) || !isFinite(s.v)) { s.x = target; s.v = 0; }
+  while (r > 0) { const st = Math.min(h, r);
+    s.v += (s.K * (target - s.x) - s.C * s.v) * st; s.x += s.v * st; r -= st; }
+  return s.x;
+}
+const K_METER = Math.pow(2 * Math.PI / 0.15, 2), C_METER = 2 * 0.86 * Math.sqrt(K_METER); // .interactiveSpring()
+const K_BOUNCY = Math.pow(2 * Math.PI / 0.3, 2), C_BOUNCY = 2 * 0.70 * Math.sqrt(K_BOUNCY); // .bouncy(0.3)
+/* ---------- audio sources; meter sampled at 10 Hz like Hex's meterTask ---------- */
+let micAnalyser = null, micData = null, voice = 'fake';
+async function enableMic() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const ac = new AudioContext(); const src = ac.createMediaStreamSource(stream);
+  micAnalyser = ac.createAnalyser(); micAnalyser.fftSize = 512; src.connect(micAnalyser);
+  micData = new Float32Array(micAnalyser.fftSize);
+}
+function micLevel() {
+  micAnalyser.getFloatTimeDomainData(micData);
+  let sum = 0, peak = 0;
+  for (const v of micData) { sum += v * v; peak = Math.max(peak, Math.abs(v)); }
+  return { avg: Math.min(1, Math.sqrt(sum / micData.length) * 6), peak: Math.min(1, peak * 3) };
+}
+function fakeLevel(t) {
+  const phrase = (t % 7); let env = 0;
+  if (phrase < 4.4) env = Math.max(0.06, Math.max(0, Math.sin(t * 7.3) * 0.6 + Math.sin(t * 13.1) * 0.4) * (0.55 + 0.45 * Math.sin(t * 1.1)));
+  else if (phrase < 4.9) env = 0.03;
+  else if (phrase < 6.2) env = Math.max(0.05, Math.abs(Math.sin(t * 9.7)) * 0.7);
+  else env = 0.02;
+  const level = Math.min(1, env * (0.85 + 0.3 * Math.sin(t * 31)));
+  return { avg: level, peak: Math.min(1, level * 1.5 + 0.08 * Math.abs(Math.sin(t * 47))) };
+}
+/* ---------- Hex color math (NSColor.blended equivalents) ---------- */
+const RED = [255, 59, 48], BLUE = [10, 132, 255], BLACKC = [0, 0, 0], WHITE = [255, 255, 255];
+function mixc(a, b, f) { f = Math.max(0, Math.min(1, f));
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]; }
+const css = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+/* ---------- state machine ---------- */
+const STATES = [
+  ['hidden', 'Hidden'],
+  ['optionKeyPressed', 'Key pressed (armed)'],
+  ['recording', 'Recording / dictating'],
+  ['transcribing', 'Transcribing'],
+  ['prewarming', 'Prewarming (tooltip)'],
+];
+let status = 'hidden';
+const meterAvg = makeSpring(K_METER, C_METER, 0);
+const meterPeak = makeSpring(K_METER, C_METER, 0);
+const widthS = makeSpring(K_BOUNCY, C_BOUNCY, 16);
+const scaleS = makeSpring(K_BOUNCY, C_BOUNCY, 0);
+let sampleAt = 0, avgT = 0, peakT = 0;
+const capsule = document.getElementById('capsule');
+const stroke = capsule.querySelector('.stroke');
+const accentGlow = capsule.querySelector('.accentGlow');
+const core = capsule.querySelector('.core');
+const peakEl = capsule.querySelector('.peak');
+const tooltip = document.getElementById('tooltip');
+function setStatus(next) {
+  status = next;
+  capsule.classList.toggle('transcribing', next === 'transcribing');
+  tooltip.style.opacity = next === 'prewarming' ? 1 : 0;
+  document.querySelectorAll('#states button').forEach(b => b.classList.toggle('on', b.dataset.s === next));
+}
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const t = now / 1000;
+  /* meter: 10 Hz sample like Hex's meterTask, springs chase it */
+  if (t >= sampleAt) {
+    const raw = voice === 'silent' ? { avg: 0.004, peak: 0.006 }
+      : voice === 'mic' && micAnalyser ? micLevel() : fakeLevel(t);
+    avgT = raw.avg; peakT = raw.peak; sampleAt = t + 0.1;
+  }
+  const active = status === 'recording';
+  const avg = Math.min(1, stepSpring(meterAvg, active ? avgT : 0, dt) * 3);
+  const peak = Math.min(1, stepSpring(meterPeak, active ? peakT : 0, dt) * 3);
+  /* geometry: width 16 -> 56 only while recording; hidden scales to 0 with blur */
+  const w = stepSpring(widthS, status === 'recording' ? 56 : 16, dt);
+  const sc = stepSpring(scaleS, status === 'hidden' ? 0 : 1, dt);
+  /* colors per status (backgroundColor/strokeColor/innerShadowColor in the Swift) */
+  let bg, strokeC, innerC, glowC;
+  if (status === 'recording') {
+    bg = mixc(mixc(RED, BLACKC, 0.5), RED, avg);
+    strokeC = css(mixc(RED, WHITE, 0.1), 0.6);
+    innerC = RED; glowC = RED;
+  } else if (status === 'transcribing' || status === 'prewarming') {
+    bg = mixc(BLUE, BLACKC, 0.5);
+    strokeC = css(mixc(BLUE, WHITE, 0.1), 0.6);
+    innerC = BLUE; glowC = BLUE;
+  } else {
+    bg = BLACKC; strokeC = css(BLACKC, 1); innerC = BLACKC; glowC = BLACKC;
+  }
+  capsule.style.width = w.toFixed(2) + 'px';
+  capsule.style.background = css(bg);
+  capsule.style.transform = `translateX(-50%) scale(${Math.max(0, sc).toFixed(3)})`;
+  capsule.style.opacity = Math.max(0, Math.min(1, sc)).toFixed(3);
+  capsule.style.filter = sc < 0.98 ? `blur(${((1 - sc) * 4).toFixed(1)}px)` : 'none';
+  /* inner shadow r4 + double drop shadow r4/r8 */
+  capsule.style.boxShadow =
+    `inset 0 0 4px ${css(innerC, status === 'hidden' || status === 'optionKeyPressed' ? 0 : 0.8)},` +
+    `0 0 4px ${css(glowC, status === 'recording' ? avg : 0)},` +
+    `0 0 8px ${css(glowC, status === 'recording' ? avg * 0.5 : 0)}`;
+  stroke.style.borderColor = strokeC;
+  /* overlays (exact opacity ramps from the Swift) */
+  accentGlow.style.background = css(innerC);
+  accentGlow.style.opacity = status === 'recording' ? (avg < 0.1 ? avg / 0.1 : 1) : 0;
+  core.style.opacity = status === 'recording' ? (avg < 0.1 ? avg / 0.1 : 0.5) : 0;
+  peakEl.style.background = css(innerC);
+  peakEl.style.width = Math.max(0, w * (peak + 0.6)).toFixed(1) + 'px';
+  peakEl.style.opacity = status === 'recording' ? (peak < 0.1 ? (peak / 0.1) * 0.5 : 0.5) : 0;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+/* ---------- controls ---------- */
+const statesDiv = document.getElementById('states');
+for (const [id, label] of STATES) {
+  const b = document.createElement('button');
+  b.textContent = label; b.dataset.s = id;
+  b.onclick = () => setStatus(id);
+  statesDiv.appendChild(b);
+}
+setStatus('recording');
+document.getElementById('voices').onclick = async (e) => {
+  const v = e.target.dataset.v; if (!v) return;
+  if (v === 'mic' && !micAnalyser) { try { await enableMic(); } catch { return; } }
+  voice = v;
+  document.querySelectorAll('#voices button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
+};
+document.getElementById('bgs').onclick = (e) => {
+  const bg = e.target.dataset.bg; if (!bg) return;
+  document.getElementById('desktop').className = bg;
+  document.body.classList.toggle('darkbar', bg !== 'light');
+  document.querySelectorAll('#bgs button').forEach(b => b.classList.toggle('on', b.dataset.bg === bg));
+};
+let cycling = null;
+document.getElementById('cycle').onclick = (e) => {
+  if (cycling) { clearTimeout(cycling); cycling = null; e.target.textContent = '▶ Auto-cycle a dictation'; setStatus('hidden'); return; }
+  e.target.textContent = '■ Stop cycling';
+  const seq = [['hidden', 600], ['optionKeyPressed', 500], ['recording', 3800], ['transcribing', 1400], ['hidden', 1200]];
+  let i = 0;
+  const step = () => { setStatus(seq[i][0]); cycling = setTimeout(() => { i = (i + 1) % seq.length; step(); }, seq[i][1]); };
+  step();
+};
+</script>

@@ -1,0 +1,697 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>see.computer — bloom chip studies (throwaway)</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 -apple-system, system-ui; padding: 24px 28px 60px; }
+  body.light { background: #e9e5dc; color: #2c2a26; }
+  body.photo { background: linear-gradient(135deg, #f5b26b, #e2766d 50%, #7b5ea7); color: #2c2a26; }
+  body.dark { background: #1d1f24; color: #d7d9de; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  #controls, #sliders { display: flex; gap: 8px; margin: 10px 0 4px; flex-wrap: wrap; align-items: center; }
+  #controls span.lbl, #sliders span.lbl { font-size: 12px; opacity: 0.6; margin-left: 10px; }
+  button { padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(128,128,128,0.4);
+           background: rgba(255,255,255,0.5); color: inherit; font: 500 12.5px -apple-system; cursor: pointer; }
+  body.dark button { background: rgba(255,255,255,0.08); }
+  button.on { background: #2f6fed; border-color: #2f6fed; color: #fff; }
+  #sliders label { font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  #sliders input[type=range] { width: 110px; }
+  #sliders .val { font-variant-numeric: tabular-nums; opacity: 0.7; width: 34px; }
+  #matrix { margin-top: 18px; }
+  #matrix .hdr { display: flex; margin-left: 170px; }
+  #matrix .hdr div { width: 150px; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; opacity: 0.55; text-align: center; }
+  #matrix .hdr div:first-child { opacity: 0.9; font-weight: 600; }
+  #matrix .mrow { display: flex; align-items: center; margin-top: 2px; }
+  #matrix .mrow label { width: 170px; font-size: 12.5px; padding-right: 12px; text-align: right; opacity: 0.85; line-height: 1.25; }
+  #matrix .mrow label small { opacity: 0.6; }
+  #matrix .mrow canvas { width: 1050px; height: 48px; border-radius: 8px; background: rgba(127,127,127,0.07); }
+</style>
+<body class="light">
+<h1>Bloom chip — parameters, colorways, loaders, dot displays</h1>
+<div id="controls">
+  <span class="lbl">Voice</span>
+  <button data-v="fake" class="on">Fake</button>
+  <button data-v="silent">Silence</button>
+  <button data-v="mic">My mic</button>
+  <span class="lbl">Desktop</span>
+  <button data-bg="light" class="on">Light</button>
+  <button data-bg="photo">Photo</button>
+  <button data-bg="dark">Dark</button>
+  <span class="lbl">Loop</span>
+  <button data-seq="dictation" class="on">Dictation</button>
+  <button data-seq="video">Video</button>
+  <span class="lbl">now: <span id="seqlbl">—</span></span>
+</div>
+<div id="sliders">
+  <span class="lbl">Physics</span>
+  <label>response <input type="range" id="sResp" min="0.12" max="0.6" step="0.01" value="0.3"><span class="val" id="vResp">0.30</span></label>
+  <label>bounce <input type="range" id="sDamp" min="0.45" max="1" step="0.01" value="0.7"><span class="val" id="vDamp">0.70</span></label>
+  <label>wilt speed <input type="range" id="sWilt" min="0.15" max="2.5" step="0.05" value="0.5"><span class="val" id="vWilt">0.50</span></label>
+  <label>talk threshold <input type="range" id="sThresh" min="0.02" max="0.2" step="0.005" value="0.05"><span class="val" id="vThresh">0.05</span></label>
+</div>
+<div id="matrix"></div>
+<script>
+'use strict';
+/* ================= springs ================= */
+function makeSpring(K, C, v0) { return { x: v0, v: 0, K, C }; }
+function stepSpring(s, target, dt) {
+  const h = 1 / 240; let r = Math.min(dt, 0.1);
+  if (!isFinite(s.x) || !isFinite(s.v)) { s.x = target; s.v = 0; }
+  while (r > 0) { const st = Math.min(h, r);
+    s.v += (s.K * (target - s.x) - s.C * s.v) * st; s.x += s.v * st; r -= st; }
+  return s.x;
+}
+const K_METER = Math.pow(2 * Math.PI / 0.15, 2), C_METER = 2 * 0.86 * Math.sqrt(K_METER);
+const K_BOUNCY = Math.pow(2 * Math.PI / 0.3, 2), C_BOUNCY = 2 * 0.70 * Math.sqrt(K_BOUNCY);
+/* tunables (the sliders) */
+const TUNE = { resp: 0.3, damp: 0.7, wilt: 0.5, thresh: 0.05 };
+/* ================= audio ================= */
+let micAnalyser = null, micData = null, voice = 'fake';
+let micFreq = null, micSampleRate = 48000;
+async function enableMic() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const ac = new AudioContext(); const src = ac.createMediaStreamSource(stream);
+  micSampleRate = ac.sampleRate;
+  micAnalyser = ac.createAnalyser(); micAnalyser.fftSize = 1024;
+  micAnalyser.smoothingTimeConstant = 0.5;
+  src.connect(micAnalyser);
+  micData = new Float32Array(micAnalyser.fftSize);
+  micFreq = new Float32Array(micAnalyser.frequencyBinCount);
+}
+function micLevel() {
+  micAnalyser.getFloatTimeDomainData(micData);
+  let sum = 0, peak = 0;
+  for (const v of micData) { sum += v * v; peak = Math.max(peak, Math.abs(v)); }
+  return { avg: Math.min(1, Math.sqrt(sum / micData.length) * 6), peak: Math.min(1, peak * 3) };
+}
+function fakeLevel(t) {
+  const phrase = (t % 7); let env = 0;
+  if (phrase < 4.4) env = Math.max(0.06, Math.max(0, Math.sin(t * 7.3) * 0.6 + Math.sin(t * 13.1) * 0.4) * (0.55 + 0.45 * Math.sin(t * 1.1)));
+  else if (phrase < 4.9) env = 0.03;
+  else if (phrase < 6.2) env = Math.max(0.05, Math.abs(Math.sin(t * 9.7)) * 0.7);
+  else env = 0.02;
+  const level = Math.min(1, env * (0.85 + 0.3 * Math.sin(t * 31)));
+  return { avg: level, peak: Math.min(1, level * 1.5 + 0.08 * Math.abs(Math.sin(t * 47))) };
+}
+const N_BANDS = 24;
+function micBands() {
+  micAnalyser.getFloatFrequencyData(micFreq);
+  const nyq = micSampleRate / 2, bins = micFreq.length;
+  const fLo = 85, fHi = 8000, out = new Array(N_BANDS).fill(0);
+  for (let b = 0; b < N_BANDS; b++) {
+    const f0 = fLo * Math.pow(fHi / fLo, b / N_BANDS);
+    const f1 = fLo * Math.pow(fHi / fLo, (b + 1) / N_BANDS);
+    const i0 = Math.max(0, Math.floor(f0 / nyq * bins));
+    const i1 = Math.min(bins - 1, Math.max(i0 + 1, Math.ceil(f1 / nyq * bins)));
+    let sum = 0;
+    for (let i = i0; i < i1; i++) sum += micFreq[i];
+    const db = sum / (i1 - i0);
+    out[b] = Math.pow(Math.max(0, Math.min(1, (db + 78) / 48)), 1.4);
+  }
+  return out;
+}
+const gauss = (x, c, w) => Math.exp(-((x - c) * (x - c)) / (2 * w * w));
+function fakeBands(t) {
+  const env = fakeLevel(t).avg;
+  const c1 = 0.14 + 0.06 * Math.sin(t * 1.7);
+  const c2 = 0.38 + 0.13 * Math.sin(t * 0.9 + 1.2);
+  const c3 = 0.62 + 0.1 * Math.sin(t * 1.3 + 2.4);
+  const out = new Array(N_BANDS);
+  for (let b = 0; b < N_BANDS; b++) {
+    const x = b / (N_BANDS - 1);
+    const shape = 0.45 * Math.exp(-x * 2.4)
+      + 0.9 * gauss(x, c1, 0.07) + 0.7 * gauss(x, c2, 0.1) + 0.35 * gauss(x, c3, 0.09);
+    const wobble = 0.72 + 0.28 * Math.sin(t * 12 + b * 2.3);
+    out[b] = Math.min(1, env * shape * wobble * 1.5);
+  }
+  return out;
+}
+const bandState = new Float32Array(N_BANDS);
+function tickBands(t, dt) {
+  const target = voice === 'silent' ? null
+    : voice === 'mic' && micAnalyser ? micBands() : fakeBands(t);
+  for (let b = 0; b < N_BANDS; b++) {
+    const tv = target ? target[b] : 0;
+    if (tv > bandState[b]) bandState[b] += (tv - bandState[b]) * Math.min(1, dt * 28);
+    else bandState[b] += (tv - bandState[b]) * Math.min(1, dt * 6);
+  }
+}
+function bandsFor(n, gain = 1) {
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.floor(i / n * N_BANDS), z = Math.max(a + 1, Math.ceil((i + 1) / n * N_BANDS));
+    let m = 0;
+    for (let j = a; j < z; j++) m = Math.max(m, bandState[j]);
+    out[i] = Math.min(1, m * gain);
+  }
+  return out;
+}
+function balancedBands(n, gain, tilt, mirror) {
+  const base = bandsFor(n, gain);
+  const comp = base.map((v, i) => Math.min(1, v * (0.7 + tilt * (i / Math.max(1, n - 1)))));
+  if (!mirror) return comp;
+  const out = new Array(n);
+  const mid = (n - 1) / 2;
+  for (let j = 0; j < n; j++) {
+    const u = Math.abs(j - mid) / mid;
+    out[j] = comp[Math.min(n - 1, Math.round(u * (n - 1)))];
+  }
+  return out;
+}
+/* ================= signal ================= */
+const STATES = [
+  ['hidden', 'Hidden'], ['armed', 'Armed'], ['listen', 'Dictating'],
+  ['transcribe', 'Transcribing'], ['record', 'Recording'], ['save', 'Saving'],
+];
+let raw = { avg: 0, peak: 0 }, sampleAt = 0, silentFor = 0, lastSampleT = 0, gAvg = 0;
+function sample(t, dt) {
+  if (t >= sampleAt) {
+    raw = voice === 'silent' ? { avg: 0.004, peak: 0.006 }
+      : voice === 'mic' && micAnalyser ? micLevel() : fakeLevel(t);
+    sampleAt = t + 0.1;
+    if (raw.avg < 0.045) silentFor += Math.max(0, t - lastSampleT); else silentFor = 0;
+    lastSampleT = t;
+  }
+  gAvg += (Math.min(1, raw.avg * 3) - gAvg) * Math.min(1, dt * 8);
+  tickBands(t, dt);
+}
+function drive2(store, st, dt) {
+  store.m ??= makeSpring(K_METER, C_METER, 0);
+  store.sc ??= makeSpring(K_BOUNCY, C_BOUNCY, 0);
+  const active = st === 'listen' || st === 'record';
+  const avg = Math.min(1, stepSpring(store.m, active ? raw.avg : 0, dt) * 3);
+  const sc = stepSpring(store.sc, st === 'hidden' ? 0 : 1, dt);
+  return { avg, sc: Math.max(0, sc), warn: silentFor > 1.2 && active };
+}
+const recPulse = (t, hz = 0.9) => 0.55 + 0.45 * Math.sin(t * Math.PI * 2 * hz);
+const RED = [255, 59, 48], CYAN = [80, 200, 245], AMBER = [255, 179, 64],
+      BLACKC = [0, 0, 0], WHITE = [255, 255, 255];
+function mixc(a, b, f) { f = Math.max(0, Math.min(1, f));
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]; }
+const css = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+/* ================= liquid metal engine (metal-fx port, effect 1) ================= */
+const GLW = 416, GLH = 128;
+const glcv = document.createElement('canvas'); glcv.width = GLW; glcv.height = GLH;
+const gl = glcv.getContext('webgl', { preserveDrawingBuffer: true });
+let metalOK = false; const uni = {};
+const FRAG = `
+precision highp float;
+uniform vec2 u_resolution;
+uniform float u_time;
+uniform vec3 u_color1; uniform vec3 u_color2; uniform vec3 u_color3;
+uniform vec3 u_color4; uniform vec3 u_color5;
+uniform float u_intensity; uniform float u_scale; uniform float u_direction;
+uniform float u_distortion; uniform float u_complexity; uniform float u_blur;
+vec3 mod289(vec3 x){ return x - floor(x*(1.0/289.0))*289.0; }
+vec2 mod289(vec2 x){ return x - floor(x*(1.0/289.0))*289.0; }
+vec3 permute(vec3 x){ return mod289(((x*34.0)+1.0)*x); }
+float snoise(vec2 v){
+  const vec4 C = vec4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439);
+  vec2 i = floor(v + dot(v, C.yy));
+  vec2 x0 = v - i + dot(i, C.xx);
+  vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+  vec4 x12 = x0.xyxy + C.xxzz; x12.xy -= i1;
+  i = mod289(i);
+  vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0)) + i.x + vec3(0.0, i1.x, 1.0));
+  vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+  m = m*m; m = m*m;
+  vec3 x = 2.0 * fract(p * C.www) - 1.0;
+  vec3 h = abs(x) - 0.5;
+  vec3 ox = floor(x + 0.5);
+  vec3 a0 = x - ox;
+  m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
+  vec3 g;
+  g.x = a0.x * x0.x + h.x * x0.y;
+  g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+  return 130.0 * dot(m, g);
+}
+float fbm(vec2 p, float oct){
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 7; i++) {
+    if (float(i) >= oct) break;
+    v += a * snoise(p);
+    p *= 2.0; a *= 0.5;
+  }
+  return v;
+}
+float nfbm(vec2 p){ return fbm(p, 3.0 + u_complexity * 4.0); }
+vec3 palette(float t){
+  t = smoothstep(0.0, 1.0, t);
+  float k = 64.0;
+  float w1 = exp(-k * t * t);
+  float w2 = exp(-k * (t - 0.25) * (t - 0.25));
+  float w3 = exp(-k * (t - 0.5)  * (t - 0.5));
+  float w4 = exp(-k * (t - 0.75) * (t - 0.75));
+  float w5 = exp(-k * (t - 1.0)  * (t - 1.0));
+  float tot = w1 + w2 + w3 + w4 + w5 + 0.0001;
+  return (u_color1*w1 + u_color2*w2 + u_color3*w3 + u_color4*w4 + u_color5*w5) / tot;
+}
+vec2 warp(vec2 p, float t){
+  float str = u_distortion * 2.0;
+  return vec2(
+    nfbm(p + vec2(t * 0.1, 0.0)),
+    nfbm(p + vec2(0.0, t * 0.12) + 5.0)
+  ) * str;
+}
+vec3 computeEffect(vec2 uv, float aspect, float t, float dist, float cpx){
+  vec2 p = (uv - 0.5) * u_scale;
+  p.x *= aspect;
+  p += vec2(cos(u_direction), sin(u_direction)) * t * 0.15;
+  float freq = 3.0 + cpx * 8.0;
+  float val = 0.0;
+  val += sin(p.x * freq + t);
+  val += sin(p.y * freq + t * 1.3);
+  val += sin((p.x + p.y) * freq * 0.7 + t * 0.7);
+  val += sin(length(p) * freq * 0.8 - t * 1.5);
+  vec2 w = warp(p, t);
+  val += (w.x + w.y) * dist;
+  val = val * 0.2 * u_intensity + 0.5;
+  return palette(clamp(val, 0.0, 1.0));
+}
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution;
+  float aspect = u_resolution.x / u_resolution.y;
+  float t = u_time;
+  vec3 col;
+  if (u_blur < 0.01) col = computeEffect(uv, aspect, t, u_distortion, u_complexity);
+  else {
+    float r = u_blur * 0.02;
+    col  = computeEffect(uv,                 aspect, t, u_distortion, u_complexity) * 0.4;
+    col += computeEffect(uv + vec2( r, 0.0), aspect, t, u_distortion, u_complexity) * 0.15;
+    col += computeEffect(uv + vec2(-r, 0.0), aspect, t, u_distortion, u_complexity) * 0.15;
+    col += computeEffect(uv + vec2(0.0,  r), aspect, t, u_distortion, u_complexity) * 0.15;
+    col += computeEffect(uv + vec2(0.0, -r), aspect, t, u_distortion, u_complexity) * 0.15;
+  }
+  col = pow(col, vec3(1.3));
+  gl_FragColor = vec4(col, 1.0);
+}`;
+try {
+  const vs = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vs, 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }');
+  gl.compileShader(vs);
+  const fs = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fs, FRAG); gl.compileShader(fs);
+  if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(fs));
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'a');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  for (const n of ['u_resolution','u_time','u_color1','u_color2','u_color3','u_color4','u_color5',
+                   'u_intensity','u_scale','u_direction','u_distortion','u_complexity','u_blur'])
+    uni[n] = gl.getUniformLocation(prog, n);
+  gl.viewport(0, 0, GLW, GLH);
+  gl.uniform2f(uni.u_resolution, GLW, GLH);
+  gl.uniform1f(uni.u_scale, 1.0);
+  gl.uniform1f(uni.u_direction, 80 * Math.PI / 180);
+  gl.uniform1f(uni.u_complexity, 0.68);
+  gl.uniform1f(uni.u_blur, 1);
+  metalOK = true;
+} catch (e) { document.title = 'GL ERR ' + e.message; }
+const hex2v = h => [parseInt(h.slice(1,3),16)/255, parseInt(h.slice(3,5),16)/255, parseInt(h.slice(5,7),16)/255];
+const METAL_PALETTES = {
+  silver: ['#000000', '#dedede', '#747270', '#e5e5e5', '#0d0d0d'],
+  chroma: ['#000000', '#aae8ff', '#c5fe9e', '#f7888d', '#0d0d0d'],
+  gold:   ['#000000', '#ffffff', '#fff3c4', '#f7d488', '#0d0d0d'],
+  molten: ['#1a0300', '#ff8a50', '#ffd9a0', '#ff3b30', '#140000'],
+  amber:  ['#140d00', '#ffb340', '#6b5423', '#ffd98a', '#0d0d0d'],
+};
+const KEYS = Object.keys(METAL_PALETTES);
+const KEY_MOTION = {
+  silver: () => [0.7 + gAvg * 2.6, 1.8 + gAvg * 2],
+  molten: () => [1.3 + gAvg * 2.2, 2.0 + gAvg * 1.8],
+  chroma: () => [1.7, 2.2],
+  gold:   () => [2.4, 2.4],
+  amber:  () => [0.07, 1.6],
+};
+const mcache = {}, mtime = {};
+for (const k of KEYS) {
+  const c = document.createElement('canvas'); c.width = GLW; c.height = GLH;
+  mcache[k] = c; mtime[k] = 0;
+}
+function metalRenderAll(dt) {
+  if (!metalOK) return;
+  for (const k of KEYS) {
+    const [speed, inten] = KEY_MOTION[k]();
+    mtime[k] += dt * speed * 1.2;
+    const cols = METAL_PALETTES[k].map(hex2v);
+    gl.uniform1f(uni.u_time, mtime[k]);
+    gl.uniform3fv(uni.u_color1, cols[0]); gl.uniform3fv(uni.u_color2, cols[1]);
+    gl.uniform3fv(uni.u_color3, cols[2]); gl.uniform3fv(uni.u_color4, cols[3]);
+    gl.uniform3fv(uni.u_color5, cols[4]);
+    gl.uniform1f(uni.u_intensity, inten);
+    gl.uniform1f(uni.u_distortion, 0.3 + gAvg * 0.5);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const c2 = mcache[k].getContext('2d');
+    c2.clearRect(0, 0, GLW, GLH);
+    c2.drawImage(glcv, 0, 0);
+  }
+}
+function metalFillKey(ctx, key, x, y, w, h) {
+  const src = mcache[key];
+  let sw = GLW, sh = GLW * h / w;
+  if (sh > GLH) { sh = GLH; sw = GLH * w / h; }
+  ctx.drawImage(src, (GLW - sw) / 2, (GLH - sh) / 2, sw, sh, x, y, w, h);
+}
+const DEFAULT_PM = { listen: 'silver', record: 'molten', transcribe: 'chroma', save: 'gold', warnP: 'amber', idle: 'silver' };
+function metalKey(pm, st, wn) {
+  if (wn) return pm.warnP;
+  if (st === 'record') return pm.record;
+  if (st === 'listen') return pm.listen;
+  if (st === 'transcribe') return pm.transcribe;
+  if (st === 'save') return pm.save;
+  return pm.idle;
+}
+/* ================= shared bits ================= */
+function bodyShell(ctx, cx, cy, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+  ctx.fillStyle = 'rgba(13,14,18,0.97)';
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.stroke();
+}
+const EYE = { gain: 1.5, tilt: 1.6, mirror: true, pupil: 0.2, blinkEvery: 3.6, envelope: 0.8, pulseHz: 0.9 };
+/* record-eye shaping applied to one band value */
+function eyeShape(v, u, blink) {
+  let env = Math.pow(Math.sin(Math.PI * u), 0.8);
+  const inPupil = Math.abs(u - 0.5) < EYE.pupil / 2;
+  if (inPupil) env *= 0.12;
+  let out = v * (1 - EYE.envelope) + (0.3 + 0.7 * v) * env * EYE.envelope;
+  if (blink) out = 0;
+  return { v: out, inPupil };
+}
+/* ================= the bloom (cfg-driven) =================
+   cfg: minW/minH/maxW/maxH  bloom range
+        floor                open floor while listening (0..1)
+        armedOpen, loadOpen  container openness in armed / transcribe+save
+        colors {listen, record, warn}
+        fillMode 'solid' | 'white' | 'metal'   (white = bars stay white over tinted shell)
+        shellMode 'dark' | 'tint' | false      (tint = shell colored by accent+level, false = naked)
+        loader 'pulse' | 'shine' | 'sweep' | 'dots' | 'fill'
+        dot {px, gap} | undefined              LED-grid content instead of bars */
+function bloomGeom(store, st, dt, cfg) {
+  const talking = raw.avg > TUNE.thresh;
+  const listening = st === 'listen' || st === 'record';
+  store.pres ??= 0;
+  store.pres += ((listening && talking ? 1 : 0) - store.pres) * Math.min(1, dt * (talking ? 7 : TUNE.wilt));
+  store.open ??= makeSpring(K_BOUNCY, C_BOUNCY, 0);
+  const K = Math.pow(2 * Math.PI / TUNE.resp, 2);
+  store.open.K = K; store.open.C = 2 * TUNE.damp * Math.sqrt(K);
+  const ot = st === 'hidden' ? 0
+    : st === 'armed' ? (cfg.armedOpen ?? 0.1)
+    : listening ? cfg.floor + (1 - cfg.floor) * store.pres
+    : (cfg.loadOpen ?? 0.32);
+  return Math.max(0, stepSpring(store.open, ot, dt));
+}
+function drawBloomV(ctx, cx, cy, t, d, st, store, dt, cfg) {
+  const open = bloomGeom(store, st, dt, cfg);
+  if (open < 0.02) return;
+  const active = st === 'listen' || st === 'record';
+  const wilted = active && silentFor > 1.2;
+  const W = cfg.minW + (cfg.maxW - cfg.minW) * open;
+  const H = cfg.minH + (cfg.maxH - cfg.minH) * open;
+  const accent = wilted ? cfg.colors.warn : st === 'record' ? cfg.colors.record : cfg.colors.listen;
+  if (cfg.fillMode === 'metal') {
+    const want = metalKey(DEFAULT_PM, st, wilted);
+    store.key ??= want; store.mix ??= 1;
+    if (want !== store.key) { store.prev = store.key; store.key = want; store.mix = 0; }
+    store.mix = Math.min(1, store.mix + dt * 3);
+  }
+  const rr = Math.min(12, H / 2);
+  /* --- shell --- */
+  if (cfg.shellMode !== false) {
+    if (cfg.shellMode === 'tint') {
+      const bg = mixc(mixc(accent, BLACKC, 0.55), accent, active ? d.avg : 0.08);
+      ctx.save();
+      ctx.shadowColor = css(accent, active ? Math.max(0.15, d.avg) : 0.15); ctx.shadowBlur = 6;
+      ctx.fillStyle = css(bg);
+      ctx.beginPath(); ctx.roundRect(cx - W / 2, cy - H / 2, W, H, rr); ctx.fill();
+      ctx.restore();
+      ctx.strokeStyle = css(mixc(accent, WHITE, 0.1), 0.5); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.roundRect(cx - W / 2, cy - H / 2, W, H, rr); ctx.stroke();
+    } else bodyShell(ctx, cx, cy, W, H, rr);
+  }
+  /* --- fill primitive --- */
+  const metalRegion = [cx - W / 2 + 4, cy - H / 2 + 3, Math.max(8, W - 8), Math.max(6, H - 6)];
+  const fill = (x, y, w, h, r, a) => {
+    if (cfg.fillMode === 'metal') {
+      ctx.save(); ctx.globalAlpha *= Math.min(1, a + 0.2);
+      ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.clip();
+      if (store.mix < 1 && store.prev) {
+        metalFillKey(ctx, store.prev, ...metalRegion);
+        ctx.globalAlpha *= store.mix;
+      }
+      metalFillKey(ctx, store.key, ...metalRegion);
+      ctx.restore();
+      return;
+    }
+    const col = cfg.fillMode === 'white' ? [240, 242, 248] : accent;
+    ctx.save();
+    if (cfg.shellMode === false) {
+      ctx.shadowColor = 'rgba(0,0,0,0.55)'; ctx.shadowBlur = 3; ctx.shadowOffsetY = 1;
+      ctx.fillStyle = css(col, a);
+      ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill();
+      ctx.shadowOffsetY = 0;
+    }
+    ctx.shadowColor = css(col, 0.8); ctx.shadowBlur = 5;
+    ctx.fillStyle = css(col, a);
+    ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill();
+    ctx.restore();
+  };
+  const pad = Math.max(4, 10 * open), innerW = Math.max(6, W - pad * 2), maxBarH = H - 10;
+  const x0 = cx - innerW / 2, lineTh = 2.5;
+  /* --- still (nearly) a dot: a quiet ember --- */
+  if (open < 0.3) {
+    fill(cx - 2.5, cy - 2.5, 5, 5, 2.5, 0.5 + d.avg * 0.5);
+    return;
+  }
+  /* --- LED dot-grid content --- */
+  if (cfg.dot) {
+    drawDots(ctx, cx, cy, t, d, st, store, cfg, { innerW, maxBarH, accent, wilted, fill });
+    return;
+  }
+  /* --- baseline --- */
+  fill(x0, cy - lineTh / 2, innerW, lineTh, lineTh / 2, wilted ? 0.55 : 0.4);
+  /* --- loaders --- */
+  if (st === 'transcribe' || st === 'save') {
+    const speed = st === 'save' ? 2.4 : 1.0;
+    drawLoader(cfg.loader, ctx, t, speed, { x0, innerW, cy, lineTh, maxBarH, accent, fill });
+    return;
+  }
+  /* --- deaf: amber glint travels the line --- */
+  if (wilted) {
+    const p = (t * 0.55) % 1, hx = x0 + p * innerW;
+    const g = ctx.createLinearGradient(hx - 20, 0, hx + 20, 0);
+    g.addColorStop(0, css(accent, 0)); g.addColorStop(0.5, css(accent, 1)); g.addColorStop(1, css(accent, 0));
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.roundRect(x0, cy - lineTh / 2 - 0.5, innerW, lineTh + 1, lineTh / 2); ctx.fill();
+    return;
+  }
+  /* --- listening / recording bars --- */
+  const n = Math.max(5, Math.min(21, 1 + 2 * Math.floor(innerW / 9)));
+  const gap = 2, bw = Math.max(1.5, (innerW - (n - 1) * gap) / n);
+  const rec = st === 'record';
+  const bands = balancedBands(n, EYE.gain, EYE.tilt, EYE.mirror);
+  const blink = rec && ((t + 0.9) % EYE.blinkEvery) < 0.14;
+  for (let i = 0; i < n; i++) {
+    const u = n === 1 ? 0.5 : i / (n - 1);
+    let v = bands[i], alpha = 0.9;
+    if (rec) { const e = eyeShape(v, u, blink); v = e.v; if (e.inPupil) alpha = 1; }
+    const bh = lineTh + v * (maxBarH - lineTh) * open;
+    if (bh <= lineTh + 0.4) continue;
+    fill(x0 + i * (bw + gap), cy - bh / 2, bw, bh, Math.min(bw / 2, 2),
+         alpha * (0.45 + 0.55 * Math.min(1, v * 1.4)));
+  }
+  if (rec && !blink && open > 0.7) {
+    ctx.fillStyle = `rgba(255,255,255,${0.35 + 0.25 * recPulse(t, EYE.pulseHz)})`;
+    const pw = Math.max(2, EYE.pupil * innerW * 0.3);
+    ctx.beginPath(); ctx.roundRect(cx - pw / 2, cy - lineTh, pw, lineTh * 2, lineTh); ctx.fill();
+  }
+}
+/* ================= loaders (transcribe / save treatments) ================= */
+function drawLoader(kind, ctx, t, speed, o) {
+  const { x0, innerW, cy, lineTh, maxBarH, accent, fill } = o;
+  if (kind === 'pulse') {
+    const n = Math.max(5, Math.min(21, 1 + 2 * Math.floor(innerW / 9)));
+    const gap = 2, bw = Math.max(1.5, (innerW - (n - 1) * gap) / n);
+    for (let i = 0; i < n; i++) {
+      const u = i / (n - 1);
+      const wv = Math.max(0, Math.sin((u - t * speed) * Math.PI * 2)) * 0.5;
+      if (wv < 0.05) continue;
+      const bh = lineTh + wv * maxBarH * 0.4;
+      fill(x0 + i * (bw + gap), cy - bh / 2, bw, bh, bw / 2, 0.35 + wv);
+    }
+  } else if (kind === 'shine') {
+    const p = ((t * speed * 0.7) % 1);
+    const hx = x0 - 15 + p * (innerW + 30);
+    const g = ctx.createLinearGradient(hx - 12, 0, hx + 12, 0);
+    g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(0.5, 'rgba(255,255,255,0.85)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.save(); ctx.beginPath(); ctx.roundRect(x0, cy - lineTh / 2 - 0.5, innerW, lineTh + 1, lineTh / 2); ctx.clip();
+    ctx.fillStyle = g; ctx.fillRect(x0, cy - lineTh / 2 - 0.5, innerW, lineTh + 1); ctx.restore();
+  } else if (kind === 'sweep') {
+    const tri = Math.abs(((t * speed * 0.9) % 2) - 1);
+    const sx = x0 + tri * (innerW - 10);
+    fill(sx, cy - lineTh, 10, lineTh * 2, lineTh, 0.95);
+  } else if (kind === 'dots') {
+    for (let i = -1; i <= 1; i++) {
+      const ph = Math.max(0, Math.sin(t * speed * 4 - i * 0.9));
+      fill(x0 + innerW / 2 + i * 9 - 2, cy - 2 - ph * 2.5, 4, 4, 2, 0.3 + 0.7 * ph);
+    }
+  } else if (kind === 'fill') {
+    const p = (t * speed * 0.8) % 1;
+    fill(x0, cy - lineTh / 2, innerW * p, lineTh, lineTh / 2, 0.95);
+  }
+}
+/* ================= LED dot-grid content ================= */
+function drawDots(ctx, cx, cy, t, d, st, store, cfg, o) {
+  const { innerW, maxBarH, accent, wilted } = o;
+  const px = cfg.dot.px, gp = cfg.dot.gap, pitch = px + gp;
+  let cols = Math.floor(innerW / pitch); if (cols % 2 === 0) cols -= 1; cols = Math.max(5, cols);
+  let rows = Math.floor(maxBarH / pitch); if (rows % 2 === 0) rows -= 1; rows = Math.max(3, rows);
+  const gx0 = cx - (cols * pitch - gp) / 2 + px / 2, gy0 = cy - (rows * pitch - gp) / 2 + px / 2;
+  const mid = (rows - 1) / 2;
+  const dotAt = (c, r, a, col) => {
+    ctx.save();
+    if (a > 0.5) { ctx.shadowColor = css(col, 0.9); ctx.shadowBlur = 4; }
+    ctx.fillStyle = css(col, a);
+    ctx.beginPath(); ctx.arc(gx0 + c * pitch, gy0 + r * pitch, px / 2, 0, 7); ctx.fill();
+    ctx.restore();
+  };
+  const rec = st === 'record';
+  if (st === 'transcribe' || st === 'save') {
+    const speed = st === 'save' ? 2.4 : 1.0;
+    const tri = Math.abs(((t * speed * 0.9) % 2) - 1);
+    const scanC = Math.round(tri * (cols - 1));
+    for (let c = 0; c < cols; c++) for (let r = 0; r < rows; r++) {
+      const dd = Math.abs(c - scanC);
+      const a = r === mid && dd === 0 ? 0.95 : dd === 0 ? 0.55 : r === mid ? 0.25 : 0.07;
+      dotAt(c, r, a, accent);
+    }
+    return;
+  }
+  if (wilted) {
+    const p = (t * 0.55) % 1, hot = Math.round(p * (cols - 1));
+    for (let c = 0; c < cols; c++) for (let r = 0; r < rows; r++) {
+      const dd = Math.abs(c - hot);
+      const a = r === mid ? (dd === 0 ? 1 : dd === 1 ? 0.45 : 0.25) : 0.06;
+      dotAt(c, r, a, accent);
+    }
+    return;
+  }
+  const bands = balancedBands(cols, EYE.gain, EYE.tilt, EYE.mirror);
+  const blink = rec && ((t + 0.9) % EYE.blinkEvery) < 0.14;
+  for (let c = 0; c < cols; c++) {
+    const u = cols === 1 ? 0.5 : c / (cols - 1);
+    let v = bands[c], pupilCol = false;
+    if (rec) { const e = eyeShape(v, u, blink); v = e.v; pupilCol = e.inPupil; }
+    const lit = Math.round(v * rows);
+    for (let r = 0; r < rows; r++) {
+      const on = Math.abs(r - mid) <= lit / 2;
+      let a = on ? 0.4 + 0.6 * Math.min(1, v * 1.3) : r === mid ? 0.28 : 0.07;
+      let col = accent;
+      if (rec && pupilCol && r === mid && !blink) { col = WHITE; a = 0.55 + 0.35 * recPulse(t, EYE.pulseHz); }
+      dotAt(c, r, a, col);
+    }
+  }
+}
+/* ================= rows ================= */
+const CY = [80, 200, 245], BLU = [10, 132, 255], GRN = [58, 255, 112], WHT = [240, 242, 248];
+const BASE = { minW: 10, minH: 10, maxW: 104, maxH: 30, floor: 0.24, loadOpen: 0.32,
+               colors: { listen: CY, record: RED, warn: AMBER }, fillMode: 'solid', shellMode: 'dark', loader: 'pulse' };
+const ROWS = [
+  { label: 'Full bloom', sub: 'cyan · pulse loader', cfg: { ...BASE } },
+  { label: 'Subtle bloom', sub: 'floor 0.5 · shine loader', cfg: { ...BASE, minW: 28, minH: 12, maxW: 76, maxH: 24, floor: 0.5, loadOpen: 0.4, loader: 'shine' } },
+  { label: 'Tiny bloom', sub: 'Hex-tinted shell · sweep', cfg: { ...BASE, minW: 8, minH: 8, maxW: 60, maxH: 17, floor: 0.35, loadOpen: 0.55, shellMode: 'tint', fillMode: 'white', loader: 'sweep', colors: { listen: RED, record: RED, warn: AMBER } } },
+  { label: 'Monochrome', sub: 'white bars · ellipsis loader', cfg: { ...BASE, colors: { listen: WHT, record: RED, warn: AMBER }, loader: 'dots' } },
+  { label: 'Amber VFD', sub: 'phosphor amber · fill loader', cfg: { ...BASE, colors: { listen: AMBER, record: RED, warn: [255, 120, 40] }, loader: 'fill' } },
+  { label: 'System blue', sub: 'macOS accent · pulse', cfg: { ...BASE, colors: { listen: BLU, record: RED, warn: AMBER } } },
+  { label: 'Liquid metal', sub: 'silver → molten · pulse', cfg: { ...BASE, fillMode: 'metal' } },
+  { label: 'Dot display', sub: 'LED 3px · scan loader', cfg: { ...BASE, dot: { px: 3, gap: 1.8 }, loadOpen: 0.5 } },
+  { label: 'Dot display', sub: 'phosphor green · dense', cfg: { ...BASE, maxW: 92, maxH: 27, dot: { px: 2.3, gap: 1.4 }, loadOpen: 0.5, colors: { listen: GRN, record: RED, warn: AMBER } } },
+  { label: 'Naked bloom', sub: 'no shell · pulse', cfg: { ...BASE, shellMode: false } },
+];
+/* ================= sequencer ================= */
+const SEQ = {
+  dictation: [['hidden', 900], ['armed', 500], ['listen', 4600], ['transcribe', 1300], ['hidden', 1400]],
+  video: [['hidden', 900], ['armed', 500], ['record', 5600], ['save', 1100], ['hidden', 1400]],
+};
+let seqMode = 'dictation', seqI = 0, seqStart = performance.now();
+function tickSeq(now) {
+  const seq = SEQ[seqMode];
+  if (now - seqStart >= seq[seqI][1]) { seqStart = now; seqI = (seqI + 1) % seq.length; }
+  return seq[seqI][0];
+}
+/* ================= DOM ================= */
+const COLS = [['loop', 'Loop ▶'], ...STATES];
+const matrixDiv = document.getElementById('matrix');
+const hdr = document.createElement('div'); hdr.className = 'hdr';
+for (const [, label] of COLS) { const el = document.createElement('div'); el.textContent = label; hdr.appendChild(el); }
+matrixDiv.appendChild(hdr);
+const rowCtx = [];
+for (const r of ROWS) {
+  const row = document.createElement('div'); row.className = 'mrow';
+  const lab = document.createElement('label'); lab.innerHTML = `${r.label}<br><small>${r.sub}</small>`;
+  const c = document.createElement('canvas'); c.width = 2100; c.height = 96;
+  row.appendChild(lab); row.appendChild(c); matrixDiv.appendChild(row);
+  rowCtx.push(c.getContext('2d'));
+}
+const cellStores = ROWS.map(() => COLS.map(() => ({})));
+const cellDrives = ROWS.map(() => COLS.map(() => ({})));
+/* ================= main loop ================= */
+const seqlbl = document.getElementById('seqlbl');
+let last = performance.now(), lblAt = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const t = now / 1000;
+  sample(t, dt);
+  metalRenderAll(dt);
+  const seqSt = tickSeq(now);
+  if (now > lblAt) { seqlbl.textContent = STATES.find(x => x[0] === seqSt)[1]; lblAt = now + 150; }
+  for (let r = 0; r < ROWS.length; r++) {
+    const ctx = rowCtx[r];
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, 2100, 96);
+    ctx.setTransform(2, 0, 0, 2, 0, 0);
+    for (let c = 0; c < COLS.length; c++) {
+      const st = COLS[c][0] === 'loop' ? seqSt : COLS[c][0];
+      const d = drive2(cellDrives[r][c], st, dt);
+      const cx = 150 * c + 75, cy = 24;
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, d.sc);
+      try { drawBloomV(ctx, cx, cy, t, d, st, cellStores[r][c], dt, ROWS[r].cfg); }
+      catch (e) { document.title = 'ERR ' + e; }
+      ctx.restore();
+    }
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+/* ================= controls ================= */
+document.getElementById('controls').onclick = async (e) => {
+  const b = e.target;
+  if (b.dataset.v) {
+    if (b.dataset.v === 'mic' && !micAnalyser) { try { await enableMic(); } catch { return; } }
+    voice = b.dataset.v;
+    document.querySelectorAll('[data-v]').forEach(x => x.classList.toggle('on', x === b));
+  } else if (b.dataset.bg) {
+    document.body.className = b.dataset.bg;
+    document.querySelectorAll('[data-bg]').forEach(x => x.classList.toggle('on', x === b));
+  } else if (b.dataset.seq) {
+    seqMode = b.dataset.seq; seqI = 0; seqStart = performance.now();
+    document.querySelectorAll('[data-seq]').forEach(x => x.classList.toggle('on', x === b));
+  }
+};
+for (const [id, key, fmt] of [['sResp', 'resp', v => v.toFixed(2)], ['sDamp', 'damp', v => v.toFixed(2)],
+                              ['sWilt', 'wilt', v => v.toFixed(2)], ['sThresh', 'thresh', v => v.toFixed(3)]]) {
+  const el = document.getElementById(id), out = document.getElementById('v' + id.slice(1));
+  el.oninput = () => { TUNE[key] = +el.value; out.textContent = fmt(+el.value); };
+}
+</script>
+</body>

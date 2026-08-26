@@ -1,0 +1,329 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>see.computer — round 7: Hex-scale, Hex-feel (throwaway prototype)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #16171c; color: #d7d9de; font: 14px/1.45 -apple-system, system-ui; }
+  header { position: sticky; top: 0; z-index: 5; background: #16171cee; backdrop-filter: blur(6px);
+           padding: 14px 22px; border-bottom: 1px solid #2c2f38; display: flex; gap: 18px; align-items: center; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .hint { color: #8b8f9a; font-size: 12.5px; }
+  button#mic { background: #2f6fed; color: #fff; border: 0; border-radius: 7px; padding: 7px 14px; font: 600 13px -apple-system; cursor: pointer; }
+  button#mic.live { background: #d84b45; }
+  table { border-collapse: collapse; margin: 10px 18px 60px; }
+  th { font-size: 11.5px; font-weight: 600; color: #9aa0ab; text-transform: uppercase; letter-spacing: .06em; padding: 14px 10px 6px; text-align: center; }
+  td.name { min-width: 210px; max-width: 230px; padding: 0 14px; vertical-align: middle; }
+  td.name b { display: block; font-size: 13.5px; color: #e8eaee; }
+  td.name span { font-size: 12px; color: #8b8f9a; }
+  td.cell { padding: 8px; }
+  .stage { width: 248px; height: 64px; border-radius: 8px; overflow: hidden; border: 1px solid #2c2f38; }
+  canvas { display: block; }
+</style>
+<header>
+  <h1>see.computer · round 7 — Hex scale, Hex physics</h1>
+  <span class="hint">16 px tall, 16↔56 px wide, top-center under the menu bar. 10 Hz meter through an interactive spring; bouncy(0.3) state pops.</span>
+  <button id="mic">Use my microphone</button>
+  <span class="hint" id="micState"></span>
+</header>
+<table id="grid"></table>
+<script>
+'use strict';
+let micAnalyser = null, micData = null;
+document.getElementById('mic').onclick = async (e) => {
+  if (micAnalyser) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ac = new AudioContext(); const src = ac.createMediaStreamSource(stream);
+    micAnalyser = ac.createAnalyser(); micAnalyser.fftSize = 512; src.connect(micAnalyser);
+    micData = new Float32Array(micAnalyser.fftSize);
+    e.target.classList.add('live'); e.target.textContent = 'Live mic on';
+    document.getElementById('micState').textContent = 'speaking columns follow your voice';
+  } catch (err) { document.getElementById('micState').textContent = 'mic denied: ' + err.name; }
+};
+function micLevel() {
+  micAnalyser.getFloatTimeDomainData(micData);
+  let sum = 0, peak = 0;
+  for (const v of micData) { sum += v * v; peak = Math.max(peak, Math.abs(v)); }
+  return { level: Math.min(1, Math.sqrt(sum / micData.length) * 6), peak: Math.min(1, peak * 3) };
+}
+function fakeLevel(t) {
+  const phrase = (t % 7); let env = 0;
+  if (phrase < 4.4) env = Math.max(0.06, Math.max(0, Math.sin(t * 7.3) * 0.6 + Math.sin(t * 13.1) * 0.4) * (0.55 + 0.45 * Math.sin(t * 1.1)));
+  else if (phrase < 4.9) env = 0.03;
+  else if (phrase < 6.2) env = Math.max(0.05, Math.abs(Math.sin(t * 9.7)) * 0.7);
+  else env = 0.02;
+  const level = Math.min(1, env * (0.85 + 0.3 * Math.sin(t * 31)));
+  return { level, peak: Math.min(1, level * 1.5 + 0.08 * Math.abs(Math.sin(t * 47))) };
+}
+/* Hex cadence: the meter is sampled at 10 Hz, then a spring chases it.
+   interactiveSpring: response 0.15, damping 0.86 -> k=(2pi/0.15)^2, c=2*0.86*sqrt(k)
+   bouncy(0.3):       response 0.3,  damping 0.7  -> k=(2pi/0.3)^2,  c=2*0.7*sqrt(k)   */
+function spring(o, k, target, dt, K, C) {
+  if (o[k] === undefined || !isFinite(o[k]) || !isFinite(o['v' + k])) { o[k] = target; o['v' + k] = 0; }
+  // semi-implicit Euler in fixed substeps: stable for stiff springs even when
+  // the tab is throttled and dt arrives large
+  const h = 1 / 240;
+  let remaining = Math.min(dt, 0.1);
+  while (remaining > 0) {
+    const step = Math.min(h, remaining);
+    o['v' + k] += (K * (target - o[k]) - C * o['v' + k]) * step;
+    o[k] += o['v' + k] * step;
+    remaining -= step;
+  }
+  return o[k];
+}
+const K_METER = Math.pow(2 * Math.PI / 0.15, 2), C_METER = 2 * 0.86 * Math.sqrt(K_METER);
+const K_BOUNCY = Math.pow(2 * Math.PI / 0.3, 2), C_BOUNCY = 2 * 0.70 * Math.sqrt(K_BOUNCY);
+function makeSignal(kind) {
+  return { kind, level: 0, peak: 0, m: 0, p: 0, sampleAt: 0, mTarget: 0, pTarget: 0,
+           silentFor: 0, t0: performance.now(), c: {} };
+}
+function tickSignal(s, t, dt) {
+  let raw;
+  if (s.kind === 'silent') raw = { level: 0.006, peak: 0.01 };
+  else if (micAnalyser) raw = micLevel(); else raw = fakeLevel(t);
+  s.level = raw.level; s.dt = dt;
+  if (t >= s.sampleAt) { s.mTarget = raw.level; s.pTarget = raw.peak; s.sampleAt = t + 0.1; }
+  s.m = spring(s, 'm', s.mTarget, dt, K_METER, C_METER);
+  s.p = spring(s, 'p', s.pTarget, dt, K_METER, C_METER);
+  s.silentFor = raw.level < 0.045 ? s.silentFor + dt : 0;
+  s.elapsed = (performance.now() - s.t0) / 1000;
+}
+const warnOn = s => s.silentFor > 1.2;
+const recPulse = t => 0.55 + 0.45 * Math.sin(t * Math.PI * 2 * 0.9);
+function mix(a, b, f) {
+  f = Math.max(0, Math.min(1, f));
+  return [Math.round(a[0] + (b[0] - a[0]) * f), Math.round(a[1] + (b[1] - a[1]) * f), Math.round(a[2] + (b[2] - a[2]) * f)];
+}
+const rgba = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const RED = [255, 59, 48], BLUE = [0, 122, 255], CYANC = [80, 200, 245], AMBER = [255, 179, 64], BLACK = [10, 10, 12];
+/* desktops with a menu bar; the capsule lives top-center under it, like Hex */
+function bgLight(ctx, w, h) {
+  ctx.fillStyle = '#e9e5dc'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(10, 14, w - 20, h);
+  ctx.fillStyle = '#c9c4b8';
+  for (let y = 26; y < h; y += 9) ctx.fillRect(20, y, (w - 40) * (0.5 + 0.5 * Math.sin(y * 7)), 3);
+  ctx.fillStyle = 'rgba(245,243,238,0.92)'; ctx.fillRect(0, 0, w, 10);
+  ctx.fillStyle = '#8a867c'; for (let i = 0; i < 5; i++) ctx.fillRect(8 + i * 16, 4, 9, 2.5);
+}
+function bgPhoto(ctx, w, h) {
+  const g = ctx.createLinearGradient(0, 0, w, h);
+  g.addColorStop(0, '#f5b26b'); g.addColorStop(0.5, '#e2766d'); g.addColorStop(1, '#7b5ea7');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  for (let i = 0; i < 5; i++) { ctx.beginPath(); ctx.arc(30 + i * 50, 30 + (i % 2) * 22, 10, 0, 7); ctx.fill(); }
+  ctx.fillStyle = 'rgba(40,32,40,0.4)'; ctx.fillRect(0, 0, w, 10);
+  ctx.fillStyle = 'rgba(255,255,255,0.7)'; for (let i = 0; i < 5; i++) ctx.fillRect(8 + i * 16, 4, 9, 2.5);
+}
+function bgDark(ctx, w, h) {
+  ctx.fillStyle = '#1d1f24'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#2a2d34';
+  for (let y = 20; y < h; y += 9) ctx.fillRect(16, y, (w - 60) * (0.4 + 0.6 * Math.abs(Math.sin(y * 3))), 3.5);
+  ctx.fillStyle = '#3d6da8'; ctx.fillRect(16, 38, 60, 3.5);
+  ctx.fillStyle = 'rgba(14,15,18,0.9)'; ctx.fillRect(0, 0, w, 10);
+  ctx.fillStyle = '#6a6f78'; for (let i = 0; i < 5; i++) ctx.fillRect(8 + i * 16, 4, 9, 2.5);
+}
+const BGS = [bgLight, bgPhoto, bgDark, bgLight, bgPhoto, bgDark];
+/* ---------- the faithful Hex capsule renderer ----------
+   base + inner shadow + center glows + peak bar + stroke + double drop shadow.
+   accent: [r,g,b]; power/peak: sprung 0..1 (already ~*3 clamped by caller) */
+function hexCapsule(ctx, cx, cy, w, h, accent, power, peak, opts = {}) {
+  const r = h / 2;
+  const bgMix = mix(mix(accent, BLACK, 0.5), accent, Math.min(1, power));
+  ctx.save();
+  ctx.shadowColor = rgba(accent, Math.min(1, power)); ctx.shadowBlur = 8;
+  ctx.fillStyle = rgba(bgMix, 1);
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.fill();
+  ctx.shadowBlur = 16; ctx.shadowColor = rgba(accent, Math.min(1, power) * 0.5);
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.save();
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.clip();
+  const ig = ctx.createRadialGradient(cx, cy, 1, cx, cy, w / 2);
+  ig.addColorStop(0, 'rgba(0,0,0,0)');
+  ig.addColorStop(1, rgba(accent, 0.5));
+  ctx.fillStyle = ig; ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+  const pw = w * (Math.min(1, peak) + 0.6);
+  const pg = ctx.createRadialGradient(cx, cy, 0.5, cx, cy, pw / 2);
+  pg.addColorStop(0, rgba(accent, (peak < 0.1 ? peak / 0.1 : 1) * 0.5));
+  pg.addColorStop(1, rgba(accent, 0));
+  ctx.fillStyle = pg;
+  ctx.fillRect(cx - pw / 2, cy - h / 2 + 2, pw, h - 4);
+  const coreA = power < 0.1 ? power / 0.1 * 0.5 : 0.5;
+  const cg = ctx.createRadialGradient(cx, cy, 0.5, cx, cy, Math.max(3, w * 0.22));
+  cg.addColorStop(0, `rgba(255,255,255,${coreA})`);
+  cg.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = cg;
+  ctx.beginPath(); ctx.roundRect(cx - w / 2 + 3, cy - h / 2 + 3, w - 6, h - 6, r - 2); ctx.fill();
+  if (opts.shine !== undefined) {
+    const sx = cx - w / 2 - 20 + ((opts.shine * (w + 40) * 1.6) % (w + 40));
+    const sg = ctx.createLinearGradient(sx, 0, sx + 22, 0);
+    sg.addColorStop(0, 'rgba(255,255,255,0)'); sg.addColorStop(0.5, 'rgba(255,255,255,0.45)'); sg.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = sg; ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+  }
+  ctx.restore();
+  ctx.strokeStyle = rgba(mix(accent, [255, 255, 255], 0.1), 0.6);
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.stroke();
+}
+/* shared state->geometry driver, exactly Hex's status model + our two extras */
+function drive(s, st, t) {
+  const rec = st === 'record';
+  const warn = warnOn(s) && (st === 'listen' || rec);
+  const active = st === 'listen' || rec;
+  const power = Math.min(1, s.m * 3), peak = Math.min(1, s.p * 3);
+  let targetW = 16, targetS = 1;
+  if (st === 'save') { targetW = 16; targetS = 0; }
+  else if (warn) targetW = 16;
+  else if (active) targetW = 56;
+  else if (st === 'transcribe') targetW = 36;
+  const w = spring(s.c, 'w', targetW, s.dt, K_BOUNCY, C_BOUNCY);
+  const sc = spring(s.c, 's', targetS, s.dt, K_BOUNCY, C_BOUNCY);
+  return { rec, warn, active, power, peak, w, sc };
+}
+/* ---------- variants ---------- */
+const VARIANTS = [
+
+{ name: '1 · Hex, verbatim', why: 'the clone as calibration: red voice capsule, blue shine to think, pop in and out with bouncy(0.3)',
+  draw(ctx, cx, cy, st, s, t) {
+    const d = drive(s, st, t);
+    if (d.sc < 0.03) return;
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(d.sc, d.sc); ctx.translate(-cx, -cy);
+    if (ctx.filter !== undefined) ctx.filter = d.sc < 0.97 ? `blur(${(1 - d.sc) * 4}px)` : 'none';
+    if (d.warn) hexCapsule(ctx, cx, cy, 16, 16, AMBER, 0.25 + 0.2 * Math.sin(t * 2.5), 0);
+    else if (st === 'transcribe') hexCapsule(ctx, cx, cy, d.w, 16, BLUE, 0.3, 0.1, { shine: t });
+    else if (d.active) hexCapsule(ctx, cx, cy, d.w, 16, RED, d.power, d.peak);
+    else hexCapsule(ctx, cx, cy, d.w, 16, BLACK, 0, 0);
+    if (ctx.filter !== undefined) ctx.filter = 'none';
+    ctx.restore();
+  } },
+
+{ name: '2 · see.computer palette', why: 'same physics, our language: cyan hears, red sees (1 Hz heartbeat), amber ember when deaf',
+  draw(ctx, cx, cy, st, s, t) {
+    const d = drive(s, st, t);
+    if (d.sc < 0.03) return;
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(d.sc, d.sc); ctx.translate(-cx, -cy);
+    if (d.warn) hexCapsule(ctx, cx, cy, 16, 16, AMBER, 0.25 + 0.2 * Math.sin(t * 2.5), 0);
+    else if (st === 'transcribe') hexCapsule(ctx, cx, cy, d.w, 16, CYANC, 0.3, 0.1, { shine: t });
+    else if (d.rec) hexCapsule(ctx, cx, cy, d.w, 16, RED, Math.max(d.power, 0.3 * recPulse(t)), d.peak);
+    else if (d.active) hexCapsule(ctx, cx, cy, d.w, 16, CYANC, d.power, d.peak);
+    else hexCapsule(ctx, cx, cy, d.w, 16, BLACK, 0, 0);
+    ctx.restore();
+  } },
+
+{ name: '3 · The pupil', why: 'the eye, discreetly: a dark pupil floats in the capsule and dilates with your voice; it blinks. red iris = seeing',
+  draw(ctx, cx, cy, st, s, t) {
+    const d = drive(s, st, t);
+    if (d.sc < 0.03) return;
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(d.sc, d.sc); ctx.translate(-cx, -cy);
+    const accent = d.warn ? AMBER : d.rec ? RED : CYANC;
+    if (d.warn) {
+      hexCapsule(ctx, cx, cy, 16, 16, AMBER, 0.2 + 0.15 * Math.sin(t * 2.5), 0);
+      const lx = Math.sin(t * 2.2) * 3.5;
+      ctx.fillStyle = 'rgba(10,10,12,0.85)';
+      ctx.beginPath(); ctx.arc(cx + lx, cy, 2.6, 0, 7); ctx.fill();
+    } else if (st === 'transcribe') {
+      hexCapsule(ctx, cx, cy, d.w, 16, mix(CYANC, BLACK, 0.25), 0.3, 0.1, { shine: t });
+      ctx.fillStyle = 'rgba(10,10,12,0.85)';
+      ctx.beginPath(); ctx.roundRect(cx - 4, cy - 1, 8, 2, 1); ctx.fill();
+    } else if (d.active) {
+      hexCapsule(ctx, cx, cy, d.w, 16, accent, d.rec ? Math.max(d.power, 0.3 * recPulse(t)) : d.power, d.peak);
+      const blink = ((t + 0.8) % 4.2) < 0.12;
+      const pr = blink ? 0 : 2 + 3 * Math.min(1, d.power * 1.2);
+      if (blink) { ctx.fillStyle = 'rgba(10,10,12,0.85)';
+        ctx.beginPath(); ctx.roundRect(cx - 4.5, cy - 1, 9, 2, 1); ctx.fill(); }
+      else { ctx.fillStyle = 'rgba(10,10,12,0.88)';
+        ctx.beginPath(); ctx.arc(cx, cy, pr, 0, 7); ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.75)';
+        ctx.beginPath(); ctx.arc(cx - pr * 0.35, cy - pr * 0.35, Math.max(0.5, pr * 0.22), 0, 7); ctx.fill(); }
+    } else hexCapsule(ctx, cx, cy, d.w, 16, BLACK, 0, 0);
+    ctx.restore();
+  } },
+
+{ name: '4 · Minute tick', why: 'capsule + a 2 px underline that fills each minute while seeing: the timer with no digits',
+  draw(ctx, cx, cy, st, s, t) {
+    const d = drive(s, st, t);
+    if (d.sc < 0.03) return;
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(d.sc, d.sc); ctx.translate(-cx, -cy);
+    if (d.warn) hexCapsule(ctx, cx, cy, 16, 16, AMBER, 0.25 + 0.2 * Math.sin(t * 2.5), 0);
+    else if (st === 'transcribe') hexCapsule(ctx, cx, cy, d.w, 16, CYANC, 0.3, 0.1, { shine: t });
+    else if (d.rec) {
+      hexCapsule(ctx, cx, cy, d.w, 16, RED, Math.max(d.power, 0.3 * recPulse(t)), d.peak);
+      const frac = (s.elapsed % 60) / 60, mins = Math.floor(s.elapsed / 60);
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.beginPath(); ctx.roundRect(cx - d.w / 2, cy + 11, d.w, 2, 1); ctx.fill();
+      ctx.fillStyle = 'rgba(255,120,110,0.95)';
+      ctx.beginPath(); ctx.roundRect(cx - d.w / 2, cy + 11, d.w * frac, 2, 1); ctx.fill();
+      for (let m = 0; m < Math.min(mins, 8); m++) {
+        ctx.beginPath(); ctx.arc(cx - d.w / 2 + 3 + m * 6, cy + 16, 1.2, 0, 7); ctx.fill();
+      }
+    }
+    else if (d.active) hexCapsule(ctx, cx, cy, d.w, 16, CYANC, d.power, d.peak);
+    else hexCapsule(ctx, cx, cy, d.w, 16, BLACK, 0, 0);
+    ctx.restore();
+  } },
+
+{ name: '5 · Memo bars', why: 'inside the capsule, five hairline bars ride the level (voice-memo scale). quietest voice proof',
+  draw(ctx, cx, cy, st, s, t) {
+    const d = drive(s, st, t);
+    if (d.sc < 0.03) return;
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(d.sc, d.sc); ctx.translate(-cx, -cy);
+    const accent = d.warn ? AMBER : d.rec ? RED : CYANC;
+    if (d.warn) {
+      hexCapsule(ctx, cx, cy, 16, 16, AMBER, 0.2 + 0.15 * Math.sin(t * 2.5), 0);
+    } else if (st === 'transcribe') {
+      hexCapsule(ctx, cx, cy, d.w, 16, mix(accent, BLACK, 0.3), 0.25, 0.05, { shine: t });
+    } else if (d.active) {
+      hexCapsule(ctx, cx, cy, d.w, 16, accent, (d.rec ? Math.max(d.power, 0.25 * recPulse(t)) : d.power) * 0.55, d.peak * 0.5);
+      const n = 5;
+      for (let i = 0; i < n; i++) {
+        const ph = Math.max(0.12, Math.min(1, d.power * (0.55 + 0.5 * Math.abs(Math.sin(t * 12 + i * 1.9)))));
+        const bh = 2 + ph * 8;
+        ctx.fillStyle = 'rgba(255,255,255,0.92)';
+        ctx.beginPath(); ctx.roundRect(cx - 14 + i * 6.4, cy - bh / 2, 2.6, bh, 1.3); ctx.fill();
+      }
+    } else hexCapsule(ctx, cx, cy, d.w, 16, BLACK, 0, 0);
+    ctx.restore();
+  } },
+];
+/* ---------- grid ---------- */
+const STATES = [
+  ['listen', 'speak', 'Dictating · voice'],
+  ['listen', 'silent', 'Dictating · NO sound'],
+  ['transcribe', 'speak', 'Transcribing'],
+  ['record', 'speak', 'Recording · voice'],
+  ['record', 'silent', 'Recording · NO sound'],
+  ['save', 'speak', 'Saving (pops out)'],
+];
+const table = document.getElementById('grid');
+const head = table.insertRow();
+head.innerHTML = '<th></th>' + STATES.map(s => `<th>${s[2]}</th>`).join('');
+const cells = [];
+VARIANTS.forEach((v) => {
+  const tr = table.insertRow();
+  const td = tr.insertCell(); td.className = 'name';
+  td.innerHTML = `<b>${v.name}</b><span>${v.why}</span>`;
+  STATES.forEach(([state, sig], si) => {
+    const c = tr.insertCell(); c.className = 'cell';
+    const stage = document.createElement('div'); stage.className = 'stage';
+    const cv = document.createElement('canvas');
+    cv.width = 496; cv.height = 128; cv.style.width = '248px'; cv.style.height = '64px';
+    stage.appendChild(cv); c.appendChild(stage);
+    cells.push({ v, state, bg: BGS[si], sig: makeSignal(sig === 'silent' ? 'silent' : 'speak'), ctx: cv.getContext('2d') });
+  });
+});
+let last = performance.now();
+(function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const t = now / 1000;
+  for (const c of cells) {
+    tickSignal(c.sig, t, dt);
+    c.ctx.save(); c.ctx.clearRect(0, 0, 496, 128); c.ctx.scale(2, 2);
+    c.bg(c.ctx, 248, 64);
+    try { c.v.draw(c.ctx, 124, 24, c.state, c.sig, t); }
+    catch (err) { if (!window.__err) { window.__err = 1; document.querySelector('header .hint').textContent = 'ERR: ' + err; } }
+    c.ctx.restore();
+  }
+  requestAnimationFrame(loop);
+})(last);
+</script>

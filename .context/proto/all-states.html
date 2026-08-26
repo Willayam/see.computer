@@ -1,0 +1,979 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>see.computer — everything at once (throwaway)</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 -apple-system, system-ui; padding: 24px 28px 60px; }
+  body.light { background: #e9e5dc; color: #2c2a26; }
+  body.photo { background: linear-gradient(135deg, #f5b26b, #e2766d 50%, #7b5ea7); color: #2c2a26; }
+  body.dark { background: #1d1f24; color: #d7d9de; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; opacity: 0.6; margin: 28px 0 10px; }
+  #controls { display: flex; gap: 8px; margin: 10px 0 4px; flex-wrap: wrap; align-items: center; }
+  #controls span.lbl { font-size: 12px; opacity: 0.6; margin-left: 10px; }
+  button { padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(128,128,128,0.4);
+           background: rgba(255,255,255,0.5); color: inherit; font: 500 12.5px -apple-system; cursor: pointer; }
+  body.dark button { background: rgba(255,255,255,0.08); }
+  button.on { background: #2f6fed; border-color: #2f6fed; color: #fff; }
+  #studies { display: flex; gap: 18px; flex-wrap: wrap; }
+  .study { text-align: center; }
+  .study canvas { width: 280px; height: 84px; border-radius: 10px; background: rgba(127,127,127,0.07); }
+  .study .cap { font-size: 12px; margin-top: 5px; }
+  .study .cap b { font-weight: 600; }
+  .study .cap .st { opacity: 0.6; }
+  #seqlbl { font-weight: 600; }
+  #matrix .hdr { display: flex; margin-left: 150px; }
+  #matrix .hdr div { width: 150px; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; opacity: 0.55; text-align: center; }
+  #matrix .mrow { display: flex; align-items: center; margin-top: 2px; }
+  #matrix .mrow label { width: 150px; font-size: 12.5px; padding-right: 12px; text-align: right; opacity: 0.85; }
+  #matrix .mrow canvas { width: 900px; height: 48px; border-radius: 8px; background: rgba(127,127,127,0.07); }
+</style>
+<body class="light">
+<h1>Everything at once</h1>
+<div id="controls">
+  <span class="lbl">Voice</span>
+  <button data-v="fake" class="on">Fake</button>
+  <button data-v="silent">Silence</button>
+  <button data-v="mic">My mic</button>
+  <span class="lbl">Desktop</span>
+  <button data-bg="light" class="on">Light</button>
+  <button data-bg="photo">Photo</button>
+  <button data-bg="dark">Dark</button>
+  <span class="lbl">Lifecycle loop</span>
+  <button data-seq="dictation" class="on">Dictation</button>
+  <button data-seq="video">Video</button>
+  <span class="lbl">now: <span id="seqlbl">—</span></span>
+</div>
+
+<h2>Lifecycle studies — the shape is driven by the content</h2>
+<div id="studies"></div>
+
+<h2>All variants × all app states, live</h2>
+<div id="matrix"></div>
+
+<script>
+'use strict';
+/* ================= springs ================= */
+function makeSpring(K, C, v0) { return { x: v0, v: 0, K, C }; }
+function stepSpring(s, target, dt) {
+  const h = 1 / 240; let r = Math.min(dt, 0.1);
+  if (!isFinite(s.x) || !isFinite(s.v)) { s.x = target; s.v = 0; }
+  while (r > 0) { const st = Math.min(h, r);
+    s.v += (s.K * (target - s.x) - s.C * s.v) * st; s.x += s.v * st; r -= st; }
+  return s.x;
+}
+const K_METER = Math.pow(2 * Math.PI / 0.15, 2), C_METER = 2 * 0.86 * Math.sqrt(K_METER);
+const K_BOUNCY = Math.pow(2 * Math.PI / 0.3, 2), C_BOUNCY = 2 * 0.70 * Math.sqrt(K_BOUNCY);
+/* ================= audio ================= */
+let micAnalyser = null, micData = null, voice = 'fake';
+let micFreq = null, micSampleRate = 48000;
+async function enableMic() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const ac = new AudioContext(); const src = ac.createMediaStreamSource(stream);
+  micSampleRate = ac.sampleRate;
+  micAnalyser = ac.createAnalyser(); micAnalyser.fftSize = 1024;
+  micAnalyser.smoothingTimeConstant = 0.5;
+  src.connect(micAnalyser);
+  micData = new Float32Array(micAnalyser.fftSize);
+  micFreq = new Float32Array(micAnalyser.frequencyBinCount);
+}
+function micLevel() {
+  micAnalyser.getFloatTimeDomainData(micData);
+  let sum = 0, peak = 0;
+  for (const v of micData) { sum += v * v; peak = Math.max(peak, Math.abs(v)); }
+  return { avg: Math.min(1, Math.sqrt(sum / micData.length) * 6), peak: Math.min(1, peak * 3) };
+}
+function fakeLevel(t) {
+  const phrase = (t % 7); let env = 0;
+  if (phrase < 4.4) env = Math.max(0.06, Math.max(0, Math.sin(t * 7.3) * 0.6 + Math.sin(t * 13.1) * 0.4) * (0.55 + 0.45 * Math.sin(t * 1.1)));
+  else if (phrase < 4.9) env = 0.03;
+  else if (phrase < 6.2) env = Math.max(0.05, Math.abs(Math.sin(t * 9.7)) * 0.7);
+  else env = 0.02;
+  const level = Math.min(1, env * (0.85 + 0.3 * Math.sin(t * 31)));
+  return { avg: level, peak: Math.min(1, level * 1.5 + 0.08 * Math.abs(Math.sin(t * 47))) };
+}
+const N_BANDS = 24;
+function micBands() {
+  micAnalyser.getFloatFrequencyData(micFreq);
+  const nyq = micSampleRate / 2, bins = micFreq.length;
+  const fLo = 85, fHi = 8000, out = new Array(N_BANDS).fill(0);
+  for (let b = 0; b < N_BANDS; b++) {
+    const f0 = fLo * Math.pow(fHi / fLo, b / N_BANDS);
+    const f1 = fLo * Math.pow(fHi / fLo, (b + 1) / N_BANDS);
+    const i0 = Math.max(0, Math.floor(f0 / nyq * bins));
+    const i1 = Math.min(bins - 1, Math.max(i0 + 1, Math.ceil(f1 / nyq * bins)));
+    let sum = 0;
+    for (let i = i0; i < i1; i++) sum += micFreq[i];
+    const db = sum / (i1 - i0);
+    out[b] = Math.pow(Math.max(0, Math.min(1, (db + 78) / 48)), 1.4);
+  }
+  return out;
+}
+const gauss = (x, c, w) => Math.exp(-((x - c) * (x - c)) / (2 * w * w));
+function fakeBands(t) {
+  const env = fakeLevel(t).avg;
+  const c1 = 0.14 + 0.06 * Math.sin(t * 1.7);
+  const c2 = 0.38 + 0.13 * Math.sin(t * 0.9 + 1.2);
+  const c3 = 0.62 + 0.1 * Math.sin(t * 1.3 + 2.4);
+  const out = new Array(N_BANDS);
+  for (let b = 0; b < N_BANDS; b++) {
+    const x = b / (N_BANDS - 1);
+    const shape = 0.45 * Math.exp(-x * 2.4)
+      + 0.9 * gauss(x, c1, 0.07) + 0.7 * gauss(x, c2, 0.1) + 0.35 * gauss(x, c3, 0.09);
+    const wobble = 0.72 + 0.28 * Math.sin(t * 12 + b * 2.3);
+    out[b] = Math.min(1, env * shape * wobble * 1.5);
+  }
+  return out;
+}
+const bandState = new Float32Array(N_BANDS);
+function tickBands(t, dt) {
+  const target = voice === 'silent' ? null
+    : voice === 'mic' && micAnalyser ? micBands() : fakeBands(t);
+  for (let b = 0; b < N_BANDS; b++) {
+    const tv = target ? target[b] : 0;
+    if (tv > bandState[b]) bandState[b] += (tv - bandState[b]) * Math.min(1, dt * 28);
+    else bandState[b] += (tv - bandState[b]) * Math.min(1, dt * 6);
+  }
+}
+function bandsFor(n, gain = 1) {
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.floor(i / n * N_BANDS), z = Math.max(a + 1, Math.ceil((i + 1) / n * N_BANDS));
+    let m = 0;
+    for (let j = a; j < z; j++) m = Math.max(m, bandState[j]);
+    out[i] = Math.min(1, m * gain);
+  }
+  return out;
+}
+function balancedBands(n, gain, tilt, mirror) {
+  const base = bandsFor(n, gain);
+  const comp = base.map((v, i) => Math.min(1, v * (0.7 + tilt * (i / Math.max(1, n - 1)))));
+  if (!mirror) return comp;
+  const out = new Array(n);
+  const mid = (n - 1) / 2;
+  for (let j = 0; j < n; j++) {
+    const u = Math.abs(j - mid) / mid;
+    out[j] = comp[Math.min(n - 1, Math.round(u * (n - 1)))];
+  }
+  return out;
+}
+/* ================= shared signal ================= */
+const STATES = [
+  ['hidden', 'Hidden'], ['armed', 'Armed'], ['listen', 'Dictating'],
+  ['transcribe', 'Transcribing'], ['record', 'Recording'], ['save', 'Saving'],
+];
+let raw = { avg: 0, peak: 0 }, sampleAt = 0, silentFor = 0, lastSampleT = 0, gAvg = 0;
+function sample(t, dt) {
+  if (t >= sampleAt) {
+    raw = voice === 'silent' ? { avg: 0.004, peak: 0.006 }
+      : voice === 'mic' && micAnalyser ? micLevel() : fakeLevel(t);
+    sampleAt = t + 0.1;
+    if (raw.avg < 0.045) silentFor += Math.max(0, t - lastSampleT); else silentFor = 0;
+    lastSampleT = t;
+  }
+  gAvg += (Math.min(1, raw.avg * 3) - gAvg) * Math.min(1, dt * 8);
+  tickBands(t, dt);
+}
+/* per-store drive: springs live in the store so every cell/study is independent */
+function drive2(store, st, dt) {
+  store.m ??= makeSpring(K_METER, C_METER, 0); store.p ??= makeSpring(K_METER, C_METER, 0);
+  store.w ??= makeSpring(K_BOUNCY, C_BOUNCY, 16); store.sc ??= makeSpring(K_BOUNCY, C_BOUNCY, 0);
+  const active = st === 'listen' || st === 'record';
+  const wn = silentFor > 1.2 && active;
+  const avg = Math.min(1, stepSpring(store.m, active ? raw.avg : 0, dt) * 3);
+  const peak = Math.min(1, stepSpring(store.p, active ? raw.peak : 0, dt) * 3);
+  const w = stepSpring(store.w, active ? (wn ? 16 : 56) : st === 'transcribe' || st === 'save' ? 36 : 16, dt);
+  const sc = stepSpring(store.sc, st === 'hidden' ? 0 : 1, dt);
+  return { avg, peak, w, sc: Math.max(0, sc), warn: wn };
+}
+const recPulse = (t, hz = 0.9) => 0.55 + 0.45 * Math.sin(t * Math.PI * 2 * hz);
+const RED = [255, 59, 48], BLUE = [10, 132, 255], CYAN = [80, 200, 245], AMBER = [255, 179, 64],
+      BLACKC = [0, 0, 0], WHITE = [255, 255, 255];
+function mixc(a, b, f) { f = Math.max(0, Math.min(1, f));
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]; }
+const css = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+/* ================= liquid metal engine (metal-fx port, effect 1) =================
+   One WebGL render per palette per frame, cached into 2D canvases so any number
+   of cells can stamp any palette simultaneously. */
+const GLW = 416, GLH = 128;
+const glcv = document.createElement('canvas'); glcv.width = GLW; glcv.height = GLH;
+const gl = glcv.getContext('webgl', { preserveDrawingBuffer: true });
+let metalOK = false; const uni = {};
+const FRAG = `
+precision highp float;
+uniform vec2 u_resolution;
+uniform float u_time;
+uniform vec3 u_color1; uniform vec3 u_color2; uniform vec3 u_color3;
+uniform vec3 u_color4; uniform vec3 u_color5;
+uniform float u_intensity; uniform float u_scale; uniform float u_direction;
+uniform float u_distortion; uniform float u_complexity; uniform float u_blur;
+vec3 mod289(vec3 x){ return x - floor(x*(1.0/289.0))*289.0; }
+vec2 mod289(vec2 x){ return x - floor(x*(1.0/289.0))*289.0; }
+vec3 permute(vec3 x){ return mod289(((x*34.0)+1.0)*x); }
+float snoise(vec2 v){
+  const vec4 C = vec4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439);
+  vec2 i = floor(v + dot(v, C.yy));
+  vec2 x0 = v - i + dot(i, C.xx);
+  vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+  vec4 x12 = x0.xyxy + C.xxzz; x12.xy -= i1;
+  i = mod289(i);
+  vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0)) + i.x + vec3(0.0, i1.x, 1.0));
+  vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+  m = m*m; m = m*m;
+  vec3 x = 2.0 * fract(p * C.www) - 1.0;
+  vec3 h = abs(x) - 0.5;
+  vec3 ox = floor(x + 0.5);
+  vec3 a0 = x - ox;
+  m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
+  vec3 g;
+  g.x = a0.x * x0.x + h.x * x0.y;
+  g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+  return 130.0 * dot(m, g);
+}
+float fbm(vec2 p, float oct){
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 7; i++) {
+    if (float(i) >= oct) break;
+    v += a * snoise(p);
+    p *= 2.0; a *= 0.5;
+  }
+  return v;
+}
+float nfbm(vec2 p){ return fbm(p, 3.0 + u_complexity * 4.0); }
+vec3 palette(float t){
+  t = smoothstep(0.0, 1.0, t);
+  float k = 64.0;
+  float w1 = exp(-k * t * t);
+  float w2 = exp(-k * (t - 0.25) * (t - 0.25));
+  float w3 = exp(-k * (t - 0.5)  * (t - 0.5));
+  float w4 = exp(-k * (t - 0.75) * (t - 0.75));
+  float w5 = exp(-k * (t - 1.0)  * (t - 1.0));
+  float tot = w1 + w2 + w3 + w4 + w5 + 0.0001;
+  return (u_color1*w1 + u_color2*w2 + u_color3*w3 + u_color4*w4 + u_color5*w5) / tot;
+}
+vec2 warp(vec2 p, float t){
+  float str = u_distortion * 2.0;
+  return vec2(
+    nfbm(p + vec2(t * 0.1, 0.0)),
+    nfbm(p + vec2(0.0, t * 0.12) + 5.0)
+  ) * str;
+}
+vec3 computeEffect(vec2 uv, float aspect, float t, float dist, float cpx){
+  vec2 p = (uv - 0.5) * u_scale;
+  p.x *= aspect;
+  p += vec2(cos(u_direction), sin(u_direction)) * t * 0.15;
+  float freq = 3.0 + cpx * 8.0;
+  float val = 0.0;
+  val += sin(p.x * freq + t);
+  val += sin(p.y * freq + t * 1.3);
+  val += sin((p.x + p.y) * freq * 0.7 + t * 0.7);
+  val += sin(length(p) * freq * 0.8 - t * 1.5);
+  vec2 w = warp(p, t);
+  val += (w.x + w.y) * dist;
+  val = val * 0.2 * u_intensity + 0.5;
+  return palette(clamp(val, 0.0, 1.0));
+}
+void main(){
+  vec2 uv = gl_FragCoord.xy / u_resolution;
+  float aspect = u_resolution.x / u_resolution.y;
+  float t = u_time;
+  vec3 col;
+  if (u_blur < 0.01) col = computeEffect(uv, aspect, t, u_distortion, u_complexity);
+  else {
+    float r = u_blur * 0.02;
+    col  = computeEffect(uv,                 aspect, t, u_distortion, u_complexity) * 0.4;
+    col += computeEffect(uv + vec2( r, 0.0), aspect, t, u_distortion, u_complexity) * 0.15;
+    col += computeEffect(uv + vec2(-r, 0.0), aspect, t, u_distortion, u_complexity) * 0.15;
+    col += computeEffect(uv + vec2(0.0,  r), aspect, t, u_distortion, u_complexity) * 0.15;
+    col += computeEffect(uv + vec2(0.0, -r), aspect, t, u_distortion, u_complexity) * 0.15;
+  }
+  col = pow(col, vec3(1.3));
+  gl_FragColor = vec4(col, 1.0);
+}`;
+try {
+  const vs = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vs, 'attribute vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }');
+  gl.compileShader(vs);
+  const fs = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fs, FRAG); gl.compileShader(fs);
+  if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(fs));
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'a');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  for (const n of ['u_resolution','u_time','u_color1','u_color2','u_color3','u_color4','u_color5',
+                   'u_intensity','u_scale','u_direction','u_distortion','u_complexity','u_blur'])
+    uni[n] = gl.getUniformLocation(prog, n);
+  gl.viewport(0, 0, GLW, GLH);
+  gl.uniform2f(uni.u_resolution, GLW, GLH);
+  gl.uniform1f(uni.u_scale, 1.0);       /* compensates the ~2.5x downscale of our crops */
+  gl.uniform1f(uni.u_direction, 80 * Math.PI / 180);
+  gl.uniform1f(uni.u_complexity, 0.68);
+  gl.uniform1f(uni.u_blur, 1);
+  metalOK = true;
+} catch (e) { document.title = 'GL ERR ' + e.message; }
+const hex2v = h => [parseInt(h.slice(1,3),16)/255, parseInt(h.slice(3,5),16)/255, parseInt(h.slice(5,7),16)/255];
+const METAL_PALETTES = {
+  silver: ['#000000', '#dedede', '#747270', '#e5e5e5', '#0d0d0d'],
+  chroma: ['#000000', '#aae8ff', '#c5fe9e', '#f7888d', '#0d0d0d'],
+  gold:   ['#000000', '#ffffff', '#fff3c4', '#f7d488', '#0d0d0d'],
+  molten: ['#1a0300', '#ff8a50', '#ffd9a0', '#ff3b30', '#140000'],
+  amber:  ['#140d00', '#ffb340', '#6b5423', '#ffd98a', '#0d0d0d'],
+};
+const KEYS = Object.keys(METAL_PALETTES);
+/* per-key flow speed and intensity; live voice feeds silver + molten */
+const KEY_MOTION = {
+  silver: () => [0.7 + gAvg * 2.6, 1.8 + gAvg * 2],
+  molten: () => [1.3 + gAvg * 2.2, 2.0 + gAvg * 1.8],
+  chroma: () => [1.7, 2.2],
+  gold:   () => [2.4, 2.4],
+  amber:  () => [0.07, 1.6],
+};
+const mcache = {}, mtime = {};
+for (const k of KEYS) {
+  const c = document.createElement('canvas'); c.width = GLW; c.height = GLH;
+  mcache[k] = c; mtime[k] = 0;
+}
+function metalRenderAll(dt) {
+  if (!metalOK) return;
+  for (const k of KEYS) {
+    const [speed, inten] = KEY_MOTION[k]();
+    mtime[k] += dt * speed * 1.2;
+    const cols = METAL_PALETTES[k].map(hex2v);
+    gl.uniform1f(uni.u_time, mtime[k]);
+    gl.uniform3fv(uni.u_color1, cols[0]); gl.uniform3fv(uni.u_color2, cols[1]);
+    gl.uniform3fv(uni.u_color3, cols[2]); gl.uniform3fv(uni.u_color4, cols[3]);
+    gl.uniform3fv(uni.u_color5, cols[4]);
+    gl.uniform1f(uni.u_intensity, inten);
+    gl.uniform1f(uni.u_distortion, 0.3 + gAvg * 0.5);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const c2 = mcache[k].getContext('2d');
+    c2.clearRect(0, 0, GLW, GLH);
+    c2.drawImage(glcv, 0, 0);
+  }
+}
+function metalFillKey(ctx, key, x, y, w, h) {
+  const src = mcache[key];
+  let sw = GLW, sh = GLW * h / w;
+  if (sh > GLH) { sh = GLH; sw = GLH * w / h; }
+  ctx.drawImage(src, (GLW - sw) / 2, (GLH - sh) / 2, sw, sh, x, y, w, h);
+}
+function metalKey(pm, st, wn) {
+  if (wn) return pm.warnP;
+  if (st === 'record') return pm.record;
+  if (st === 'listen') return pm.listen;
+  if (st === 'transcribe') return pm.transcribe;
+  if (st === 'save') return pm.save;
+  return pm.idle;
+}
+const DEFAULT_PM = { listen: 'silver', record: 'molten', transcribe: 'chroma', save: 'gold', warnP: 'amber', idle: 'silver' };
+/* ================= shared 2D pieces ================= */
+function hexCapsule(ctx, cx, cy, w, h, accent, avg, peak, shineT) {
+  const r = h / 2;
+  const bg = mixc(mixc(accent, BLACKC, 0.5), accent, avg);
+  ctx.save();
+  ctx.shadowColor = css(accent, avg); ctx.shadowBlur = 4;
+  ctx.fillStyle = css(bg);
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.fill();
+  ctx.shadowBlur = 8; ctx.shadowColor = css(accent, avg * 0.5);
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.save(); ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.clip();
+  ctx.globalCompositeOperation = 'screen';
+  const aGlow = avg < 0.1 ? avg / 0.1 : 1;
+  let g = ctx.createRadialGradient(cx, cy, 1, cx, cy, Math.max(4, w / 2 - 4));
+  g.addColorStop(0, css(accent, aGlow * 0.9)); g.addColorStop(1, css(accent, 0));
+  ctx.fillStyle = g; ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+  const aCore = avg < 0.1 ? avg / 0.1 * 0.5 : 0.5;
+  g = ctx.createRadialGradient(cx, cy, 0.5, cx, cy, Math.max(3, w * 0.2));
+  g.addColorStop(0, `rgba(255,255,255,${aCore})`); g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g; ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+  const pw = w * (peak + 0.6), aPeak = peak < 0.1 ? peak / 0.1 * 0.5 : 0.5;
+  g = ctx.createRadialGradient(cx, cy, 0.5, cx, cy, pw / 2);
+  g.addColorStop(0, css(accent, aPeak)); g.addColorStop(1, css(accent, 0));
+  ctx.fillStyle = g; ctx.fillRect(cx - pw / 2, cy - h / 2 + 2, pw, h - 4);
+  if (shineT !== undefined) {
+    const sx = cx - w / 2 - 20 + ((shineT * (w + 40) * 1.4) % (w + 40));
+    g = ctx.createLinearGradient(sx, 0, sx + 22, 0);
+    g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(0.5, 'rgba(255,255,255,0.5)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+  }
+  ctx.restore();
+  ctx.strokeStyle = css(mixc(accent, WHITE, 0.1), 0.6); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.stroke();
+}
+function bodyShell(ctx, cx, cy, w, h, r) {
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+  ctx.fillStyle = 'rgba(13,14,18,0.97)';
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.stroke();
+}
+const EYE = { w: 104, h: 30, bars: 21, thickness: 2.5, tilt: 1.6, mirror: true, gain: 1.5,
+              pupil: 0.2, blinkEvery: 3.6, envelope: 0.8, pulseHz: 0.9 };
+function eyelineDraw(ctx, cx, cy, t, d, st, fill, pupilFill) {
+  const W = EYE.w, H = EYE.h;
+  bodyShell(ctx, cx, cy, W, H, 12);
+  const pad = 10, innerW = W - pad * 2;
+  const n = EYE.bars, gap = 2, bw = Math.max(1.5, (innerW - (n - 1) * gap) / n);
+  const x0 = cx - innerW / 2, lineTh = EYE.thickness;
+  fill(ctx, x0, cy - lineTh / 2, innerW, lineTh, lineTh / 2, d.warn ? 0.55 : 0.4);
+  if (st === 'armed' || st === 'hidden') return;
+  if (d.warn) {
+    const p = (t * 0.55) % 1, hx = x0 + p * innerW;
+    const g = ctx.createLinearGradient(hx - 22, 0, hx + 22, 0);
+    g.addColorStop(0, 'rgba(255,179,64,0)'); g.addColorStop(0.5, 'rgba(255,179,64,1)'); g.addColorStop(1, 'rgba(255,179,64,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.roundRect(x0, cy - lineTh / 2 - 0.5, innerW, lineTh + 1, lineTh / 2); ctx.fill();
+    return;
+  }
+  if (st === 'transcribe' || st === 'save') {
+    const speed = st === 'save' ? 2.6 : 1.1;
+    for (let i = 0; i < n; i++) {
+      const u = i / (n - 1);
+      const wv = Math.max(0, Math.sin((u - t * speed) * Math.PI * 2)) * 0.5;
+      if (wv < 0.05) continue;
+      const bh = lineTh + wv * (H - 14 - lineTh) * 0.4;
+      fill(ctx, x0 + i * (bw + gap), cy - bh / 2, bw, bh, bw / 2, 0.35 + wv);
+    }
+    return;
+  }
+  const rec = st === 'record';
+  const bands = balancedBands(n, EYE.gain, EYE.tilt, EYE.mirror);
+  const blink = rec && ((t + 0.9) % EYE.blinkEvery) < 0.14;
+  const maxH = H - 12;
+  for (let i = 0; i < n; i++) {
+    const u = n === 1 ? 0.5 : i / (n - 1);
+    let v = bands[i], alpha = 0.9;
+    if (rec) {
+      let env = Math.pow(Math.sin(Math.PI * u), 0.8);
+      const inPupil = Math.abs(u - 0.5) < EYE.pupil / 2;
+      if (inPupil) env *= 0.12;
+      const shaped = (0.3 + 0.7 * v) * env;
+      v = v * (1 - EYE.envelope) + shaped * EYE.envelope;
+      if (inPupil) alpha = 1;
+      if (blink) v = 0;
+    }
+    const bh = lineTh + v * (maxH - lineTh);
+    if (bh <= lineTh + 0.4) continue;
+    fill(ctx, x0 + i * (bw + gap), cy - bh / 2, bw, bh, Math.min(bw / 2, 2),
+         alpha * (0.45 + 0.55 * Math.min(1, v * 1.4)));
+  }
+  if (rec && !blink) {
+    const pw = Math.max(2, EYE.pupil * innerW * 0.3);
+    (pupilFill || ((c, x, y, w2, h2, r2) => {
+      c.fillStyle = `rgba(255,255,255,${0.35 + 0.25 * recPulse(t, EYE.pulseHz)})`;
+      c.beginPath(); c.roundRect(x, y, w2, h2, r2); c.fill();
+    }))(ctx, cx - pw / 2, cy - lineTh, pw, lineTh * 2, lineTh);
+  }
+}
+const hexRgb = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+/* ================= variants: draw(ctx, cx, cy, t, d, st, store) ================= */
+const VARIANTS = [
+{ id: 'mliquid', label: 'Liquid metal eyeline', metal: true, noScale: true, palettes: DEFAULT_PM,
+  draw(ctx, cx, cy, t, d, st, store) {
+    const key = metalKey(this.palettes, st, d.warn);
+    eyelineDraw(ctx, cx, cy, t, d, st, (c, x, y, w, h, r, a) => {
+      c.save(); c.globalAlpha *= Math.min(1, a + 0.2);
+      c.beginPath(); c.roundRect(x, y, w, h, r); c.clip();
+      metalFillKey(c, key, cx - EYE.w / 2 + 6, cy - EYE.h / 2 + 4, EYE.w - 12, EYE.h - 8);
+      c.restore();
+    });
+  } },
+{ id: 'mrim', label: 'Metal rim chip', metal: true, noScale: true, palettes: DEFAULT_PM,
+  draw(ctx, cx, cy, t, d, st, store) {
+    const key = metalKey(this.palettes, st, d.warn);
+    const W = EYE.w, H = EYE.h, rim = 2.5;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
+    ctx.fillStyle = 'rgba(13,14,18,0.97)';
+    ctx.beginPath(); ctx.roundRect(cx - W / 2, cy - H / 2, W, H, 12); ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(cx - W / 2, cy - H / 2, W, H, 12);
+    ctx.roundRect(cx - W / 2 + rim, cy - H / 2 + rim, W - rim * 2, H - rim * 2, 12 - rim);
+    ctx.clip('evenodd');
+    metalFillKey(ctx, key, cx - W / 2, cy - H / 2, W, H);
+    ctx.restore();
+    ctx.fillStyle = 'rgba(13,14,18,0.97)';
+    ctx.beginPath(); ctx.roundRect(cx - W / 2 + rim, cy - H / 2 + rim, W - rim * 2, H - rim * 2, 12 - rim); ctx.fill();
+    const white = (c, x, y, w, h, r, a) => { c.fillStyle = `rgba(240,242,248,${a})`;
+      c.beginPath(); c.roundRect(x, y, w, h, r); c.fill(); };
+    const pad = 12, innerW = W - pad * 2, n = EYE.bars, gap = 2;
+    const bw = Math.max(1.5, (innerW - (n - 1) * gap) / n), x0 = cx - innerW / 2, lineTh = 2;
+    white(ctx, x0, cy - lineTh / 2, innerW, lineTh, 1, d.warn ? 0.5 : 0.3);
+    if (st === 'listen' || st === 'record') {
+      if (!d.warn) {
+        const bands = balancedBands(n, EYE.gain, EYE.tilt, EYE.mirror);
+        const maxH = H - 14;
+        for (let i = 0; i < n; i++) {
+          const v = bands[i];
+          const bh = lineTh + v * (maxH - lineTh);
+          if (bh <= lineTh + 0.4) continue;
+          white(ctx, x0 + i * (bw + gap), cy - bh / 2, bw, bh, 1.5, 0.4 + 0.5 * v);
+        }
+        if (st === 'record') {
+          ctx.fillStyle = `rgba(255,69,58,${0.6 + 0.4 * recPulse(t, EYE.pulseHz)})`;
+          ctx.beginPath(); ctx.arc(cx, cy, 2.2, 0, 7); ctx.fill();
+        }
+      }
+    } else if (st === 'transcribe' || st === 'save') {
+      const speed = st === 'save' ? 2.6 : 1.1;
+      for (let i = 0; i < n; i++) {
+        const u = i / (n - 1);
+        const wv = Math.max(0, Math.sin((u - t * speed) * Math.PI * 2)) * 0.5;
+        if (wv < 0.05) continue;
+        const bh = lineTh + wv * 8;
+        white(ctx, x0 + i * (bw + gap), cy - bh / 2, bw, bh, 1.5, 0.3 + wv);
+      }
+    }
+  } },
+{ id: 'mcapsule', label: 'Molten Hex capsule', metal: true, palettes: DEFAULT_PM,
+  draw(ctx, cx, cy, t, d, st, store) {
+    const key = metalKey(this.palettes, st, d.warn);
+    const h = 16, w = d.w, r = h / 2;
+    ctx.save();
+    ctx.shadowColor = st === 'record' ? css(RED, 0.5 * d.avg + 0.2) : 'rgba(200,210,225,0.35)';
+    ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r);
+    ctx.fillStyle = '#0d0e12'; ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.clip();
+    metalFillKey(ctx, key, cx - w / 2, cy - h / 2, w, h);
+    ctx.globalCompositeOperation = 'screen';
+    const aCore = d.avg < 0.1 ? d.avg / 0.1 * 0.45 : 0.45;
+    let g = ctx.createRadialGradient(cx, cy, 0.5, cx, cy, Math.max(3, w * 0.2));
+    g.addColorStop(0, `rgba(255,255,255,${aCore})`); g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+    const pw = w * (d.peak + 0.6), aPeak = d.peak < 0.1 ? d.peak / 0.1 * 0.4 : 0.4;
+    g = ctx.createRadialGradient(cx, cy, 0.5, cx, cy, pw / 2);
+    g.addColorStop(0, `rgba(255,255,255,${aPeak})`); g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(cx - pw / 2, cy - h / 2 + 2, pw, h - 4);
+    ctx.restore();
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.stroke();
+  } },
+{ id: 'meye', label: 'Molten eye', metal: true, noScale: true, palettes: DEFAULT_PM,
+  draw(ctx, cx, cy, t, d, st, store) {
+    const key = metalKey(this.palettes, st, d.warn);
+    const W = 44, H = 20;
+    bodyShell(ctx, cx, cy, W, H, 10);
+    const rec = st === 'record' && !d.warn;
+    const blink = rec && ((t + 0.9) % EYE.blinkEvery) < 0.16;
+    store.open = (store.open ?? 0.1) + (((rec && !blink) ? 1 : 0.12) - (store.open ?? 0.1)) * Math.min(1, (1 / 60) * 14);
+    const ew = 30, eh = Math.max(2.5, 13 * store.open);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cx - ew / 2, cy);
+    ctx.quadraticCurveTo(cx, cy - eh, cx + ew / 2, cy);
+    ctx.quadraticCurveTo(cx, cy + eh, cx - ew / 2, cy);
+    ctx.clip();
+    metalFillKey(ctx, key, cx - ew / 2, cy - eh, ew, eh * 2);
+    ctx.restore();
+    if (rec && store.open > 0.55) {
+      ctx.fillStyle = 'rgba(12,4,4,0.92)';
+      ctx.beginPath(); ctx.arc(cx, cy, 3.1, 0, 7); ctx.fill();
+      ctx.strokeStyle = `rgba(255,255,255,${0.45 + 0.35 * recPulse(t, EYE.pulseHz)})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(cx, cy, 3.1, 0, 7); ctx.stroke();
+    }
+  } },
+{ id: 'mplasma', label: 'Chromatic plasma chip', metal: true, noScale: true,
+  palettes: { listen: 'chroma', record: 'molten', transcribe: 'silver', save: 'gold', warnP: 'amber', idle: 'chroma' },
+  draw(ctx, cx, cy, t, d, st, store) {
+    const key = metalKey(this.palettes, st, d.warn);
+    const W = 64, H = 22;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.45)'; ctx.shadowBlur = 9; ctx.shadowOffsetY = 3;
+    ctx.beginPath(); ctx.roundRect(cx - W / 2, cy - H / 2, W, H, 11);
+    ctx.fillStyle = '#0d0e12'; ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.beginPath(); ctx.roundRect(cx - W / 2, cy - H / 2, W, H, 11); ctx.clip();
+    metalFillKey(ctx, key, cx - W / 2, cy - H / 2, W, H);
+    const quiet = 1 - Math.min(1, d.avg * 1.6);
+    if ((st === 'listen' || st === 'record') && !d.warn && quiet > 0.05) {
+      ctx.fillStyle = `rgba(10,11,15,${0.62 * quiet})`;
+      ctx.fillRect(cx - W / 2, cy - H / 2, W, H);
+    }
+    ctx.restore();
+    if (st === 'record' && !d.warn) {
+      ctx.fillStyle = `rgba(255,255,255,${0.5 + 0.4 * recPulse(t, EYE.pulseHz)})`;
+      ctx.beginPath(); ctx.arc(cx, cy, 1.9, 0, 7); ctx.fill();
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,0.28)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(cx - W / 2, cy - H / 2, W, H, 11); ctx.stroke();
+  } },
+{ id: 'eyeline', label: 'Eyeline (classic)', noScale: true,
+  draw(ctx, cx, cy, t, d, st, store) {
+    const CYc = hexRgb('#50c8f5'), RDc = hexRgb('#ff3b30'), AMc = hexRgb('#ffb340');
+    const accent = d.warn ? AMc : st === 'record' ? RDc : CYc;
+    ctx.save();
+    ctx.shadowColor = css(accent); ctx.shadowBlur = 6;
+    eyelineDraw(ctx, cx, cy, t, d, st, (c, x, y, w, h, r, a) => {
+      c.fillStyle = css(accent, a);
+      c.beginPath(); c.roundRect(x, y, w, h, r); c.fill();
+    });
+    ctx.restore();
+  } },
+{ id: 'hex', label: 'Hex verbatim', draw(ctx, cx, cy, t, d, st, store) {
+    if (d.warn) { hexCapsule(ctx, cx, cy, 16, 16, RED, 0.05, 0); return; }
+    if (st === 'transcribe' || st === 'save') hexCapsule(ctx, cx, cy, d.w, 16, BLUE, 0.3, 0.1, t);
+    else if (st === 'listen' || st === 'record') hexCapsule(ctx, cx, cy, d.w, 16, RED, d.avg, d.peak);
+    else hexCapsule(ctx, cx, cy, 16, 16, BLACKC, 0, 0);
+  } },
+{ id: 'palette', label: 'Palette (cyan/red/amber)', draw(ctx, cx, cy, t, d, st, store) {
+    if (d.warn) { hexCapsule(ctx, cx, cy, 16, 16, AMBER, 0.25 + 0.2 * Math.sin(t * 2.5), 0); return; }
+    if (st === 'transcribe' || st === 'save') hexCapsule(ctx, cx, cy, d.w, 16, CYAN, 0.3, 0.1, t);
+    else if (st === 'record') hexCapsule(ctx, cx, cy, d.w, 16, RED, Math.max(d.avg, 0.3 * recPulse(t)), d.peak);
+    else if (st === 'listen') hexCapsule(ctx, cx, cy, d.w, 16, CYAN, d.avg, d.peak);
+    else hexCapsule(ctx, cx, cy, 16, 16, BLACKC, 0, 0);
+  } },
+{ id: 'pupil', label: 'The pupil', draw(ctx, cx, cy, t, d, st, store) {
+    VARIANTS.find(v => v.id === 'palette').draw(ctx, cx, cy, t, d, st, store);
+    if (st !== 'listen' && st !== 'record') {
+      if (st === 'transcribe') { ctx.fillStyle = 'rgba(10,10,12,0.85)';
+        ctx.beginPath(); ctx.roundRect(cx - 4, cy - 1, 8, 2, 1); ctx.fill(); }
+      return;
+    }
+    if (d.warn) { const lx = Math.sin(t * 2.2) * 3.5;
+      ctx.fillStyle = 'rgba(10,10,12,0.85)';
+      ctx.beginPath(); ctx.arc(cx + lx, cy, 2.6, 0, 7); ctx.fill(); return; }
+    const blink = ((t + 0.8) % 4.2) < 0.12;
+    if (blink) { ctx.fillStyle = 'rgba(10,10,12,0.85)';
+      ctx.beginPath(); ctx.roundRect(cx - 4.5, cy - 1, 9, 2, 1); ctx.fill(); return; }
+    const pr = 2 + 3 * Math.min(1, d.avg * 1.2);
+    ctx.fillStyle = 'rgba(10,10,12,0.88)';
+    ctx.beginPath(); ctx.arc(cx, cy, pr, 0, 7); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.beginPath(); ctx.arc(cx - pr * 0.35, cy - pr * 0.35, Math.max(0.5, pr * 0.22), 0, 7); ctx.fill();
+  } },
+{ id: 'jelly', label: 'Fukasawa jelly', draw(ctx, cx, cy, t, d, st, store) {
+    const active = st === 'listen' || st === 'record';
+    store.wob = (store.wob ?? 0) + ((active && !d.warn ? raw.avg : 0) - (store.wob ?? 0)) * 0.12;
+    store.sag = (store.sag ?? 0) + ((d.warn ? 1 : 0) - (store.sag ?? 0)) * 0.06;
+    const breathe = st === 'transcribe' ? Math.sin(t * 2.6) * 0.06 : 0;
+    const jump = st === 'save' ? Math.abs(Math.sin(t * 3.4)) * 5 : 0;
+    const sx2 = 1 + store.wob * 0.55 + breathe - store.sag * 0.12;
+    const sy2 = 1 - store.wob * 0.3 - breathe - store.sag * 0.28;
+    const W = 52 * sx2, H = 22 * sy2;
+    ctx.save(); ctx.translate(cx, cy + store.sag * 4 - jump); ctx.rotate(store.sag * 0.16);
+    ctx.shadowColor = 'rgba(0,0,0,0.35)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 4;
+    ctx.fillStyle = '#efece6';
+    ctx.beginPath(); ctx.roundRect(-W / 2, -H / 2, W, H, H / 2); ctx.fill();
+    ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+    ctx.strokeStyle = 'rgba(0,0,0,0.22)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(-W / 2, -H / 2, W, H, H / 2); ctx.stroke();
+    const blushA = st === 'record' ? 0.55 + 0.4 * recPulse(t) : d.warn ? 0.55 : 0;
+    if (blushA > 0.02) {
+      const bc = d.warn ? '255,179,64' : '255,59,48';
+      const g = ctx.createRadialGradient(0, 0, 1, 0, 0, W * 0.42);
+      g.addColorStop(0, `rgba(${bc},${blushA})`); g.addColorStop(1, `rgba(${bc},0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.roundRect(-W / 2, -H / 2, W, H, H / 2); ctx.fill();
+    }
+    ctx.fillStyle = '#2b2b2e';
+    const blink = ((t + 0.8) % 3.9) < 0.15 && st === 'listen' && !d.warn;
+    const eh = blink || st === 'transcribe' ? 1.2 : 4;
+    ctx.beginPath(); ctx.roundRect(-7.5, -H * 0.08 - eh / 2, 2.3, eh, 1.1); ctx.fill();
+    ctx.beginPath(); ctx.roundRect(5.2, -H * 0.08 - eh / 2, 2.3, eh, 1.1); ctx.fill();
+    ctx.restore();
+  } },
+];
+/* ================= lifecycle studies =================
+   The container's openness is a function of what the content is receiving:
+   speech blooms it, silence wilts it, transcribing contracts it. */
+function bloomGeom(store, st, dt) {
+  const talking = raw.avg > 0.05;
+  const listening = st === 'listen' || st === 'record';
+  store.pres ??= 0;
+  store.pres += ((listening && talking ? 1 : 0) - store.pres) * Math.min(1, dt * (talking ? 7 : 0.5));
+  store.open ??= makeSpring(K_BOUNCY, C_BOUNCY, 0);
+  const ot = st === 'hidden' ? 0 : st === 'armed' ? 0.1
+    : listening ? 0.24 + 0.76 * store.pres
+    : 0.32;                                   /* transcribe/save: compact */
+  return Math.max(0, stepSpring(store.open, ot, dt));
+}
+/* shared bloom renderer; fill(ctx,x,y,w,h,r,a) draws one rounded rect */
+function drawBloom(ctx, cx, cy, t, d, st, store, dt, fill, accentFor) {
+  const open = bloomGeom(store, st, dt);
+  if (open < 0.02) return;
+  const wilted = (st === 'listen' || st === 'record') && silentFor > 1.2;
+  const W = 10 + (EYE.w - 10) * open, H = 10 + (EYE.h - 10) * open;
+  const accent = accentFor(st, wilted);
+  bodyShell(ctx, cx, cy, W, H, Math.min(12, H / 2));
+  const pad = Math.max(4, 10 * open), innerW = W - pad * 2, maxH = H - 10;
+  if (open < 0.3) {                          /* still a dot: a quiet ember */
+    fill(ctx, cx - 2.5, cy - 2.5, 5, 5, 2.5, 0.5 + d.avg * 0.5, accent);
+    return;
+  }
+  const n = Math.max(5, Math.min(EYE.bars, 1 + 2 * Math.floor(innerW / 9)));
+  const gap = 2, bw = Math.max(1.5, (innerW - (n - 1) * gap) / n), x0 = cx - innerW / 2;
+  const lineTh = 2.5;
+  fill(ctx, x0, cy - lineTh / 2, innerW, lineTh, lineTh / 2, wilted ? 0.55 : 0.4, accent);
+  if (st === 'transcribe' || st === 'save') {
+    const speed = st === 'save' ? 2.6 : 1.1;
+    for (let i = 0; i < n; i++) {
+      const u = i / (n - 1);
+      const wv = Math.max(0, Math.sin((u - t * speed) * Math.PI * 2)) * 0.5;
+      if (wv < 0.05) continue;
+      fill(ctx, x0 + i * (bw + gap), cy - (lineTh + wv * maxH * 0.4) / 2, bw, lineTh + wv * maxH * 0.4, bw / 2, 0.35 + wv, accent);
+    }
+    return;
+  }
+  if (wilted) {
+    const p = (t * 0.55) % 1, hx = x0 + p * innerW;
+    const g = ctx.createLinearGradient(hx - 20, 0, hx + 20, 0);
+    g.addColorStop(0, 'rgba(255,179,64,0)'); g.addColorStop(0.5, 'rgba(255,179,64,1)'); g.addColorStop(1, 'rgba(255,179,64,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.roundRect(x0, cy - lineTh / 2 - 0.5, innerW, lineTh + 1, lineTh / 2); ctx.fill();
+    return;
+  }
+  const rec = st === 'record';
+  const bands = balancedBands(n, EYE.gain, EYE.tilt, EYE.mirror);
+  const blink = rec && ((t + 0.9) % EYE.blinkEvery) < 0.14;
+  for (let i = 0; i < n; i++) {
+    const u = n === 1 ? 0.5 : i / (n - 1);
+    let v = bands[i], alpha = 0.9;
+    if (rec) {
+      let env = Math.pow(Math.sin(Math.PI * u), 0.8);
+      const inPupil = Math.abs(u - 0.5) < EYE.pupil / 2;
+      if (inPupil) env *= 0.12;
+      v = v * (1 - EYE.envelope) + (0.3 + 0.7 * v) * env * EYE.envelope;
+      if (inPupil) alpha = 1;
+      if (blink) v = 0;
+    }
+    const bh = lineTh + v * (maxH - lineTh) * open;
+    if (bh <= lineTh + 0.4) continue;
+    fill(ctx, x0 + i * (bw + gap), cy - bh / 2, bw, bh, Math.min(bw / 2, 2),
+         alpha * (0.45 + 0.55 * Math.min(1, v * 1.4)), accent);
+  }
+  if (rec && !blink && open > 0.7) {
+    ctx.fillStyle = `rgba(255,255,255,${0.35 + 0.25 * recPulse(t, EYE.pulseHz)})`;
+    const pw = Math.max(2, EYE.pupil * innerW * 0.3);
+    ctx.beginPath(); ctx.roundRect(cx - pw / 2, cy - lineTh, pw, lineTh * 2, lineTh); ctx.fill();
+  }
+}
+const STUDIES = [
+{ id: 'ref', label: 'Hex lifecycle (reference)', blurb: 'dot → pill → smaller pill',
+  draw(ctx, cx, cy, t, d, st, store, dt) {
+    ctx.save();
+    ctx.translate(cx, cy); ctx.scale(d.sc, d.sc); ctx.translate(-cx, -cy);
+    ctx.globalAlpha = Math.min(1, d.sc);
+    if (st === 'armed') hexCapsule(ctx, cx, cy, 16, 16, BLACKC, 0.08, 0);
+    else if (st === 'listen') hexCapsule(ctx, cx, cy, d.w, 16, d.warn ? AMBER : RED, d.avg, d.peak);
+    else if (st === 'record') hexCapsule(ctx, cx, cy, d.w, 16, RED, Math.max(d.avg, 0.3 * recPulse(t)), d.peak);
+    else if (st === 'transcribe' || st === 'save') hexCapsule(ctx, cx, cy, d.w, 16, BLUE, 0.3, 0.1, t);
+    ctx.restore();
+  } },
+{ id: 'bloom', label: 'Bloom chip', blurb: 'speech blooms it, silence wilts it',
+  draw(ctx, cx, cy, t, d, st, store, dt) {
+    ctx.save(); ctx.globalAlpha = Math.min(1, d.sc);
+    drawBloom(ctx, cx, cy, t, d, st, store, dt,
+      (c, x, y, w, h, r, a, accent) => { c.fillStyle = css(accent, a);
+        c.save(); c.shadowColor = css(accent); c.shadowBlur = 6;
+        c.beginPath(); c.roundRect(x, y, w, h, r); c.fill(); c.restore(); },
+      (s, wilted) => wilted ? AMBER : s === 'record' ? hexRgb('#ff3b30') : hexRgb('#50c8f5'));
+    ctx.restore();
+  } },
+{ id: 'mbloom', label: 'Liquid metal bloom', blurb: 'same shape, molten content', metal: true,
+  draw(ctx, cx, cy, t, d, st, store, dt) {
+    /* crossfade between palette keys so state changes melt */
+    const wilted = (st === 'listen' || st === 'record') && silentFor > 1.2;
+    const want = metalKey(DEFAULT_PM, st, wilted);
+    store.key ??= want; store.mix ??= 1;
+    if (want !== store.key) { store.prev = store.key; store.key = want; store.mix = 0; }
+    store.mix = Math.min(1, store.mix + dt * 3);
+    const open = store.open ? Math.max(0, store.open.x) : 0;
+    const W = 10 + (EYE.w - 10) * open, H = 10 + (EYE.h - 10) * open;
+    ctx.save(); ctx.globalAlpha = Math.min(1, d.sc);
+    drawBloom(ctx, cx, cy, t, d, st, store, dt,
+      (c, x, y, w, h, r, a) => {
+        c.save(); c.beginPath(); c.roundRect(x, y, w, h, r); c.clip();
+        const rx = cx - W / 2 + 4, ry = cy - H / 2 + 3, rw = Math.max(8, W - 8), rh = Math.max(6, H - 6);
+        if (store.mix < 1 && store.prev) {
+          c.globalAlpha *= Math.min(1, a + 0.2);
+          metalFillKey(c, store.prev, rx, ry, rw, rh);
+          c.globalAlpha *= store.mix;
+        } else c.globalAlpha *= Math.min(1, a + 0.2);
+        metalFillKey(c, store.key, rx, ry, rw, rh);
+        c.restore();
+      },
+      (s, w2) => w2 ? AMBER : s === 'record' ? hexRgb('#ff3b30') : hexRgb('#dedede'));
+    ctx.restore();
+  } },
+{ id: 'aperture', label: 'Naked aperture', blurb: 'no shell — the sound is the shape',
+  draw(ctx, cx, cy, t, d, st, store, dt) {
+    if (st === 'hidden' && d.sc < 0.03) return;
+    ctx.save(); ctx.globalAlpha = Math.min(1, d.sc);
+    const innerW = 84, n = EYE.bars, gap = 2;
+    const bw = Math.max(1.5, (innerW - (n - 1) * gap) / n), x0 = cx - innerW / 2, lineTh = 2.5;
+    const wilted = (st === 'listen' || st === 'record') && silentFor > 1.2;
+    const accent = wilted ? AMBER : st === 'record' ? hexRgb('#ff3b30') : hexRgb('#50c8f5');
+    const bar = (x, y, w, h, r, a) => {
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.55)'; ctx.shadowBlur = 3; ctx.shadowOffsetY = 1;
+      ctx.fillStyle = css(accent, a);
+      ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill();
+      ctx.shadowColor = css(accent, 0.8); ctx.shadowBlur = 5; ctx.shadowOffsetY = 0;
+      ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill();
+      ctx.restore();
+    };
+    if (st === 'armed') { bar(cx - 7, cy - lineTh / 2, 14, lineTh, lineTh / 2, 0.85); ctx.restore(); return; }
+    bar(x0, cy - lineTh / 2, innerW, lineTh, lineTh / 2, wilted ? 0.6 : 0.45);
+    if (st === 'transcribe' || st === 'save') {
+      const speed = st === 'save' ? 2.6 : 1.1;
+      for (let i = 0; i < n; i++) {
+        const u = i / (n - 1);
+        const wv = Math.max(0, Math.sin((u - t * speed) * Math.PI * 2)) * 0.5;
+        if (wv < 0.05) continue;
+        bar(x0 + i * (bw + gap), cy - (lineTh + wv * 8) / 2, bw, lineTh + wv * 8, bw / 2, 0.35 + wv);
+      }
+      ctx.restore(); return;
+    }
+    if (wilted) {
+      const p = (t * 0.55) % 1, hx = x0 + p * innerW;
+      const g = ctx.createLinearGradient(hx - 20, 0, hx + 20, 0);
+      g.addColorStop(0, 'rgba(255,179,64,0)'); g.addColorStop(0.5, 'rgba(255,179,64,1)'); g.addColorStop(1, 'rgba(255,179,64,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.roundRect(x0, cy - lineTh / 2 - 0.5, innerW, lineTh + 1, lineTh / 2); ctx.fill();
+      ctx.restore(); return;
+    }
+    if (st === 'listen' || st === 'record') {
+      const rec = st === 'record';
+      const bands = balancedBands(n, EYE.gain, EYE.tilt, EYE.mirror);
+      const blink = rec && ((t + 0.9) % EYE.blinkEvery) < 0.14;
+      for (let i = 0; i < n; i++) {
+        const u = i / (n - 1);
+        let v = bands[i], alpha = 0.9;
+        if (rec) {
+          let env = Math.pow(Math.sin(Math.PI * u), 0.8);
+          const inPupil = Math.abs(u - 0.5) < EYE.pupil / 2;
+          if (inPupil) env *= 0.12;
+          v = v * (1 - EYE.envelope) + (0.3 + 0.7 * v) * env * EYE.envelope;
+          if (inPupil) alpha = 1;
+          if (blink) v = 0;
+        }
+        const bh = lineTh + v * 20;
+        if (bh <= lineTh + 0.4) continue;
+        bar(x0 + i * (bw + gap), cy - bh / 2, bw, bh, Math.min(bw / 2, 2), alpha * (0.45 + 0.55 * Math.min(1, v * 1.4)));
+      }
+      if (rec && !blink) {
+        ctx.fillStyle = `rgba(255,255,255,${0.35 + 0.25 * recPulse(t, EYE.pulseHz)})`;
+        const pw = Math.max(2, EYE.pupil * innerW * 0.3);
+        ctx.beginPath(); ctx.roundRect(cx - pw / 2, cy - lineTh, pw, lineTh * 2, lineTh); ctx.fill();
+      }
+    }
+    ctx.restore();
+  } },
+];
+/* ================= sequencer ================= */
+const SEQ = {
+  dictation: [['hidden', 900], ['armed', 500], ['listen', 4600], ['transcribe', 1300], ['hidden', 1400]],
+  video: [['hidden', 900], ['armed', 500], ['record', 5600], ['save', 1100], ['hidden', 1400]],
+};
+let seqMode = 'dictation', seqI = 0, seqStart = performance.now();
+function tickSeq(now) {
+  const seq = SEQ[seqMode];
+  if (now - seqStart >= seq[seqI][1]) { seqStart = now; seqI = (seqI + 1) % seq.length; }
+  return seq[seqI][0];
+}
+/* ================= DOM setup ================= */
+const studiesDiv = document.getElementById('studies');
+const studyCtx = [];
+for (const s of STUDIES) {
+  const wrap = document.createElement('div'); wrap.className = 'study';
+  const c = document.createElement('canvas'); c.width = 560; c.height = 168;
+  const cap = document.createElement('div'); cap.className = 'cap';
+  cap.innerHTML = `<b>${s.label}</b><br><span class="st">${s.blurb}</span>`;
+  wrap.appendChild(c); wrap.appendChild(cap); studiesDiv.appendChild(wrap);
+  studyCtx.push(c.getContext('2d'));
+}
+const studyStores = STUDIES.map(() => ({}));
+const matrixDiv = document.getElementById('matrix');
+const hdr = document.createElement('div'); hdr.className = 'hdr';
+for (const [, label] of STATES) { const d = document.createElement('div'); d.textContent = label; hdr.appendChild(d); }
+matrixDiv.appendChild(hdr);
+const rowCtx = [];
+for (const v of VARIANTS) {
+  const row = document.createElement('div'); row.className = 'mrow';
+  const lab = document.createElement('label'); lab.textContent = v.label;
+  const c = document.createElement('canvas'); c.width = 1800; c.height = 96;
+  row.appendChild(lab); row.appendChild(c); matrixDiv.appendChild(row);
+  rowCtx.push(c.getContext('2d'));
+}
+const colStores = STATES.map(() => ({}));
+const cellStores = VARIANTS.map(() => STATES.map(() => ({})));
+const seqStore = {};   /* drive store shared by lifecycle studies */
+/* ================= main loop ================= */
+const seqlbl = document.getElementById('seqlbl');
+let last = performance.now(), lblAt = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const t = now / 1000;
+  sample(t, dt);
+  metalRenderAll(dt);
+  /* lifecycle studies */
+  const seqSt = tickSeq(now);
+  if (now > lblAt) { seqlbl.textContent = STATES.find(x => x[0] === seqSt)[1]; lblAt = now + 150; }
+  const dSeq = drive2(seqStore, seqSt, dt);
+  for (let i = 0; i < STUDIES.length; i++) {
+    const ctx = studyCtx[i];
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, 560, 168);
+    ctx.setTransform(2, 0, 0, 2, 0, 0);
+    try { STUDIES[i].draw(ctx, 140, 44, t, dSeq, seqSt, studyStores[i], dt); }
+    catch (e) { document.title = 'ERR ' + e; }
+  }
+  /* matrix: one drive per state column, shared by every row */
+  const colD = STATES.map(([st], c) => drive2(colStores[c], st, dt));
+  for (let r = 0; r < VARIANTS.length; r++) {
+    const v = VARIANTS[r], ctx = rowCtx[r];
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, 1800, 96);
+    ctx.setTransform(2, 0, 0, 2, 0, 0);
+    for (let c = 0; c < STATES.length; c++) {
+      const st = STATES[c][0], d = colD[c];
+      if (d.sc < 0.02) continue;
+      const cx = 150 * c + 75, cy = 24;
+      ctx.save();
+      if (v.noScale) ctx.globalAlpha = Math.min(1, d.sc);
+      else {
+        ctx.translate(cx, cy); ctx.scale(d.sc, d.sc); ctx.translate(-cx, -cy);
+        ctx.globalAlpha = Math.min(1, d.sc);
+      }
+      try { v.draw(ctx, cx, cy, t, d, st, cellStores[r][c]); }
+      catch (e) { document.title = 'ERR ' + e; }
+      ctx.restore();
+    }
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+/* ================= controls ================= */
+document.getElementById('controls').onclick = async (e) => {
+  const b = e.target;
+  if (b.dataset.v) {
+    if (b.dataset.v === 'mic' && !micAnalyser) { try { await enableMic(); } catch { return; } }
+    voice = b.dataset.v;
+    document.querySelectorAll('[data-v]').forEach(x => x.classList.toggle('on', x === b));
+  } else if (b.dataset.bg) {
+    document.body.className = b.dataset.bg + (b.dataset.bg !== 'light' ? '' : '');
+    document.body.classList.toggle('darkbar', b.dataset.bg !== 'light');
+    document.querySelectorAll('[data-bg]').forEach(x => x.classList.toggle('on', x === b));
+  } else if (b.dataset.seq) {
+    seqMode = b.dataset.seq; seqI = 0; seqStart = performance.now();
+    document.querySelectorAll('[data-seq]').forEach(x => x.classList.toggle('on', x === b));
+  }
+};
+</script>
+</body>

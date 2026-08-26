@@ -1,0 +1,422 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>see.computer — round 4: tiny pills over real desktops (throwaway prototype)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #16171c; color: #d7d9de; font: 14px/1.45 -apple-system, system-ui; }
+  header { position: sticky; top: 0; z-index: 5; background: #16171cee; backdrop-filter: blur(6px);
+           padding: 14px 22px; border-bottom: 1px solid #2c2f38; display: flex; gap: 18px; align-items: center; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .hint { color: #8b8f9a; font-size: 12.5px; }
+  button#mic { background: #2f6fed; color: #fff; border: 0; border-radius: 7px; padding: 7px 14px; font: 600 13px -apple-system; cursor: pointer; }
+  button#mic.live { background: #d84b45; }
+  table { border-collapse: collapse; margin: 10px 18px 60px; }
+  th { font-size: 11.5px; font-weight: 600; color: #9aa0ab; text-transform: uppercase; letter-spacing: .06em; padding: 14px 10px 6px; text-align: center; }
+  td.name { min-width: 200px; max-width: 220px; padding: 0 14px; vertical-align: middle; }
+  td.name b { display: block; font-size: 13.5px; color: #e8eaee; }
+  td.name span { font-size: 12px; color: #8b8f9a; }
+  td.cell { padding: 8px; }
+  .stage { width: 248px; height: 66px; border-radius: 8px; overflow: hidden; border: 1px solid #2c2f38; }
+  canvas { display: block; }
+</style>
+<header>
+  <h1>see.computer · round 4 — tiny, over everything</h1>
+  <span class="hint">True pill scale (~22 px tall), floating over light / colorful / dark desktops. No words. Amber = deaf · red pulse = recording.</span>
+  <button id="mic">Use my microphone</button>
+  <span class="hint" id="micState"></span>
+</header>
+<table id="grid"></table>
+<script>
+'use strict';
+let micAnalyser = null, micData = null;
+document.getElementById('mic').onclick = async (e) => {
+  if (micAnalyser) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ac = new AudioContext(); const src = ac.createMediaStreamSource(stream);
+    micAnalyser = ac.createAnalyser(); micAnalyser.fftSize = 512; src.connect(micAnalyser);
+    micData = new Float32Array(micAnalyser.fftSize);
+    e.target.classList.add('live'); e.target.textContent = 'Live mic on';
+    document.getElementById('micState').textContent = 'speaking columns follow your voice';
+  } catch (err) { document.getElementById('micState').textContent = 'mic denied: ' + err.name; }
+};
+function micLevel() {
+  micAnalyser.getFloatTimeDomainData(micData);
+  let sum = 0, peak = 0;
+  for (const v of micData) { sum += v * v; peak = Math.max(peak, Math.abs(v)); }
+  return { level: Math.min(1, Math.sqrt(sum / micData.length) * 6), peak: Math.min(1, peak * 3) };
+}
+function fakeLevel(t) {
+  const phrase = (t % 7); let env = 0;
+  if (phrase < 4.4) env = Math.max(0.06, Math.max(0, Math.sin(t * 7.3) * 0.6 + Math.sin(t * 13.1) * 0.4) * (0.55 + 0.45 * Math.sin(t * 1.1)));
+  else if (phrase < 4.9) env = 0.03;
+  else if (phrase < 6.2) env = Math.max(0.05, Math.abs(Math.sin(t * 9.7)) * 0.7);
+  else env = 0.02;
+  const level = Math.min(1, env * (0.85 + 0.3 * Math.sin(t * 31)));
+  return { level, peak: Math.min(1, level * 1.5 + 0.08 * Math.abs(Math.sin(t * 47))) };
+}
+function makeSignal(kind) {
+  return { kind, level: 0, peak: 0, sm: 0, silentFor: 0, hist: new Float32Array(120).fill(0), hi: 0, t0: performance.now() };
+}
+function tickSignal(s, t, dt) {
+  let raw;
+  if (s.kind === 'silent') raw = { level: 0.008 + 0.006 * Math.abs(Math.sin(t * 3)), peak: 0.01 };
+  else if (micAnalyser) raw = micLevel(); else raw = fakeLevel(t);
+  s.level = raw.level; s.peak = raw.peak;
+  s.sm += (raw.level - s.sm) * Math.min(1, dt * 14);
+  s.silentFor = raw.level < 0.045 ? s.silentFor + dt : 0;
+  s.hist[s.hi] = raw.level; s.hi = (s.hi + 1) % s.hist.length;
+  s.elapsed = (performance.now() - s.t0) / 1000;
+}
+const WARN = '#ffb340', CYAN = '#54e0ff', REC = '#ff453a', GREEN = '#3aff70', VFD = '#9ef3ff';
+const warnOn = s => s.silentFor > 1.2;
+const recPulse = t => 0.55 + 0.45 * Math.sin(t * Math.PI * 2 * 0.9);
+/* ---------- fake desktops (the standout test) ---------- */
+function bgLight(ctx, w, h) {
+  ctx.fillStyle = '#e9e5dc'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(10, 6, w - 20, h);
+  ctx.fillStyle = '#c9c4b8';
+  for (let y = 16; y < h; y += 9) ctx.fillRect(20, y, (w - 40) * (0.5 + 0.5 * Math.sin(y * 7)), 3);
+}
+function bgPhoto(ctx, w, h) {
+  const g = ctx.createLinearGradient(0, 0, w, h);
+  g.addColorStop(0, '#f5b26b'); g.addColorStop(0.5, '#e2766d'); g.addColorStop(1, '#7b5ea7');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  for (let i = 0; i < 5; i++) { ctx.beginPath(); ctx.arc(30 + i * 50, 20 + (i % 2) * 26, 10, 0, 7); ctx.fill(); }
+}
+function bgDark(ctx, w, h) {
+  ctx.fillStyle = '#1d1f24'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#2a2d34';
+  for (let y = 10; y < h; y += 9) ctx.fillRect(16, y, (w - 60) * (0.4 + 0.6 * Math.abs(Math.sin(y * 3))), 3.5);
+  ctx.fillStyle = '#3d6da8'; ctx.fillRect(16, 28, 60, 3.5);
+}
+const BGS = [bgLight, bgPhoto, bgDark, bgLight, bgPhoto, bgDark];
+/* ---------- the shell every tiny pill sits in: dark capsule + rim + drop shadow ---------- */
+function shell(ctx, cx, cy, w, h, glowColor, glowAmt) {
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.55)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 2;
+  ctx.fillStyle = 'rgba(16,17,22,0.96)';
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, h / 2); ctx.fill();
+  ctx.shadowOffsetY = 0;
+  if (glowAmt > 0.02) { ctx.shadowColor = glowColor; ctx.shadowBlur = 14 * glowAmt;
+    ctx.strokeStyle = 'rgba(255,255,255,0.28)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, h / 2); ctx.stroke(); }
+  else { ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, h / 2); ctx.stroke(); }
+  ctx.restore();
+  ctx.save(); ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, h / 2); ctx.clip();
+  return () => ctx.restore();
+}
+function stateColors(st, s, t) {
+  const rec = st === 'record', warn = warnOn(s) && (st === 'listen' || rec);
+  const col = warn ? WARN : rec ? REC : CYAN;
+  return { rec, warn, col };
+}
+/* ---------- 10 tiny variants ---------- */
+const VARIANTS = [
+
+{ name: '1 · Dot capsule', why: '48×22: one breathing dot. the minimum viable organism', pw: 48, ph: 22,
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn, col } = stateColors(st, s, t);
+    const lv = st === 'transcribe' ? 0.35 + 0.2 * Math.sin(t * 5) : st === 'save' ? Math.max(0.1, 1 - (t % 1.2)) : Math.max(0.15, s.sm * 1.2);
+    const done = shell(ctx, cx, cy, this.pw, this.ph, col, warn ? 0.3 : lv);
+    const r = warn ? 3 : 3 + 4.5 * lv * (rec ? recPulse(t) + 0.4 : 1);
+    ctx.shadowColor = col; ctx.shadowBlur = 10 * lv + 4;
+    ctx.fillStyle = col; ctx.globalAlpha = warn ? 0.4 + 0.5 * Math.abs(Math.sin(t * 1.6)) : 1;
+    if (warn) { ctx.setLineDash([2.5, 2.5]); ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(cx, cy, 6, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+      ctx.beginPath(); ctx.arc(cx, cy, 1.6, 0, 7); ctx.fill(); }
+    else { ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.beginPath(); ctx.arc(cx, cy, Math.max(0.8, r * 0.35), 0, 7); ctx.fill(); }
+    ctx.globalAlpha = 1; done();
+  } },
+
+{ name: '2 · Plasma chip', why: '64×22: the living blob squeezed into a capsule', pw: 64, ph: 22,
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn, col } = stateColors(st, s, t);
+    const lv = st === 'transcribe' ? 0.3 + 0.12 * Math.sin(t * 4) : Math.max(0.12, s.sm);
+    const done = shell(ctx, cx, cy, this.pw, this.ph, col, lv);
+    if (warn) {
+      ctx.setLineDash([3, 3]); ctx.lineDashOffset = -t * 10; ctx.strokeStyle = col; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.arc(cx, cy, 6, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+    } else {
+      const heart = rec ? 0.7 + 0.45 * recPulse(t) : 1;
+      const base = (4 + 5.5 * lv) * heart;
+      ctx.shadowColor = col; ctx.shadowBlur = 12 * lv * heart + 3;
+      ctx.beginPath();
+      for (let i = 0; i <= 30; i++) {
+        const th = (i / 30) * Math.PI * 2;
+        const wob = (Math.sin(th * 3 + t * 8) + Math.sin(th * 5 - t * 6)) * 1.4 * lv;
+        ctx.lineTo(cx + Math.cos(th) * (base + wob) * 2.1, cy + Math.sin(th) * (base + wob) * 0.8);
+      }
+      ctx.closePath();
+      const g = ctx.createRadialGradient(cx, cy, 0.5, cx, cy, base * 2);
+      g.addColorStop(0, 'rgba(255,250,240,0.9)'); g.addColorStop(0.5, col); g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g; ctx.fill();
+      if (st === 'save') { const p = (t * 1.6) % 1; ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.fillRect(cx - this.pw / 2 + p * this.pw - 2, cy - this.ph / 2, 3, this.ph); }
+    }
+    done();
+  } },
+
+{ name: '3 · VFD micro-bar', why: '84×20: eight segments dance; amber chase = deaf; red row-fill clock = REC', pw: 84, ph: 20,
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn } = stateColors(st, s, t);
+    const col = warn ? WARN : rec ? '#ffab4a' : VFD;
+    const done = shell(ctx, cx, cy, this.pw, this.ph, col, 0.5);
+    const n = 8, bw = 7, gap = 2.4, x0 = cx - (n * (bw + gap) - gap) / 2;
+    ctx.shadowColor = col; ctx.shadowBlur = 6;
+    for (let i = 0; i < n; i++) {
+      let on = false, hgt = 10, y = cy - 5;
+      if (warn) on = Math.floor(t * 6) % n === i;
+      else if (st === 'transcribe') { const c = (t * 10) % (2 * n); const k = c < n ? c : 2 * n - c; on = Math.abs(i - k) < 1.4; }
+      else if (st === 'save') on = i < ((t * 14) % (n + 3));
+      else {
+        const v = s.hist[(s.hi + s.hist.length - n * 3 + i * 3 + s.hist.length) % s.hist.length];
+        hgt = Math.max(2.5, v * 13); y = cy + 2.5 - hgt / 2 + (rec ? 1.5 : 0); on = true;
+        ctx.fillStyle = v < 0.05 ? 'rgba(158,243,255,0.16)' : col;
+        ctx.fillRect(x0 + i * (bw + gap), y, bw, hgt);
+        continue;
+      }
+      ctx.fillStyle = on ? col : (warn ? 'rgba(255,179,64,0.14)' : 'rgba(158,243,255,0.14)');
+      ctx.fillRect(x0 + i * (bw + gap), cy - 5, bw, 10);
+    }
+    if (rec && !warn) {
+      const frac = (s.elapsed % 60) / 60;
+      for (let i = 0; i < n; i++) { ctx.fillStyle = i / n < frac ? REC : 'rgba(255,69,58,0.18)';
+        ctx.fillRect(x0 + i * (bw + gap), cy - 7.5, bw, 1.8); }
+    }
+    done();
+  } },
+
+{ name: '4 · VFD micro-face', why: '56×22: two segment eyes + mouth bar. X-eyes when deaf', pw: 56, ph: 22,
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn } = stateColors(st, s, t);
+    const col = warn ? WARN : rec ? REC : VFD;
+    const done = shell(ctx, cx, cy, this.pw, this.ph, col, 0.4);
+    ctx.shadowColor = col; ctx.shadowBlur = 6; ctx.strokeStyle = col; ctx.fillStyle = col;
+    ctx.lineWidth = 2; ctx.lineCap = 'round';
+    const blink = ((t + 0.6) % 3.9) < 0.16 && st === 'listen' && !warn;
+    const ey = cy - 3.5;
+    for (const ex of [cx - 9, cx + 9]) {
+      if (warn) { ctx.beginPath(); ctx.moveTo(ex - 2.6, ey - 2.6); ctx.lineTo(ex + 2.6, ey + 2.6);
+        ctx.moveTo(ex + 2.6, ey - 2.6); ctx.lineTo(ex - 2.6, ey + 2.6); ctx.stroke(); }
+      else if (st === 'transcribe' || blink) { ctx.beginPath(); ctx.moveTo(ex - 3, ey + 1); ctx.lineTo(ex + 3, ey + 1); ctx.stroke(); }
+      else if (st === 'save') { ctx.beginPath(); ctx.moveTo(ex - 3, ey + 1.5); ctx.quadraticCurveTo(ex, ey - 2.5, ex + 3, ey + 1.5); ctx.stroke(); }
+      else { ctx.globalAlpha = rec ? 0.55 + 0.45 * recPulse(t) : 1; ctx.fillRect(ex - 1.8, ey - 3, 3.6, 6.4); ctx.globalAlpha = 1; }
+    }
+    const mv = warn ? 0 : st === 'listen' || rec ? s.sm : st === 'save' ? 0.5 : 0.12;
+    if (warn) { ctx.beginPath(); ctx.moveTo(cx - 3.5, cy + 5.5); ctx.lineTo(cx + 3.5, cy + 5.5); ctx.stroke(); }
+    else { const mw = 7 + mv * 14, mh = 1.6 + mv * 6;
+      ctx.beginPath(); ctx.roundRect(cx - mw / 2, cy + 5 - mh / 2, mw, mh, 1.5); ctx.fill(); }
+    done();
+  } },
+
+{ name: '5 · Phosphor pet nano', why: '52×24: the creature at passport-photo size, still emotive', pw: 52, ph: 24,
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn } = stateColors(st, s, t);
+    const col = warn ? WARN : rec ? '#ff5449' : GREEN;
+    const done = shell(ctx, cx, cy, this.pw, this.ph, col, 0.4);
+    const px = 2.6, gw = 10, gh = 7;
+    const jump = st === 'save' ? Math.abs(Math.sin(t * 3.2)) * 3 : 0;
+    const ox = cx - (gw * px) / 2, oy = cy - (gh * px) / 2 + 1 - jump;
+    const P = (x, y, a = 1) => { ctx.globalAlpha = a; ctx.fillStyle = col; ctx.fillRect(ox + x * px, oy + y * px, px - 0.4, px - 0.4); ctx.globalAlpha = 1; };
+    ctx.shadowColor = col; ctx.shadowBlur = 6;
+    const bodyA = rec ? 0.35 + 0.4 * recPulse(t) : 0.5;
+    for (let x = 0; x < gw; x++) { P(x, 0, bodyA); P(x, gh - 1, bodyA); }
+    for (let y = 0; y < gh; y++) { P(0, y, bodyA); P(gw - 1, y, bodyA); }
+    const blink = ((t + 0.9) % 3.7) < 0.18 && st === 'listen' && !warn;
+    const shut = st === 'transcribe' || blink;
+    const ey = warn ? 2.6 : 2;
+    if (shut) { P(2, 2.6); P(3, 2.6); P(6, 2.6); P(7, 2.6); }
+    else if (warn) { P(2, 2); P(3, 3); P(6, 3); P(7, 2); }
+    else { P(2, 2); P(3, 2); P(6, 2); P(7, 2); P(2, 3); P(3, 3); P(6, 3); P(7, 3); }
+    const mw = warn ? 0 : Math.max(0, Math.round((st === 'listen' || rec ? s.sm : st === 'save' ? 0.5 : 0.1) * 3));
+    if (mw === 0) { P(4, 5, 0.85); P(5, 5, 0.85); }
+    else for (let i = 0; i < mw * 2 + 2; i++) P(4 - mw + i, 5);
+    done();
+  } },
+
+{ name: '6 · 1-bit chip', why: '56×22: white chip flips black on the REC pulse — visible on anything', pw: 56, ph: 22,
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn } = stateColors(st, s, t);
+    const flash = rec && recPulse(t) > 0.75;
+    const BG = flash ? '#111' : '#f7f4ec', FG = flash ? '#f7f4ec' : '#111';
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 9; ctx.shadowOffsetY = 2;
+    ctx.fillStyle = BG; ctx.beginPath(); ctx.roundRect(cx - this.pw / 2, cy - this.ph / 2, this.pw, this.ph, 11); ctx.fill();
+    ctx.shadowOffsetY = 0; ctx.shadowBlur = 0;
+    ctx.strokeStyle = FG; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.roundRect(cx - this.pw / 2 + 1, cy - this.ph / 2 + 1, this.pw - 2, this.ph - 2, 10); ctx.stroke();
+    if (warn) {
+      for (let y = -7; y <= 7; y += 3.4) for (let x = -22; x <= 22; x += 3.4)
+        if ((x + y) % 6.8 === 0) { ctx.fillStyle = FG; ctx.fillRect(cx + x, cy + y, 1.4, 1.4); }
+      if (Math.sin(t * 4) > 0) { ctx.fillStyle = FG;
+        ctx.beginPath(); ctx.moveTo(cx, cy - 6); ctx.lineTo(cx + 6, cy + 5); ctx.lineTo(cx - 6, cy + 5); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = BG; ctx.fillRect(cx - 0.8, cy - 2.5, 1.6, 4); ctx.fillRect(cx - 0.8, cy + 2.3, 1.6, 1.4); }
+    } else if (st === 'transcribe' || st === 'save') {
+      const nn = 6, dnn = Math.floor(((t * 1.8) % 1) * nn);
+      for (let i = 0; i < nn; i++) { ctx.strokeStyle = FG; ctx.strokeRect(cx - 21 + i * 7.4, cy - 2.6, 5.5, 5.2);
+        if (i < dnn) { ctx.fillStyle = FG; ctx.fillRect(cx - 21 + i * 7.4, cy - 2.6, 5.5, 5.2); } }
+    } else {
+      const n = 12, bw = 3.4;
+      for (let i = 0; i < n; i++) {
+        const v = s.hist[(s.hi + s.hist.length - n * 3 + i * 3 + s.hist.length) % s.hist.length];
+        const bh = Math.max(1.6, Math.round(v * 13 / 2) * 2);
+        ctx.fillStyle = FG; ctx.fillRect(cx - 21 + i * bw, cy - bh / 2, bw - 1.2, bh);
+      }
+    }
+    ctx.restore();
+  } },
+
+{ name: '7 · Island sliver', why: '92×20: dynamic-island style — status dot left, live wave right', pw: 92, ph: 20,
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn, col } = stateColors(st, s, t);
+    const done = shell(ctx, cx, cy, this.pw, this.ph, col, 0.35);
+    const dx = cx - this.pw / 2 + 12;
+    ctx.shadowColor = col; ctx.shadowBlur = 7;
+    ctx.fillStyle = col;
+    ctx.globalAlpha = rec ? 0.5 + 0.5 * recPulse(t) : warn ? 0.5 + 0.5 * Math.abs(Math.sin(t * 3)) : 1;
+    ctx.beginPath(); ctx.arc(dx, cy, 3.2, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
+    const x0 = dx + 10, x1 = cx + this.pw / 2 - 10;
+    if (warn) {
+      ctx.strokeStyle = col; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(x0, cy); ctx.lineTo(x1, cy); ctx.stroke();
+      const sx = x0 + ((t * 50) % (x1 - x0));
+      ctx.fillStyle = col; ctx.beginPath(); ctx.arc(sx, cy, 1.8, 0, 7); ctx.fill();
+    } else if (st === 'transcribe' || st === 'save') {
+      for (let i = 0; i < 3; i++) { const p = ((t * 1.4 + i / 3) % 1);
+        ctx.globalAlpha = 1 - p; ctx.fillStyle = col;
+        ctx.beginPath(); ctx.arc(x0 + p * (x1 - x0), cy, 1.8, 0, 7); ctx.fill(); }
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.beginPath();
+      for (let x = x0; x <= x1; x += 1) {
+        const ph = (x - x0) / (x1 - x0);
+        const amp = s.hist[(s.hi + Math.floor(ph * s.hist.length)) % s.hist.length];
+        const y = cy + Math.sin(t * 26 + ph * 20) * amp * 7;
+        x === x0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+    done();
+  } },
+
+{ name: '8 · Ring clock', why: '26×26: naked dot with a minute ring while recording — smallest REC clock possible', pw: 30, ph: 26,
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn, col } = stateColors(st, s, t);
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 1.5;
+    ctx.fillStyle = 'rgba(16,17,22,0.96)'; ctx.beginPath(); ctx.arc(cx, cy, 12, 0, 7); ctx.fill();
+    ctx.shadowOffsetY = 0; ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(cx, cy, 12, 0, 7); ctx.stroke();
+    const lv = st === 'transcribe' ? 0.4 + 0.2 * Math.sin(t * 5) : Math.max(0.15, s.sm * 1.2);
+    ctx.shadowColor = col; ctx.shadowBlur = 8 * lv + 3;
+    if (warn) { ctx.strokeStyle = col; ctx.lineWidth = 1.6; const a = t * 2.4;
+      ctx.beginPath(); ctx.arc(cx, cy, 6.5, a, a + 1.2); ctx.stroke();
+      ctx.fillStyle = col; ctx.beginPath(); ctx.arc(cx, cy, 1.5, 0, 7); ctx.fill(); }
+    else if (st === 'save') { const p = (t * 1.5) % 1;
+      ctx.strokeStyle = col; ctx.lineWidth = 2.2;
+      ctx.beginPath(); ctx.arc(cx, cy, 6.5, -Math.PI / 2, -Math.PI / 2 + p * Math.PI * 2); ctx.stroke(); }
+    else {
+      ctx.fillStyle = col;
+      const r = 2.5 + 4.5 * lv * (rec ? 0.6 + 0.5 * recPulse(t) : 1);
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.8)'; ctx.beginPath(); ctx.arc(cx, cy, Math.max(0.7, r * 0.32), 0, 7); ctx.fill();
+      if (rec) { const frac = (s.elapsed % 60) / 60, mins = Math.floor(s.elapsed / 60);
+        ctx.strokeStyle = '#ff9d94'; ctx.lineWidth = 1.8;
+        ctx.beginPath(); ctx.arc(cx, cy, 9.4, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2); ctx.stroke();
+        for (let m = 0; m < Math.min(mins, 6); m++) { const a = -Math.PI / 2 + m * 0.7;
+          ctx.fillStyle = '#ff9d94'; ctx.beginPath(); ctx.arc(cx + Math.cos(a) * 9.4, cy + Math.sin(a) * 9.4, 1.2, 0, 7); ctx.fill(); } }
+    }
+    ctx.restore();
+  } },
+
+{ name: '9 · Eye slit', why: '58×22: a sliver of an eye — pupil follows your level, lids tell the rest', pw: 58, ph: 22,
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn, col } = stateColors(st, s, t);
+    const done = shell(ctx, cx, cy, this.pw, this.ph, col, 0.35);
+    const EW = 16;
+    const blink = ((t + 1.4) % 4.1) < 0.2 && st === 'listen' && !warn;
+    let open = st === 'transcribe' || blink ? 0.06 : st === 'save' ? Math.abs(Math.sin(t * 3)) * 0.9 : warn ? 0.3 : 0.85;
+    const EH = 7.5 * Math.max(0.06, open);
+    ctx.shadowColor = col; ctx.shadowBlur = 8;
+    ctx.fillStyle = '#0b0c11';
+    ctx.beginPath(); ctx.moveTo(cx - EW, cy);
+    ctx.quadraticCurveTo(cx, cy - EH * 2, cx + EW, cy);
+    ctx.quadraticCurveTo(cx, cy + EH * 2, cx - EW, cy); ctx.closePath();
+    ctx.save(); ctx.clip();
+    ctx.fillStyle = '#ece8df'; ctx.fillRect(cx - EW, cy - 10, EW * 2, 20);
+    const look = warn ? Math.sin(t * 2) * 5 : 0;
+    const pl = st === 'listen' || rec ? s.sm : 0.3;
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(cx + look, cy, 4.6, 0, 7); ctx.fill();
+    ctx.fillStyle = '#05060a'; ctx.globalAlpha = rec ? 0.5 + 0.5 * recPulse(t) : 1;
+    ctx.beginPath(); ctx.arc(cx + look, cy, 1.6 + 2.4 * pl, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.beginPath(); ctx.arc(cx + look - 1.5, cy - 1.5, 0.9, 0, 7); ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = col; ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.moveTo(cx - EW, cy);
+    ctx.quadraticCurveTo(cx, cy - EH * 2, cx + EW, cy);
+    ctx.quadraticCurveTo(cx, cy + EH * 2, cx - EW, cy); ctx.closePath(); ctx.stroke();
+    done();
+  } },
+
+{ name: '10 · Traffic dots', why: '64×18: three dots speak a language — chase, dance, pulse. glanceable from meters away', pw: 64, ph: 18,
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn, col } = stateColors(st, s, t);
+    const done = shell(ctx, cx, cy, this.pw, this.ph, col, 0.35);
+    const xs = [cx - 14, cx, cx + 14];
+    ctx.shadowColor = col; ctx.shadowBlur = 7; ctx.fillStyle = col;
+    for (let i = 0; i < 3; i++) {
+      let r = 2.2, a = 1;
+      if (warn) { a = Math.max(0.15, Math.sin(t * 3 - i * 1.1)); r = 2; }
+      else if (st === 'transcribe' || st === 'save') { const p = (t * 2 - i * 0.33) % 1; r = 1.6 + 2.2 * Math.abs(Math.sin(p * Math.PI)); }
+      else if (rec) { r = 2 + 2.6 * recPulse(t - i * 0.12); }
+      else { const v = s.hist[(s.hi + s.hist.length - 8 - i * 12 + s.hist.length) % s.hist.length]; r = 1.8 + v * 4.5; }
+      ctx.globalAlpha = a; ctx.beginPath(); ctx.arc(xs[i], cy, r, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
+    }
+    done();
+  } },
+];
+/* ---------- grid ---------- */
+const STATES = [
+  ['listen', 'speak', 'Dictating · voice'],
+  ['listen', 'silent', 'Dictating · NO sound'],
+  ['transcribe', 'speak', 'Transcribing'],
+  ['record', 'speak', 'Recording · voice'],
+  ['record', 'silent', 'Recording · NO sound'],
+  ['save', 'speak', 'Saving clip'],
+];
+const table = document.getElementById('grid');
+const head = table.insertRow();
+head.innerHTML = '<th></th>' + STATES.map(s => `<th>${s[2]}</th>`).join('');
+const cells = [];
+VARIANTS.forEach((v) => {
+  const tr = table.insertRow();
+  const td = tr.insertCell(); td.className = 'name';
+  td.innerHTML = `<b>${v.name}</b><span>${v.why}</span>`;
+  STATES.forEach(([state, sig], si) => {
+    const c = tr.insertCell(); c.className = 'cell';
+    const stage = document.createElement('div'); stage.className = 'stage';
+    const cv = document.createElement('canvas');
+    cv.width = 496; cv.height = 132; cv.style.width = '248px'; cv.style.height = '66px';
+    stage.appendChild(cv); c.appendChild(stage);
+    cells.push({ v, state, bg: BGS[si], sig: makeSignal(sig === 'silent' ? 'silent' : 'speak'), ctx: cv.getContext('2d') });
+  });
+});
+let last = performance.now();
+(function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const t = now / 1000;
+  for (const c of cells) {
+    tickSignal(c.sig, t, dt);
+    c.ctx.save(); c.ctx.clearRect(0, 0, 496, 132); c.ctx.scale(2, 2);
+    c.bg(c.ctx, 248, 66);
+    try { c.v.draw(c.ctx, 124, 33, c.state, c.sig, t); }
+    catch (err) { c.ctx.fillStyle = '#f00'; c.ctx.font = '10px monospace'; c.ctx.fillText(String(err).slice(0, 60), 6, 20); }
+    c.ctx.restore();
+  }
+  requestAnimationFrame(loop);
+})(last);
+</script>

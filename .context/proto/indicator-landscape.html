@@ -1,0 +1,354 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>see.computer — round 8: the open-source landscape, cloned (throwaway)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #16171c; color: #d7d9de; font: 14px/1.45 -apple-system, system-ui; }
+  header { position: sticky; top: 0; z-index: 5; background: #16171cee; backdrop-filter: blur(6px);
+           padding: 14px 22px; border-bottom: 1px solid #2c2f38; display: flex; gap: 18px; align-items: center; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .hint { color: #8b8f9a; font-size: 12.5px; }
+  button#mic { background: #2f6fed; color: #fff; border: 0; border-radius: 7px; padding: 7px 14px; font: 600 13px -apple-system; cursor: pointer; }
+  button#mic.live { background: #d84b45; }
+  table { border-collapse: collapse; margin: 10px 18px 60px; }
+  th { font-size: 11.5px; font-weight: 600; color: #9aa0ab; text-transform: uppercase; letter-spacing: .06em; padding: 14px 10px 6px; text-align: center; }
+  td.name { min-width: 210px; max-width: 230px; padding: 0 14px; vertical-align: middle; }
+  td.name b { display: block; font-size: 13.5px; color: #e8eaee; }
+  td.name span { font-size: 12px; color: #8b8f9a; }
+  td.cell { padding: 8px; }
+  .stage { width: 258px; height: 78px; border-radius: 8px; overflow: hidden; border: 1px solid #2c2f38; }
+  canvas { display: block; }
+</style>
+<header>
+  <h1>see.computer · round 8 — what everyone else ships</h1>
+  <span class="hint">Pixel-faithful clones from source. Note: only macparakeet reacts to silence at all, and only after you stop.</span>
+  <button id="mic">Use my microphone</button>
+  <span class="hint" id="micState"></span>
+</header>
+<table id="grid"></table>
+<script>
+'use strict';
+let micAnalyser = null, micData = null;
+document.getElementById('mic').onclick = async (e) => {
+  if (micAnalyser) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ac = new AudioContext(); const src = ac.createMediaStreamSource(stream);
+    micAnalyser = ac.createAnalyser(); micAnalyser.fftSize = 512; src.connect(micAnalyser);
+    micData = new Float32Array(micAnalyser.fftSize);
+    e.target.classList.add('live'); e.target.textContent = 'Live mic on';
+    document.getElementById('micState').textContent = 'voice columns follow your voice';
+  } catch (err) { document.getElementById('micState').textContent = 'mic denied: ' + err.name; }
+};
+function micLevel() {
+  micAnalyser.getFloatTimeDomainData(micData);
+  let sum = 0, peak = 0;
+  for (const v of micData) { sum += v * v; peak = Math.max(peak, Math.abs(v)); }
+  return { level: Math.min(1, Math.sqrt(sum / micData.length) * 6), peak: Math.min(1, peak * 3) };
+}
+function fakeLevel(t) {
+  const phrase = (t % 7); let env = 0;
+  if (phrase < 4.4) env = Math.max(0.06, Math.max(0, Math.sin(t * 7.3) * 0.6 + Math.sin(t * 13.1) * 0.4) * (0.55 + 0.45 * Math.sin(t * 1.1)));
+  else if (phrase < 4.9) env = 0.03;
+  else if (phrase < 6.2) env = Math.max(0.05, Math.abs(Math.sin(t * 9.7)) * 0.7);
+  else env = 0.02;
+  const level = Math.min(1, env * (0.85 + 0.3 * Math.sin(t * 31)));
+  return { level, peak: Math.min(1, level * 1.5 + 0.08 * Math.abs(Math.sin(t * 47))) };
+}
+function makeSignal(kind) {
+  return { kind, level: 0, peak: 0, silentFor: 0, t0: performance.now(), c: {} };
+}
+function tickSignal(s, t, dt) {
+  let raw;
+  if (s.kind === 'silent') raw = { level: 0.006, peak: 0.01 };
+  else if (micAnalyser) raw = micLevel(); else raw = fakeLevel(t);
+  s.level = raw.level; s.peak = raw.peak; s.dt = dt;
+  s.silentFor = raw.level < 0.045 ? s.silentFor + dt : 0;
+  s.elapsed = (performance.now() - s.t0) / 1000;
+}
+const mmss = e => `${Math.floor(e / 60)}:${String(Math.floor(e % 60)).padStart(2, '0')}`;
+function txt(ctx, str, x, y, color, size = 12, font = '-apple-system', align = 'left', weight = 500) {
+  ctx.fillStyle = color; ctx.font = `${weight} ${size}px ${font}`; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.fillText(str, x, y);
+}
+function ease(from, to, o, k, dt, ms, curve) {
+  if (o[k] === undefined) o[k] = to;
+  o[k] += (to - o[k]) * Math.min(1, dt * (1000 / ms) * 3);
+  return o[k];
+}
+function bgLight(ctx, w, h) {
+  ctx.fillStyle = '#e9e5dc'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(10, 6, w - 20, h);
+  ctx.fillStyle = '#c9c4b8';
+  for (let y = 18; y < h; y += 9) ctx.fillRect(20, y, (w - 40) * (0.5 + 0.5 * Math.sin(y * 7)), 3);
+}
+function bgDark(ctx, w, h) {
+  ctx.fillStyle = '#1d1f24'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#2a2d34';
+  for (let y = 12; y < h; y += 9) ctx.fillRect(16, y, (w - 60) * (0.4 + 0.6 * Math.abs(Math.sin(y * 3))), 3.5);
+  ctx.fillStyle = '#3d6da8'; ctx.fillRect(16, 30, 60, 3.5);
+}
+const BGS = [bgLight, bgDark, bgLight, bgDark, bgLight];
+function pillShadow(ctx, fn) { ctx.save(); ctx.shadowColor = 'rgba(0,0,0,0.3)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 4; fn(); ctx.restore(); }
+/* Hex capsule (from round 7, condensed) */
+function mix(a, b, f) { f = Math.max(0, Math.min(1, f));
+  return [Math.round(a[0] + (b[0] - a[0]) * f), Math.round(a[1] + (b[1] - a[1]) * f), Math.round(a[2] + (b[2] - a[2]) * f)]; }
+const rgba = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+function hexCapsule(ctx, cx, cy, w, h, accent, power, peak, shine) {
+  const r = h / 2, BLACK = [10, 10, 12];
+  const bgMix = mix(mix(accent, BLACK, 0.5), accent, Math.min(1, power));
+  ctx.save();
+  ctx.shadowColor = rgba(accent, Math.min(1, power)); ctx.shadowBlur = 8;
+  ctx.fillStyle = rgba(bgMix, 1);
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.fill();
+  ctx.shadowBlur = 16; ctx.shadowColor = rgba(accent, Math.min(1, power) * 0.5);
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.fill();
+  ctx.restore();
+  ctx.save(); ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.clip();
+  const coreA = power < 0.1 ? power / 0.1 * 0.5 : 0.5;
+  const cg = ctx.createRadialGradient(cx, cy, 0.5, cx, cy, Math.max(3, w * 0.22));
+  cg.addColorStop(0, `rgba(255,255,255,${coreA})`); cg.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = cg; ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+  if (shine !== undefined) {
+    const sx = cx - w / 2 - 20 + ((shine * (w + 40) * 1.6) % (w + 40));
+    const sg = ctx.createLinearGradient(sx, 0, sx + 22, 0);
+    sg.addColorStop(0, 'rgba(255,255,255,0)'); sg.addColorStop(0.5, 'rgba(255,255,255,0.45)'); sg.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = sg; ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+  }
+  ctx.restore();
+  ctx.strokeStyle = rgba(mix(accent, [255, 255, 255], 0.1), 0.6); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.stroke();
+}
+function spinner(ctx, x, y, r, t, color, lw = 2) {
+  ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.lineCap = 'round';
+  const a = (t / 0.7) * Math.PI * 2;
+  ctx.beginPath(); ctx.arc(x, y, r, a, a + Math.PI * 1.4); ctx.stroke();
+}
+/* states per app: idle | rec | recsilent | proc | extra */
+const VARIANTS = [
+
+{ name: 'Handy · 23k★', why: '184×40 flat pill, pink dot pulsing 1.9 s, 9 bars (FFT buckets, pow .7, EMA .7/.3), 460 ms pop, top-center. Silence: bars just sit at 3 px',
+  draw(ctx, cx, cy, st, s, t) {
+    const cw = st === 'proc' ? 216 : 184, ch = 40, r = 24;
+    pillShadow(ctx, () => { ctx.fillStyle = 'rgba(28,27,26,0.98)';
+      ctx.beginPath(); ctx.roundRect(cx - cw / 2, cy - ch / 2, cw, ch, r); ctx.fill(); });
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(cx - cw / 2, cy - ch / 2, cw, ch, r); ctx.stroke();
+    const PINK = '#e26aa4';
+    if (st === 'proc') {
+      spinner(ctx, cx - 66, cy, 8, t, PINK);
+      txt(ctx, 'Transcribing…', cx - 48, cy, '#a3a09a', 12);
+      return;
+    }
+    if (st === 'extra') {
+      txt(ctx, 'live transcript streams here…', cx - 62, cy, '#a3a09a', 11, '-apple-system', 'left');
+      ctx.fillStyle = PINK; ctx.fillRect(cx + 62, cy - 7, 2, 14);
+      if (Math.floor(t / 1.05) % 2) { ctx.fillStyle = 'rgba(28,27,26,1)'; ctx.fillRect(cx + 62, cy - 7, 2, 14); }
+      return;
+    }
+    const pulse = (t % 1.9) / 1.9;
+    ctx.save(); ctx.strokeStyle = `rgba(226,106,164,${Math.max(0, 0.5 - pulse * 0.5)})`;
+    ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(cx - 70, cy, 5 + pulse * 6, 0, 7); ctx.stroke(); ctx.restore();
+    ctx.fillStyle = PINK; ctx.beginPath(); ctx.arc(cx - 70, cy, 3.5, 0, 7); ctx.fill();
+    s.c.bars = s.c.bars || new Array(9).fill(0);
+    for (let i = 0; i < 9; i++) {
+      const target = st === 'idle' ? 0 : Math.max(0, Math.min(1, s.level * 1.3 * (0.5 + 0.5 * Math.abs(Math.sin(t * 9 + i * 1.4)))));
+      s.c.bars[i] = s.c.bars[i] * 0.7 + target * 0.3;
+      const bh = st === 'idle'
+        ? 3 * (1.02 + 0.5 * Math.sin(t * (Math.PI * 2 / 0.9) + i * 0.33))
+        : Math.max(3, Math.min(18, 3 + Math.pow(s.c.bars[i], 0.7) * 15));
+      ctx.fillStyle = st === 'idle' ? 'rgba(163,160,154,0.6)' : PINK;
+      ctx.beginPath(); ctx.roundRect(cx - 34 + i * 7, cy - bh / 2, 4, bh, 2); ctx.fill();
+    }
+    txt(ctx, mmss(s.elapsed), cx + 48, cy, '#a3a09a', 12, 'ui-monospace');
+  } },
+
+{ name: 'VoiceInk', why: 'black 184×40 r20, red 21 px record button, 15 bars 3 pt (sin(t·8+i·0.4) shimmer × centerBoost), 300 ms easeInOut. Silence: shimmer at floor',
+  draw(ctx, cx, cy, st, s, t) {
+    const cw = 184, ch = 40;
+    pillShadow(ctx, () => { ctx.fillStyle = '#000';
+      ctx.beginPath(); ctx.roundRect(cx - cw / 2, cy - ch / 2, cw, ch, 20); ctx.fill(); });
+    const rec = st === 'rec' || st === 'recsilent';
+    ctx.fillStyle = rec ? 'rgba(255,59,48,0.92)' : 'rgb(77,77,82)';
+    ctx.beginPath(); ctx.arc(cx - 68, cy, 10.5, 0, 7); ctx.fill();
+    ctx.strokeStyle = rec ? 'rgba(255,59,48,0.98)' : 'rgb(107,107,112)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(cx - 68, cy, 10.5, 0, 7); ctx.stroke();
+    ctx.fillStyle = rec ? '#fff' : 'rgb(199,199,204)';
+    if (rec) ctx.fillRect(cx - 71, cy - 3, 6, 6);
+    else { ctx.beginPath(); ctx.arc(cx - 68, cy, 3.5, 0, 7); ctx.fill(); }
+    if (st === 'proc' || st === 'extra') {
+      spinner(ctx, cx - 40, cy, 7, t, 'rgba(255,255,255,0.86)');
+      txt(ctx, st === 'extra' ? 'Enhancing' : 'Transcribing', cx - 26, cy, 'rgba(255,255,255,0.86)', 11);
+      const dots = Math.floor(t / (st === 'extra' ? 0.22 : 0.18)) % 4;
+      txt(ctx, '.'.repeat(dots), cx + 42, cy, 'rgba(255,255,255,0.6)', 11);
+      return;
+    }
+    s.c.p = (s.c.p || 0) * 0.6 + Math.min(1, Math.max(0, (20 * Math.log10(Math.max(s.level, 1e-6)) + 60) / 60)) * 0.4;
+    const amp = Math.pow(s.c.p, 0.7);
+    for (let i = 0; i < 15; i++) {
+      const wave = Math.sin(t * 8 + i * 0.4) * 0.5 + 0.5;
+      const centerBoost = 1 - (Math.abs(i - 7) / 7) * 0.4;
+      const bh = 4 + amp * wave * centerBoost * 24;
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.beginPath(); ctx.roundRect(cx - 42 + i * 5, cy - bh / 2, 3, bh, 1.5); ctx.fill();
+    }
+    txt(ctx, mmss(s.elapsed), cx + 58, cy, 'rgba(255,255,255,0.6)', 11, 'ui-monospace');
+  } },
+
+{ name: 'macparakeet', why: 'black 70 % capsule, 14 bars 2 pt (level×3, centerBoost .6), shadow r8 y4, bottom-center. The ONLY silence answer: an after-the-fact serif “more audio please”',
+  draw(ctx, cx, cy, st, s, t) {
+    if (st === 'recsilent' && s.silentFor > 2) {
+      pillShadow(ctx, () => { ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.beginPath(); ctx.roundRect(cx - 62, cy - 13, 124, 26, 13); ctx.fill(); });
+      ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      ctx.beginPath(); ctx.roundRect(cx - 62, cy - 13, 124, 26, 13); ctx.stroke();
+      txt(ctx, 'more audio please', cx, cy, 'rgba(255,255,255,0.88)', 12.5, 'Georgia', 'center');
+      return;
+    }
+    if (st === 'idle') {
+      const b = 0.5 + 0.5 * Math.sin(t * 2);
+      pillShadow(ctx, () => { ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.beginPath(); ctx.arc(cx, cy, 16, 0, 7); ctx.fill(); });
+      ctx.strokeStyle = `rgba(255,255,255,${0.15 + 0.25 * b})`; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(cx, cy, 11, 0, 7); ctx.stroke();
+      return;
+    }
+    if (st === 'proc' || st === 'extra') {
+      pillShadow(ctx, () => { ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.beginPath(); ctx.roundRect(cx - 23, cy - 23, 46, 46, 23); ctx.fill(); });
+      if (st === 'proc') spinner(ctx, cx, cy, 8, t, 'rgba(255,255,255,0.9)');
+      else { const p = Math.min(1, (t % 1.2) / 0.35);
+        ctx.strokeStyle = 'rgb(51,168,84)'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.arc(cx, cy, 10, -Math.PI / 2, -Math.PI / 2 + p * Math.PI * 2); ctx.stroke();
+        if (p >= 1) { ctx.beginPath(); ctx.moveTo(cx - 4.5, cy); ctx.lineTo(cx - 1, cy + 3.8); ctx.lineTo(cx + 4.8, cy - 3.5); ctx.stroke(); } }
+      return;
+    }
+    const cw = 148, ch = 32;
+    pillShadow(ctx, () => { ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.beginPath(); ctx.roundRect(cx - cw / 2, cy - ch / 2, cw, ch, ch / 2); ctx.fill(); });
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.beginPath(); ctx.roundRect(cx - cw / 2, cy - ch / 2, cw, ch, ch / 2); ctx.stroke();
+    ctx.fillStyle = '#ff453a'; ctx.beginPath(); ctx.arc(cx - 56, cy, 4, 0, 7); ctx.fill();
+    txt(ctx, mmss(s.elapsed), cx - 42, cy, 'rgba(255,255,255,0.85)', 12, 'ui-monospace');
+    s.c.lv = (s.c.lv || 0) * 0.3 + Math.min(s.level * 5, 1) * 0.7;
+    const boosted = Math.min(s.c.lv * 3, 1);
+    for (let i = 0; i < 14; i++) {
+      const peakF = 1 - (Math.abs(i - 6.5) / 6.5) * 0.6;
+      const bh = Math.max(4, Math.min(20, 4 + 16 * boosted * peakF * (0.6 + 0.4 * Math.abs(Math.sin(t * 10 + i)))));
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.beginPath(); ctx.roundRect(cx - 8 + i * 4.5, cy - bh / 2, 2, bh, 1); ctx.fill();
+    }
+  } },
+
+{ name: 'OpenWhispr', why: 'light 92×36 pill grown from a 40 px circle (300 ms cubic-bezier(.2,0,0,1)), 11 rolling bars sampled every 60 ms with 75 ms ease-out, bottom-right. Thinking = border beam 1.6 s',
+  draw(ctx, cx, cy, st, s, t) {
+    const grown = st !== 'idle';
+    const cw = grown ? 92 : 40, ch = grown ? 36 : 40, r = 20;
+    pillShadow(ctx, () => { ctx.fillStyle = '#fafafa';
+      ctx.beginPath(); ctx.roundRect(cx - cw / 2, cy - ch / 2, cw, ch, r); ctx.fill(); });
+    ctx.strokeStyle = 'rgba(0,0,0,0.14)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(cx - cw / 2, cy - ch / 2, cw, ch, r); ctx.stroke();
+    if (st === 'proc' || st === 'extra') {
+      const p = (t / 1.6) % 1;
+      ctx.save(); ctx.beginPath(); ctx.roundRect(cx - cw / 2, cy - ch / 2, cw, ch, r); ctx.clip();
+      const bx = cx - cw / 2 + p * (cw + 30) - 15;
+      const bg2 = ctx.createLinearGradient(bx, cy - ch / 2, bx + 26, cy + ch / 2);
+      bg2.addColorStop(0, 'rgba(120,90,255,0)'); bg2.addColorStop(0.5, 'rgba(120,90,255,0.85)'); bg2.addColorStop(1, 'rgba(255,90,160,0)');
+      ctx.strokeStyle = bg2; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.roundRect(cx - cw / 2 + 1, cy - ch / 2 + 1, cw - 2, ch - 2, r - 1); ctx.stroke();
+      ctx.restore();
+    }
+    ctx.fillStyle = '#3a3a40';
+    ctx.beginPath(); ctx.roundRect(cx - (grown ? 34 : 0) - 3, cy - 6.5, 6, 9, 3); ctx.fill();
+    ctx.strokeStyle = '#3a3a40'; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(cx - (grown ? 34 : 0), cy - 1, 6.5, 0.35, Math.PI - 0.35); ctx.stroke();
+    if (!grown || st === 'proc' || st === 'extra') return;
+    ctx.fillStyle = 'rgba(0,0,0,0.14)'; ctx.fillRect(cx - 22, cy - 9, 1, 18);
+    s.c.roll = s.c.roll || new Array(11).fill(4);
+    s.c.next = s.c.next || 0;
+    if (t >= s.c.next) {
+      s.c.roll.shift();
+      s.c.roll.push(4 + Math.min(1, Math.sqrt(Math.max(0, s.level) * 6)) * 18);
+      s.c.next = t + 0.06;
+    }
+    s.c.disp = s.c.disp || [...s.c.roll];
+    for (let i = 0; i < 11; i++) {
+      s.c.disp[i] += (s.c.roll[i] - s.c.disp[i]) * Math.min(1, s.dt * 13);
+      ctx.fillStyle = '#26262b';
+      ctx.beginPath(); ctx.roundRect(cx - 14 + i * 5, cy - s.c.disp[i] / 2, 2, s.c.disp[i], 1); ctx.fill();
+    }
+  } },
+
+{ name: 'Hex', why: 'the 16 px outlier: no bars, no text, no timer — the capsule itself is the meter. smallest footprint in the field',
+  draw(ctx, cx, cy, st, s, t) {
+    const RED = [255, 59, 48], BLUE = [0, 122, 255], BLACK = [10, 10, 12];
+    const power = Math.min(1, s.level * 3), peak = Math.min(1, s.peak * 3);
+    s.c.p = (s.c.p || 0) + (power - (s.c.p || 0)) * Math.min(1, s.dt * 12);
+    if (st === 'idle') hexCapsule(ctx, cx, cy, 16, 16, BLACK, 0, 0);
+    else if (st === 'proc' || st === 'extra') hexCapsule(ctx, cx, cy, 36, 16, BLUE, 0.3, 0.1, t);
+    else hexCapsule(ctx, cx, cy, 56, 16, RED, s.c.p, peak);
+  } },
+
+{ name: 'Clips (agent-native)', why: 'bottom-center bar, live waveform canvas, Esc hint; approximate clone (their tsx is themed at runtime)',
+  draw(ctx, cx, cy, st, s, t) {
+    const cw = 170, ch = 36;
+    pillShadow(ctx, () => { ctx.fillStyle = 'rgba(22,22,26,0.95)';
+      ctx.beginPath(); ctx.roundRect(cx - cw / 2, cy - ch / 2, cw, ch, 18); ctx.fill(); });
+    ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+    ctx.beginPath(); ctx.roundRect(cx - cw / 2, cy - ch / 2, cw, ch, 18); ctx.stroke();
+    if (st === 'idle') { txt(ctx, 'Hold fn to talk', cx, cy, 'rgba(255,255,255,0.55)', 11.5, '-apple-system', 'center'); return; }
+    if (st === 'proc') { spinner(ctx, cx - 30, cy, 7, t, 'rgba(255,255,255,0.8)'); txt(ctx, 'Processing…', cx - 16, cy, 'rgba(255,255,255,0.75)', 11.5); return; }
+    if (st === 'extra') { ctx.fillStyle = '#34c759'; ctx.beginPath(); ctx.arc(cx - 44, cy, 4, 0, 7); ctx.fill();
+      txt(ctx, 'Link copied', cx - 34, cy, 'rgba(255,255,255,0.85)', 11.5); return; }
+    ctx.fillStyle = '#ff453a'; ctx.beginPath(); ctx.arc(cx - 64, cy, 4.5, 0, 7); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 1.5; ctx.beginPath();
+    for (let x = 0; x <= 92; x += 2) {
+      const ph = x / 92;
+      const amp = Math.min(1, s.level * 2.4) * Math.sin(ph * Math.PI);
+      const y = cy + Math.sin(t * 24 + ph * 18) * amp * 9;
+      x === 0 ? ctx.moveTo(cx - 50 + x, y) : ctx.lineTo(cx - 50 + x, y);
+    }
+    ctx.stroke();
+    txt(ctx, mmss(s.elapsed), cx + 56, cy, 'rgba(255,255,255,0.6)', 11, 'ui-monospace');
+  } },
+];
+const STATES = [
+  ['idle', 'silent', 'Idle / armed'],
+  ['rec', 'speak', 'Recording · voice'],
+  ['recsilent', 'silent', 'Recording · SILENCE'],
+  ['proc', 'speak', 'Processing'],
+  ['extra', 'speak', 'Their extra state'],
+];
+const table = document.getElementById('grid');
+const head = table.insertRow();
+head.innerHTML = '<th></th>' + STATES.map(s => `<th>${s[2]}</th>`).join('');
+const cells = [];
+VARIANTS.forEach((v) => {
+  const tr = table.insertRow();
+  const td = tr.insertCell(); td.className = 'name';
+  td.innerHTML = `<b>${v.name}</b><span>${v.why}</span>`;
+  STATES.forEach(([state, sig], si) => {
+    const c = tr.insertCell(); c.className = 'cell';
+    const stage = document.createElement('div'); stage.className = 'stage';
+    const cv = document.createElement('canvas');
+    cv.width = 516; cv.height = 156; cv.style.width = '258px'; cv.style.height = '78px';
+    stage.appendChild(cv); c.appendChild(stage);
+    cells.push({ v, state, bg: BGS[si], sig: makeSignal(sig), ctx: cv.getContext('2d') });
+  });
+});
+let last = performance.now();
+(function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const t = now / 1000;
+  for (const c of cells) {
+    tickSignal(c.sig, t, dt);
+    c.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    c.ctx.clearRect(0, 0, 516, 156);
+    c.ctx.setTransform(2, 0, 0, 2, 0, 0);
+    c.bg(c.ctx, 258, 78);
+    try { c.v.draw(c.ctx, 129, 39, c.state, c.sig, t); }
+    catch (err) { if (!window.__err) { window.__err = 1; document.querySelector('header .hint').textContent = 'ERR: ' + err; } }
+  }
+  requestAnimationFrame(loop);
+})(last);
+</script>

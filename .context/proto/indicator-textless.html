@@ -1,0 +1,419 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>see.computer — round 3: textless (throwaway prototype)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #16171c; color: #d7d9de; font: 14px/1.45 -apple-system, system-ui; }
+  header { position: sticky; top: 0; z-index: 5; background: #16171cee; backdrop-filter: blur(6px);
+           padding: 14px 22px; border-bottom: 1px solid #2c2f38; display: flex; gap: 18px; align-items: center; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .hint { color: #8b8f9a; font-size: 12.5px; }
+  button#mic { background: #2f6fed; color: #fff; border: 0; border-radius: 7px; padding: 7px 14px; font: 600 13px -apple-system; cursor: pointer; }
+  button#mic.live { background: #d84b45; }
+  table { border-collapse: collapse; margin: 10px 18px 60px; }
+  th { font-size: 11.5px; font-weight: 600; color: #9aa0ab; text-transform: uppercase; letter-spacing: .06em; padding: 14px 10px 6px; text-align: center; }
+  td.name { min-width: 200px; max-width: 220px; padding: 0 14px; vertical-align: middle; }
+  td.name b { display: block; font-size: 13.5px; color: #e8eaee; }
+  td.name span { font-size: 12px; color: #8b8f9a; }
+  td.cell { padding: 10px; }
+  .stage { width: 268px; height: 78px; border-radius: 12px; display: flex; align-items: center; justify-content: center;
+           background: #101116; border: 1px solid #2c2f38; }
+  canvas { display: block; }
+</style>
+<header>
+  <h1>see.computer · round 3 — no words allowed</h1>
+  <span class="hint">Every state must read from form, color and motion alone. Amber = deaf. Red = recording. Timers are rings and rows, not digits.</span>
+  <button id="mic">Use my microphone</button>
+  <span class="hint" id="micState"></span>
+</header>
+<table id="grid"></table>
+<script>
+'use strict';
+/* ---------- shared signal harness ---------- */
+let micAnalyser = null, micData = null;
+document.getElementById('mic').onclick = async (e) => {
+  if (micAnalyser) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ac = new AudioContext(); const src = ac.createMediaStreamSource(stream);
+    micAnalyser = ac.createAnalyser(); micAnalyser.fftSize = 512; src.connect(micAnalyser);
+    micData = new Float32Array(micAnalyser.fftSize);
+    e.target.classList.add('live'); e.target.textContent = 'Live mic on';
+    document.getElementById('micState').textContent = 'speaking columns follow your voice';
+  } catch (err) { document.getElementById('micState').textContent = 'mic denied: ' + err.name; }
+};
+function micLevel() {
+  micAnalyser.getFloatTimeDomainData(micData);
+  let sum = 0, peak = 0;
+  for (const v of micData) { sum += v * v; peak = Math.max(peak, Math.abs(v)); }
+  return { level: Math.min(1, Math.sqrt(sum / micData.length) * 6), peak: Math.min(1, peak * 3) };
+}
+function fakeLevel(t) {
+  const phrase = (t % 7); let env = 0;
+  if (phrase < 4.4) env = Math.max(0.06, Math.max(0, Math.sin(t * 7.3) * 0.6 + Math.sin(t * 13.1) * 0.4) * (0.55 + 0.45 * Math.sin(t * 1.1)));
+  else if (phrase < 4.9) env = 0.03;
+  else if (phrase < 6.2) env = Math.max(0.05, Math.abs(Math.sin(t * 9.7)) * 0.7);
+  else env = 0.02;
+  const level = Math.min(1, env * (0.85 + 0.3 * Math.sin(t * 31)));
+  return { level, peak: Math.min(1, level * 1.5 + 0.08 * Math.abs(Math.sin(t * 47))) };
+}
+function makeSignal(kind) {
+  return { kind, level: 0, peak: 0, sm: 0, silentFor: 0, hist: new Float32Array(160).fill(0), hi: 0, t0: performance.now() };
+}
+function tickSignal(s, t, dt) {
+  let raw;
+  if (s.kind === 'silent') raw = { level: 0.008 + 0.006 * Math.abs(Math.sin(t * 3)), peak: 0.01 };
+  else if (micAnalyser) raw = micLevel(); else raw = fakeLevel(t);
+  s.level = raw.level; s.peak = raw.peak;
+  s.sm += (raw.level - s.sm) * Math.min(1, dt * 14);
+  s.silentFor = raw.level < 0.045 ? s.silentFor + dt : 0;
+  s.hist[s.hi] = raw.level; s.hi = (s.hi + 1) % s.hist.length;
+  s.elapsed = (performance.now() - s.t0) / 1000;
+}
+const WARN = '#ffb340';
+const warnOn = s => s.silentFor > 1.2;
+function scanlines(ctx, w, h, alpha = 0.14) {
+  ctx.fillStyle = `rgba(0,0,0,${alpha})`;
+  for (let y = 0; y < h; y += 3) ctx.fillRect(0, y, w, 1.4);
+}
+/* the universal REC pulse: slow 1 Hz breathe every red state uses */
+const recPulse = t => 0.55 + 0.45 * Math.sin(t * Math.PI * 2 * 0.9);
+/* ---------- variants (NO TEXT ANYWHERE) ---------- */
+const VARIANTS = [
+
+{ name: '1 · Phosphor pet', why: 'CRT creature: mouth = your voice; droops amber when deaf; red-eyed REC; sleeps to think; backflips to save',
+  draw(ctx, w, h, st, s, t) {
+    ctx.fillStyle = '#050a06'; ctx.beginPath(); ctx.roundRect(0, 0, w, h, 10); ctx.fill();
+    const rec = st === 'record', warn = warnOn(s) && (st === 'listen' || rec);
+    const G = warn ? WARN : rec ? '#ff5449' : '#3aff70';
+    const px = 5, gw = 12, gh = 9;
+    const jump = st === 'save' ? Math.abs(Math.sin(t * 3.2)) * 9 : 0;
+    const ox = w / 2 - (gw * px) / 2, oy = h / 2 - (gh * px) / 2 + 4 - jump;
+    const P = (x, y, c = G, a = 1) => { ctx.globalAlpha = a; ctx.fillStyle = c; ctx.fillRect(ox + x * px, oy + y * px, px - 0.6, px - 0.6); ctx.globalAlpha = 1; };
+    ctx.save(); ctx.shadowColor = G; ctx.shadowBlur = 10;
+    const bodyA = rec ? 0.35 + 0.4 * recPulse(t) : 0.55;
+    for (let x = 1; x < gw - 1; x++) for (let y = 1; y < gh - 1; y++) P(x, y, G, bodyA * 0.28);
+    for (let x = 1; x < gw - 1; x++) { P(x, 0, G, bodyA); P(x, gh - 1, G, bodyA); }
+    for (let y = 1; y < gh - 1; y++) { P(0, y, G, bodyA); P(gw - 1, y, G, bodyA); }
+    const earD = warn ? 1 : 0;
+    P(2, -1 + earD, G, bodyA); P(gw - 3, -1 + earD, G, bodyA);
+    const blink = ((t + 0.9) % 3.7) < 0.18 && st === 'listen' && !warn;
+    const shut = st === 'transcribe' || blink;
+    const ey = warn ? 3 : 2;
+    if (shut) { P(3, 3); P(4, 3); P(7, 3); P(8, 3); }
+    else if (warn) { P(3, ey); P(4, ey + 1); P(7, ey + 1); P(8, ey); }
+    else {
+      const look = st === 'save' ? 0 : Math.round(Math.sin(t * 0.7));
+      P(3 + look, ey); P(4 + look, ey); P(3 + look, ey + 1); P(4 + look, ey + 1);
+      P(7 + look, ey); P(8 + look, ey); P(7 + look, ey + 1); P(8 + look, ey + 1);
+      if (rec) { ctx.save(); ctx.shadowBlur = 16; P(3, ey, '#ff2b1e'); P(8, ey, '#ff2b1e'); ctx.restore(); }
+    }
+    const mw = warn ? 0 : Math.max(0, Math.round((st === 'listen' || rec ? s.sm : st === 'save' ? 0.5 : 0.15) * 4));
+    if (mw === 0) P(5, 6, G, 0.9), P(6, 6, G, 0.9);
+    else { for (let i = 0; i < mw * 2 + 2; i++) P(5 - mw + i, 6); if (mw > 1) { for (let i = 0; i < mw; i++) P(5 - mw + 1 + i * 2, 7, G, 0.8); } }
+    if (st === 'transcribe') { const zb = Math.floor(t * 2) % 3; for (let i = 0; i <= zb; i++) P(gw + 1 + i, 1 - i, G, 0.5 - i * 0.12); }
+    ctx.restore();
+    scanlines(ctx, w, h, 0.12);
+  } },
+
+{ name: '2 · Pixel eye', why: 'pet × eye: chunky phosphor eye, pupil = your voice, darts around when deaf, red for REC',
+  draw(ctx, w, h, st, s, t) {
+    ctx.fillStyle = '#060a07'; ctx.beginPath(); ctx.roundRect(0, 0, w, h, 10); ctx.fill();
+    const rec = st === 'record', warn = warnOn(s) && (st === 'listen' || rec);
+    const G = warn ? WARN : rec ? '#ff5449' : '#3aff70';
+    const px = 5, gw = 16, gh = 9;
+    const ox = w / 2 - (gw * px) / 2, oy = h / 2 - (gh * px) / 2;
+    const P = (x, y, c = G, a = 1) => { if (y < 0 || y >= gh) return; ctx.globalAlpha = a; ctx.fillStyle = c; ctx.fillRect(ox + x * px, oy + y * px, px - 0.6, px - 0.6); ctx.globalAlpha = 1; };
+    ctx.save(); ctx.shadowColor = G; ctx.shadowBlur = 9;
+    const blink = ((t + 1.4) % 4.1) < 0.2 && st === 'listen' && !warn;
+    let open = st === 'transcribe' || blink ? 0 : st === 'save' ? (Math.sin(t * 4) > 0 ? 3 : 0) : warn ? 1 : 3;
+    const lid = [[4, 0], [3, 1], [2, 2], [1, 3]];
+    for (let x = 0; x < gw; x++) {
+      const edge = x < 4 ? 4 - x : x > gw - 5 ? x - (gw - 5) : 0;
+      const top = 4 - Math.min(open, 3 - Math.min(edge, 3));
+      const topRow = Math.max(0, 4 - open + edge);
+      const botRow = Math.min(gh - 1, 4 + open - edge);
+      if (open === 0) { P(x, 4, G, 0.9); continue; }
+      P(x, topRow, G, 0.9); P(x, botRow, G, 0.9);
+    }
+    if (open > 0) {
+      const pl = st === 'listen' || rec ? s.sm : 0.3;
+      const pr = 1 + Math.round(pl * 2);
+      const look = warn ? Math.round(Math.sin(t * 2.2) * 3) : 0;
+      const cxp = 8 + look;
+      const irisC = rec ? '#ff2b1e' : G;
+      for (let dx = -pr; dx <= pr; dx++) for (let dy = -Math.min(pr, open - 1); dy <= Math.min(pr, open - 1); dy++)
+        if (Math.abs(dx) + Math.abs(dy) <= pr) P(cxp + dx, 4 + dy, irisC, rec ? 0.5 + 0.5 * recPulse(t) : 1);
+      P(cxp - 1, 3, '#eaffea', open > 1 ? 0.9 : 0);
+    }
+    ctx.restore();
+    scanlines(ctx, w, h, 0.12);
+  } },
+
+{ name: '3 · HAL lens', why: 'pure lens: cyan breath = hearing you; amber scan = deaf; spiral = thinking; slow red pulse + tally arc = REC',
+  draw(ctx, w, h, st, s, t) {
+    const cx = w / 2, cy = h / 2, R = 24;
+    const rec = st === 'record', warn = warnOn(s) && (st === 'listen' || rec);
+    const [r, g, b] = rec ? [255, 62, 48] : warn ? [255, 179, 64] : [79, 195, 247];
+    let core = st === 'transcribe' ? 0.4 + 0.2 * Math.sin(t * 4) : st === 'save' ? Math.max(0, 1 - (t % 1.4)) : Math.max(0.1, s.sm * 1.3);
+    if (rec) core = Math.max(core, 0.35 * recPulse(t));
+    if (warn) core = 0.12;
+    ctx.fillStyle = '#08090c'; ctx.beginPath(); ctx.arc(cx, cy, R + 6, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#33363f'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(cx, cy, R + 5, 0, 7); ctx.stroke();
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
+    grad.addColorStop(0, `rgba(255,240,220,${0.85 * core + 0.08})`);
+    grad.addColorStop(0.25, `rgba(${r},${g},${b},${0.75 * core + 0.1})`);
+    grad.addColorStop(0.7, `rgba(${(r * 0.45) | 0},${(g * 0.45) | 0},${(b * 0.45) | 0},${0.5 * core + 0.14})`);
+    grad.addColorStop(1, 'rgba(6,6,10,1)');
+    ctx.save(); ctx.shadowColor = `rgb(${r},${g},${b})`; ctx.shadowBlur = 30 * core;
+    ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.fill(); ctx.restore();
+    if (warn) {
+      const a = t * 2.2;
+      ctx.strokeStyle = `rgba(255,179,64,0.85)`; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(cx, cy, R * 0.62, a, a + 1.1); ctx.stroke();
+    } else if (st === 'transcribe') {
+      for (let i = 0; i < 3; i++) {
+        const a = -t * (1.5 + i * 0.7) + i * 2.1;
+        ctx.strokeStyle = `rgba(${r},${g},${b},${0.5 - i * 0.13})`; ctx.lineWidth = 1.6;
+        ctx.beginPath(); ctx.arc(cx, cy, R * (0.3 + i * 0.22), a, a + 1.6); ctx.stroke();
+      }
+    } else {
+      for (const rr of [R * 0.45, R * 0.7, R * 0.9]) {
+        ctx.strokeStyle = `rgba(${r},${g},${b},${0.12 + 0.22 * core})`; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(cx, cy, rr, 0, 7); ctx.stroke();
+      }
+    }
+    if (rec) {
+      const frac = (s.elapsed % 60) / 60, mins = Math.floor(s.elapsed / 60);
+      ctx.strokeStyle = 'rgba(255,120,110,0.95)'; ctx.lineWidth = 2.6;
+      ctx.beginPath(); ctx.arc(cx, cy, R + 9, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2); ctx.stroke();
+      for (let m = 0; m < Math.min(mins, 10); m++) {
+        const a = -Math.PI / 2 + m * 0.5;
+        ctx.fillStyle = '#ff7c72'; ctx.beginPath(); ctx.arc(cx + Math.cos(a) * (R + 15), cy + Math.sin(a) * (R + 15), 2, 0, 7); ctx.fill();
+      }
+    }
+    ctx.fillStyle = `rgba(255,255,255,${0.22 + 0.2 * core})`;
+    ctx.beginPath(); ctx.ellipse(cx - R * 0.4, cy - R * 0.45, 3.4, 2, -0.6, 0, 7); ctx.fill();
+  } },
+
+{ name: '4 · CRT scope', why: 'pure phosphor: live jittery trace = hearing; amber A-scope sweep = deaf; squeeze = thinking; TV-off = saving',
+  draw(ctx, w, h, st, s, t) {
+    ctx.fillStyle = '#050a06'; ctx.beginPath(); ctx.roundRect(0, 0, w, h, 10); ctx.fill();
+    ctx.save(); ctx.beginPath(); ctx.roundRect(2, 2, w - 4, h - 4, 9); ctx.clip();
+    const rec = st === 'record', warn = warnOn(s) && (st === 'listen' || rec);
+    const P = rec ? '#ff5449' : '#33ff66';
+    const x0 = 14, x1 = w - 14, mid = h / 2;
+    ctx.shadowColor = warn ? WARN : P; ctx.shadowBlur = 8;
+    if (st === 'save') {
+      const p = (t * 1.5) % 1.5;
+      if (p < 0.6) { const sq = 1 - p / 0.6;
+        ctx.fillStyle = '#dfffe8'; ctx.fillRect(x0, mid - Math.max(1, sq * (h / 2 - 10)), x1 - x0, Math.max(2, sq * (h - 20))); }
+      else if (p < 0.9) { ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(w / 2, mid, 2.5, 0, 7); ctx.fill(); }
+    } else if (warn) {
+      const sx = x0 + ((t * 90) % (x1 - x0));
+      ctx.strokeStyle = WARN; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(x0, mid); ctx.lineTo(x1, mid); ctx.stroke();
+      ctx.fillStyle = WARN; ctx.beginPath(); ctx.arc(sx, mid, 3, 0, 7); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,179,64,0.35)';
+      ctx.beginPath(); ctx.moveTo(sx - 22, mid); ctx.lineTo(sx, mid); ctx.stroke();
+    } else if (st === 'transcribe') {
+      const squeeze = 0.5 + 0.5 * Math.sin(t * 3);
+      ctx.strokeStyle = P; ctx.lineWidth = 1.8; ctx.beginPath();
+      for (let x = x0; x <= x1; x++) {
+        const ph = (x - x0) / (x1 - x0);
+        const y = mid + Math.sin(ph * 22 - t * 10) * 12 * squeeze * Math.sin(ph * Math.PI);
+        x === x0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    } else {
+      ctx.strokeStyle = P; ctx.lineWidth = 1.8; ctx.beginPath();
+      for (let x = x0; x <= x1; x++) {
+        const ph = (x - x0) / (x1 - x0);
+        const amp = s.hist[(s.hi + Math.floor(ph * s.hist.length)) % s.hist.length];
+        const y = mid + Math.sin(t * 30 + ph * 26) * (amp * (h / 2 - 14) + 0.8);
+        x === x0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      if (rec) { ctx.globalAlpha = recPulse(t); ctx.fillStyle = P; ctx.beginPath(); ctx.arc(x1 - 2, 13, 4, 0, 7); ctx.fill(); ctx.globalAlpha = 1; }
+    }
+    ctx.shadowBlur = 0; scanlines(ctx, w, h, 0.14);
+    const roll = ((t * 14) % (h + 30)) - 15;
+    ctx.fillStyle = rec ? 'rgba(255,84,73,0.05)' : 'rgba(51,255,102,0.05)'; ctx.fillRect(0, roll, w, 12);
+    ctx.restore();
+  } },
+
+{ name: '5 · VFD segments', why: 'pure display: dancing bar = voice; amber standby-chase = deaf; sweep = thinking; top row fills a minute = REC clock',
+  draw(ctx, w, h, st, s, t) {
+    ctx.fillStyle = '#0a0d12'; ctx.beginPath(); ctx.roundRect(0, 0, w, h, 10); ctx.fill();
+    const rec = st === 'record', warn = warnOn(s) && (st === 'listen' || rec);
+    const col = warn ? WARN : rec ? '#ffab4a' : '#9ef3ff';
+    const dim = warn ? 'rgba(255,179,64,0.10)' : rec ? 'rgba(255,171,74,0.10)' : 'rgba(158,243,255,0.10)';
+    const n = 16, bw = 11, gap = 3, x0 = (w - n * (bw + gap)) / 2 + 1;
+    ctx.save(); ctx.shadowColor = col; ctx.shadowBlur = 8;
+    for (let i = 0; i < n; i++) {
+      let on = false, hgt = 20, y = h / 2 - 4;
+      if (warn) on = ((Math.floor(t * 5) % n === i) || (Math.floor(t * 5) % n === (i + 1) % n));
+      else if (st === 'transcribe') { const c = (t * 11) % (2 * n); const k = c < n ? c : 2 * n - c; on = Math.abs(i - k) < 1.6; }
+      else if (st === 'save') on = i < ((t * 18) % (n + 4));
+      else {
+        const v = s.hist[(s.hi + s.hist.length - n * 2 + i * 2 + s.hist.length) % s.hist.length];
+        hgt = Math.max(4, v * 34); y = h / 2 + 6 - hgt / 2; on = true;
+        ctx.fillStyle = v < 0.05 ? dim : col;
+        ctx.fillRect(x0 + i * (bw + gap), y, bw, hgt);
+        continue;
+      }
+      ctx.fillStyle = on ? col : dim;
+      ctx.fillRect(x0 + i * (bw + gap), h / 2 - 8, bw, 18);
+    }
+    if (rec && !warn) {
+      const frac = (s.elapsed % 60) / 60, mins = Math.floor(s.elapsed / 60);
+      for (let i = 0; i < n; i++) {
+        ctx.fillStyle = i / n < frac ? '#ff5449' : dim;
+        ctx.fillRect(x0 + i * (bw + gap), 8, bw, 4);
+      }
+      for (let m = 0; m < Math.min(mins, 8); m++) { ctx.fillStyle = '#ff5449'; ctx.fillRect(x0 + m * 8, h - 9, 5, 3); }
+      ctx.globalAlpha = recPulse(t); ctx.fillStyle = '#ff5449'; ctx.beginPath(); ctx.arc(12, 10, 3.5, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
+    }
+    ctx.restore(); scanlines(ctx, w, h, 0.06);
+  } },
+
+{ name: '6 · VFD face', why: 'pet × VFD: a face drawn in segments — mouth bar sings, X-eyes when deaf, red segment eyes for REC',
+  draw(ctx, w, h, st, s, t) {
+    ctx.fillStyle = '#0a0d12'; ctx.beginPath(); ctx.roundRect(0, 0, w, h, 10); ctx.fill();
+    const rec = st === 'record', warn = warnOn(s) && (st === 'listen' || rec);
+    const col = warn ? WARN : rec ? '#ff5449' : '#9ef3ff';
+    const cx = w / 2, cy = h / 2;
+    ctx.save(); ctx.shadowColor = col; ctx.shadowBlur = 9; ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 4; ctx.lineCap = 'round';
+    const blink = ((t + 0.6) % 3.9) < 0.16 && st === 'listen' && !warn;
+    const eyeY = cy - 9;
+    for (const ex of [cx - 26, cx + 26]) {
+      if (warn) {
+        ctx.beginPath(); ctx.moveTo(ex - 6, eyeY - 6); ctx.lineTo(ex + 6, eyeY + 6);
+        ctx.moveTo(ex + 6, eyeY - 6); ctx.lineTo(ex - 6, eyeY + 6); ctx.stroke();
+      } else if (st === 'transcribe' || blink) {
+        ctx.beginPath(); ctx.moveTo(ex - 7, eyeY + 2); ctx.lineTo(ex + 7, eyeY + 2); ctx.stroke();
+      } else if (st === 'save') {
+        ctx.beginPath(); ctx.moveTo(ex - 7, eyeY + 3); ctx.quadraticCurveTo(ex, eyeY - 6, ex + 7, eyeY + 3); ctx.stroke();
+      } else {
+        ctx.globalAlpha = rec ? 0.55 + 0.45 * recPulse(t) : 1;
+        ctx.fillRect(ex - 4, eyeY - 7, 8, 14); ctx.globalAlpha = 1;
+      }
+    }
+    const mv = warn ? 0 : st === 'listen' || rec ? s.sm : st === 'save' ? 0.55 : 0.15;
+    const mw2 = 16 + mv * 30, mh = 3 + mv * 16;
+    ctx.globalAlpha = warn ? 0.5 : 1;
+    if (warn) { ctx.beginPath(); ctx.moveTo(cx - 9, cy + 15); ctx.lineTo(cx + 9, cy + 15); ctx.stroke(); }
+    else { ctx.beginPath(); ctx.roundRect(cx - mw2 / 2, cy + 14 - mh / 2, mw2, mh, 3); ctx.fill(); }
+    ctx.globalAlpha = 1; ctx.restore(); scanlines(ctx, w, h, 0.06);
+  } },
+
+{ name: '7 · Plasma core', why: 'organic HAL: a living blob of light — big and lively with voice, a cold amber ring when deaf, red heartbeat REC',
+  draw(ctx, w, h, st, s, t) {
+    const rec = st === 'record', warn = warnOn(s) && (st === 'listen' || rec);
+    const cx = w / 2, cy = h / 2;
+    const [r, g, b] = rec ? [255, 62, 48] : warn ? [255, 179, 64] : [79, 195, 247];
+    if (warn) {
+      ctx.strokeStyle = `rgba(${r},${g},${b},0.9)`; ctx.lineWidth = 2; ctx.setLineDash([5, 5]); ctx.lineDashOffset = -t * 12;
+      ctx.beginPath(); ctx.arc(cx, cy, 13, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = `rgba(${r},${g},${b},${0.2 + 0.15 * Math.sin(t * 1.5)})`;
+      ctx.beginPath(); ctx.arc(cx, cy, 4, 0, 7); ctx.fill();
+      return;
+    }
+    const lv = st === 'transcribe' ? 0.35 + 0.12 * Math.sin(t * 4) : st === 'save' ? Math.max(0.08, 1 - (t % 1.3)) : Math.max(0.12, s.sm);
+    const heart = rec ? 0.75 + 0.4 * recPulse(t) : 1;
+    ctx.save(); ctx.shadowColor = `rgb(${r},${g},${b})`; ctx.shadowBlur = 26 * lv * heart;
+    ctx.beginPath();
+    const base = (10 + 16 * lv) * heart;
+    for (let i = 0; i <= 44; i++) {
+      const th = (i / 44) * Math.PI * 2;
+      const wob = (Math.sin(th * 3 + t * 8) + Math.sin(th * 5 - t * 6.2)) * 3.5 * lv;
+      ctx.lineTo(cx + Math.cos(th) * (base + wob) * 1.4, cy + Math.sin(th) * (base + wob) * 0.85);
+    }
+    ctx.closePath();
+    const grad = ctx.createRadialGradient(cx, cy, 1, cx, cy, base * 1.5);
+    grad.addColorStop(0, `rgba(255,250,240,${0.5 + 0.4 * lv})`);
+    grad.addColorStop(0.45, `rgba(${r},${g},${b},0.85)`);
+    grad.addColorStop(1, `rgba(${(r * 0.3) | 0},${(g * 0.3) | 0},${(b * 0.3) | 0},0.35)`);
+    ctx.fillStyle = grad; ctx.fill(); ctx.restore();
+    if (st === 'transcribe') {
+      const a = t * 2.6;
+      ctx.fillStyle = `rgba(255,255,255,0.8)`;
+      ctx.beginPath(); ctx.arc(cx + Math.cos(a) * 26, cy + Math.sin(a) * 15, 1.8, 0, 7); ctx.fill();
+    }
+  } },
+
+{ name: '8 · 1-bit pet', why: 'pet × Macintosh: black-on-white creature, dithered checker when deaf, inverted-flash REC blink',
+  draw(ctx, w, h, st, s, t) {
+    const rec = st === 'record', warn = warnOn(s) && (st === 'listen' || rec);
+    const flash = rec && recPulse(t) > 0.8;
+    const BG = flash ? '#111' : '#f4f1ea', FG = flash ? '#f4f1ea' : '#111';
+    ctx.fillStyle = BG; ctx.beginPath(); ctx.roundRect(0, 0, w, h, 8); ctx.fill();
+    ctx.strokeStyle = FG; ctx.lineWidth = 2; ctx.beginPath(); ctx.roundRect(1.5, 1.5, w - 3, h - 3, 7); ctx.stroke();
+    if (warn) {
+      for (let y = 6; y < h - 6; y += 4) for (let x = 6 + (y % 8 ? 2 : 0); x < w - 6; x += 4)
+        { ctx.fillStyle = FG; ctx.fillRect(x, y, 2, 2); }
+      ctx.fillStyle = BG; ctx.fillRect(w / 2 - 24, h / 2 - 14, 48, 28);
+      ctx.strokeStyle = FG; ctx.strokeRect(w / 2 - 24, h / 2 - 14, 48, 28);
+      const bl = Math.sin(t * 4) > 0;
+      if (bl) { ctx.fillStyle = FG;
+        ctx.beginPath(); ctx.moveTo(w / 2, h / 2 - 9); ctx.lineTo(w / 2 + 9, h / 2 + 7); ctx.lineTo(w / 2 - 9, h / 2 + 7);
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = BG; ctx.fillRect(w / 2 - 1.2, h / 2 - 4, 2.4, 6); ctx.fillRect(w / 2 - 1.2, h / 2 + 3.4, 2.4, 2); }
+      return;
+    }
+    const px = 4, gw2 = 10, gh2 = 8;
+    const jump = st === 'save' ? Math.abs(Math.sin(t * 3.2)) * 8 : 0;
+    const ox = w / 2 - (gw2 * px) / 2, oy = h / 2 - (gh2 * px) / 2 + 2 - jump;
+    const P = (x, y) => { ctx.fillStyle = FG; ctx.fillRect(ox + x * px, oy + y * px, px - 0.5, px - 0.5); };
+    for (let x = 0; x < gw2; x++) { P(x, 0); P(x, gh2 - 1); }
+    for (let y = 0; y < gh2; y++) { P(0, y); P(gw2 - 1, y); }
+    const blink = ((t + 0.9) % 3.7) < 0.18 && st === 'listen';
+    const shut = st === 'transcribe' || blink;
+    if (shut) { P(2, 3); P(3, 3); P(6, 3); P(7, 3); }
+    else { P(2, 2); P(3, 2); P(6, 2); P(7, 2); P(2, 3); P(3, 3); P(6, 3); P(7, 3); }
+    const mw = Math.max(0, Math.round((st === 'listen' || rec ? s.sm : st === 'save' ? 0.5 : 0.12) * 4));
+    if (mw === 0) { P(4, 5); P(5, 5); }
+    else for (let yy = 5; yy < Math.min(5 + mw, 7); yy++) for (let i = 0; i < mw * 2; i++) P(5 - mw + i, yy);
+    if (st === 'transcribe') { const zb = Math.floor(t * 2) % 3; ctx.fillStyle = FG;
+      for (let i = 0; i <= zb; i++) ctx.fillRect(ox + (gw2 + 1 + i) * px, oy + (1 - i) * px, 2.5, 2.5); }
+  } },
+];
+/* ---------- grid ---------- */
+const STATES = [
+  ['listen', 'speak', 'Dictating · voice'],
+  ['listen', 'silent', 'Dictating · NO sound'],
+  ['transcribe', 'speak', 'Transcribing'],
+  ['record', 'speak', 'Recording · voice'],
+  ['record', 'silent', 'Recording · NO sound'],
+  ['save', 'speak', 'Saving clip'],
+];
+const table = document.getElementById('grid');
+const head = table.insertRow();
+head.innerHTML = '<th></th>' + STATES.map(s => `<th>${s[2]}</th>`).join('');
+const cells = [];
+for (const v of VARIANTS) {
+  const tr = table.insertRow();
+  const td = tr.insertCell(); td.className = 'name';
+  td.innerHTML = `<b>${v.name}</b><span>${v.why}</span>`;
+  for (const [state, sig] of STATES) {
+    const c = tr.insertCell(); c.className = 'cell';
+    const stage = document.createElement('div'); stage.className = 'stage';
+    const cv = document.createElement('canvas');
+    cv.width = 496; cv.height = 124; cv.style.width = '248px'; cv.style.height = '62px';
+    stage.appendChild(cv); c.appendChild(stage);
+    cells.push({ v, state, sig: makeSignal(sig === 'silent' ? 'silent' : 'speak'), ctx: cv.getContext('2d') });
+  }
+}
+let last = performance.now();
+(function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const t = now / 1000;
+  for (const c of cells) {
+    tickSignal(c.sig, t, dt);
+    c.ctx.save(); c.ctx.clearRect(0, 0, 496, 124); c.ctx.scale(2, 2);
+    try { c.v.draw(c.ctx, 248, 62, c.state, c.sig, t); } catch (err) { c.ctx.fillStyle = '#f66'; c.ctx.font = '10px monospace'; c.ctx.fillText(String(err).slice(0, 60), 6, 20); }
+    c.ctx.restore();
+  }
+  requestAnimationFrame(loop);
+})(last);
+</script>

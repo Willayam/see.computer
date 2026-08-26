@@ -1,0 +1,468 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>see.computer — round 5: the pill IS the thing (throwaway prototype)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #16171c; color: #d7d9de; font: 14px/1.45 -apple-system, system-ui; }
+  header { position: sticky; top: 0; z-index: 5; background: #16171cee; backdrop-filter: blur(6px);
+           padding: 14px 22px; border-bottom: 1px solid #2c2f38; display: flex; gap: 18px; align-items: center; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .hint { color: #8b8f9a; font-size: 12.5px; }
+  button#mic { background: #2f6fed; color: #fff; border: 0; border-radius: 7px; padding: 7px 14px; font: 600 13px -apple-system; cursor: pointer; }
+  button#mic.live { background: #d84b45; }
+  table { border-collapse: collapse; margin: 10px 18px 60px; }
+  th { font-size: 11.5px; font-weight: 600; color: #9aa0ab; text-transform: uppercase; letter-spacing: .06em; padding: 14px 10px 6px; text-align: center; }
+  td.name { min-width: 210px; max-width: 230px; padding: 0 14px; vertical-align: middle; }
+  td.name b { display: block; font-size: 13.5px; color: #e8eaee; }
+  td.name span { font-size: 12px; color: #8b8f9a; }
+  td.cell { padding: 8px; }
+  .stage { width: 248px; height: 70px; border-radius: 8px; overflow: hidden; border: 1px solid #2c2f38; }
+  canvas { display: block; }
+</style>
+<header>
+  <h1>see.computer · round 5 — the pill is the organism</h1>
+  <span class="hint">No container, no inner graphic: the silhouette itself breathes, sags, snaps and blushes. Each row = a design philosophy.</span>
+  <button id="mic">Use my microphone</button>
+  <span class="hint" id="micState"></span>
+</header>
+<table id="grid"></table>
+<script>
+'use strict';
+let micAnalyser = null, micData = null;
+document.getElementById('mic').onclick = async (e) => {
+  if (micAnalyser) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ac = new AudioContext(); const src = ac.createMediaStreamSource(stream);
+    micAnalyser = ac.createAnalyser(); micAnalyser.fftSize = 512; src.connect(micAnalyser);
+    micData = new Float32Array(micAnalyser.fftSize);
+    e.target.classList.add('live'); e.target.textContent = 'Live mic on';
+    document.getElementById('micState').textContent = 'speaking columns follow your voice';
+  } catch (err) { document.getElementById('micState').textContent = 'mic denied: ' + err.name; }
+};
+function micLevel() {
+  micAnalyser.getFloatTimeDomainData(micData);
+  let sum = 0, peak = 0;
+  for (const v of micData) { sum += v * v; peak = Math.max(peak, Math.abs(v)); }
+  return { level: Math.min(1, Math.sqrt(sum / micData.length) * 6), peak: Math.min(1, peak * 3) };
+}
+function fakeLevel(t) {
+  const phrase = (t % 7); let env = 0;
+  if (phrase < 4.4) env = Math.max(0.06, Math.max(0, Math.sin(t * 7.3) * 0.6 + Math.sin(t * 13.1) * 0.4) * (0.55 + 0.45 * Math.sin(t * 1.1)));
+  else if (phrase < 4.9) env = 0.03;
+  else if (phrase < 6.2) env = Math.max(0.05, Math.abs(Math.sin(t * 9.7)) * 0.7);
+  else env = 0.02;
+  const level = Math.min(1, env * (0.85 + 0.3 * Math.sin(t * 31)));
+  return { level, peak: Math.min(1, level * 1.5 + 0.08 * Math.abs(Math.sin(t * 47))) };
+}
+function makeSignal(kind) {
+  return { kind, level: 0, peak: 0, sm: 0, env: 0, silentFor: 0, hist: new Float32Array(120).fill(0), hi: 0, t0: performance.now(), c: {} };
+}
+function tickSignal(s, t, dt) {
+  let raw;
+  if (s.kind === 'silent') raw = { level: 0.008 + 0.006 * Math.abs(Math.sin(t * 3)), peak: 0.01 };
+  else if (micAnalyser) raw = micLevel(); else raw = fakeLevel(t);
+  s.level = raw.level; s.peak = raw.peak; s.dt = dt;
+  s.sm += (raw.level - s.sm) * Math.min(1, dt * 14);
+  s.env = raw.level > s.env ? s.env + (raw.level - s.env) * Math.min(1, dt * 20) : Math.max(raw.level, s.env - dt * 1.1);
+  s.silentFor = raw.level < 0.045 ? s.silentFor + dt : 0;
+  s.hist[s.hi] = raw.level; s.hi = (s.hi + 1) % s.hist.length;
+  s.elapsed = (performance.now() - s.t0) / 1000;
+}
+/* critically-damped-ish spring for silhouette dimensions */
+function spr(o, k, target, dt, stiff = 140, damp = 16) {
+  if (o[k] === undefined) { o[k] = target; o['v' + k] = 0; }
+  const a = stiff * (target - o[k]) - damp * o['v' + k];
+  o['v' + k] += a * dt; o[k] += o['v' + k] * dt;
+  return o[k];
+}
+const WARN = '#ffb340';
+const warnOn = s => s.silentFor > 1.2;
+const recPulse = t => 0.55 + 0.45 * Math.sin(t * Math.PI * 2 * 0.9);
+function stateOf(st, s) {
+  const rec = st === 'record';
+  return { rec, warn: warnOn(s) && (st === 'listen' || rec) };
+}
+/* fake desktops */
+function bgLight(ctx, w, h) {
+  ctx.fillStyle = '#e9e5dc'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(10, 6, w - 20, h);
+  ctx.fillStyle = '#c9c4b8';
+  for (let y = 16; y < h; y += 9) ctx.fillRect(20, y, (w - 40) * (0.5 + 0.5 * Math.sin(y * 7)), 3);
+}
+function bgPhoto(ctx, w, h) {
+  const g = ctx.createLinearGradient(0, 0, w, h);
+  g.addColorStop(0, '#f5b26b'); g.addColorStop(0.5, '#e2766d'); g.addColorStop(1, '#7b5ea7');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  for (let i = 0; i < 5; i++) { ctx.beginPath(); ctx.arc(30 + i * 50, 20 + (i % 2) * 30, 10, 0, 7); ctx.fill(); }
+}
+function bgDark(ctx, w, h) {
+  ctx.fillStyle = '#1d1f24'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#2a2d34';
+  for (let y = 10; y < h; y += 9) ctx.fillRect(16, y, (w - 60) * (0.4 + 0.6 * Math.abs(Math.sin(y * 3))), 3.5);
+  ctx.fillStyle = '#3d6da8'; ctx.fillRect(16, 28, 60, 3.5);
+}
+const BGS = [bgLight, bgPhoto, bgDark, bgLight, bgPhoto, bgDark];
+function softShadow(ctx, fn) { ctx.save(); ctx.shadowColor = 'rgba(0,0,0,0.45)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3; fn(); ctx.restore(); }
+/* ---------- 8 philosophies; draw(ctx, cx, cy, st, s, t) ---------- */
+const VARIANTS = [
+
+{ name: '1 · Apple · Siri glass', why: 'a lozenge of dark glass; an aurora lives in its rim; the body itself swells with your voice',
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn } = stateOf(st, s);
+    const targetW = warn ? 34 : st === 'save' ? 30 : 44 + 70 * s.env * (rec ? 1 : 1) + (rec ? 8 * recPulse(t) : 0);
+    const w = spr(s.c, 'w', targetW, s.dt);
+    const hh = spr(s.c, 'h', warn ? 16 : 20 + (rec ? 3 * recPulse(t) : 4 * s.env), s.dt);
+    softShadow(ctx, () => {
+      ctx.fillStyle = 'rgba(14,15,20,0.92)';
+      ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - hh / 2, w, hh, hh / 2); ctx.fill();
+    });
+    ctx.save();
+    ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - hh / 2, w, hh, hh / 2); ctx.clip();
+    const hueBase = rec ? 0 : warn ? 38 : 195;
+    const speed = st === 'transcribe' ? 2.2 : 0.7;
+    for (let i = 0; i < 3; i++) {
+      const a = t * speed + i * 2.1;
+      const gx = cx + Math.cos(a) * w * 0.4, gy = cy + Math.sin(a * 1.3) * hh * 0.4;
+      const hue = rec ? 0 + i * 12 : warn ? 38 : hueBase + i * 40 + Math.sin(t * 0.8) * 20;
+      const amp = warn ? 0.25 : 0.3 + 0.6 * (st === 'listen' || rec ? s.sm : 0.35);
+      const g = ctx.createRadialGradient(gx, gy, 0, gx, gy, w * 0.55);
+      g.addColorStop(0, `hsla(${hue}, 95%, ${rec ? 62 : 68}%, ${amp})`);
+      g.addColorStop(1, 'hsla(0,0%,0%,0)');
+      ctx.fillStyle = g; ctx.fillRect(cx - w / 2, cy - hh / 2, w, hh);
+    }
+    ctx.restore();
+    ctx.strokeStyle = warn ? 'rgba(255,179,64,0.9)' : 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = 1;
+    if (warn) { ctx.setLineDash([3, 3]); ctx.lineDashOffset = -t * 8; }
+    ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - hh / 2, w, hh, hh / 2); ctx.stroke(); ctx.setLineDash([]);
+  } },
+
+{ name: '2 · Susan Kare · speech balloon', why: 'the original Mac answer: a 1-bit speech bubble that inflates word by word; marching ants think for you',
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn } = stateOf(st, s);
+    const q = v => Math.round(v / 8) * 8;
+    const w = spr(s.c, 'w', warn ? 40 : q(48 + 64 * s.env), s.dt, 240, 20);
+    const hh = 24;
+    const flash = rec && recPulse(t) > 0.75;
+    const BG = flash ? '#111' : '#fff', FG = flash ? '#fff' : '#111';
+    softShadow(ctx, () => { ctx.fillStyle = BG;
+      ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - hh / 2 - 3, w, hh, 8); ctx.fill(); });
+    ctx.fillStyle = BG; ctx.strokeStyle = FG; ctx.lineWidth = 2;
+    if (st === 'transcribe') { ctx.setLineDash([4, 3]); ctx.lineDashOffset = -t * 22; }
+    if (warn) ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - hh / 2 - 3, w, hh, 8); ctx.stroke(); ctx.setLineDash([]);
+    const droop = warn ? 6 : 0;
+    ctx.beginPath();
+    ctx.moveTo(cx - 6, cy + hh / 2 - 3.5);
+    ctx.lineTo(cx - 2 + (warn ? -4 : 0), cy + hh / 2 + 6 + droop);
+    ctx.lineTo(cx + 5, cy + hh / 2 - 3.5);
+    ctx.closePath(); ctx.fillStyle = BG; ctx.fill();
+    ctx.strokeStyle = FG;
+    ctx.beginPath();
+    ctx.moveTo(cx - 6, cy + hh / 2 - 4);
+    ctx.lineTo(cx - 2 + (warn ? -4 : 0), cy + hh / 2 + 6 + droop);
+    ctx.lineTo(cx + 5, cy + hh / 2 - 4);
+    ctx.stroke();
+    ctx.fillStyle = BG; ctx.fillRect(cx - 5, cy + hh / 2 - 5.5, 9, 4);
+    if (!warn && (st === 'listen' || rec)) {
+      ctx.fillStyle = FG;
+      const n = Math.max(1, Math.round(3 + s.sm * ((w - 30) / 9)));
+      for (let i = 0; i < n; i++) {
+        const bx = cx - (n - 1) * 4.5 + i * 9;
+        const bh2 = 2 + s.hist[(s.hi + s.hist.length - n * 4 + i * 4 + s.hist.length) % s.hist.length] * 11;
+        ctx.fillRect(bx - 1.5, cy - 3 - bh2 / 2 + 1.5, 3, Math.max(2, Math.round(bh2 / 2) * 2));
+      }
+    }
+    if (st === 'save') { const p = (t * 2) % 1; ctx.fillStyle = FG;
+      for (let i = 0; i < 3; i++) { const a = i * 2.1 + 0.5;
+        ctx.fillRect(cx + Math.cos(a) * (14 + p * 16) - 1.5, cy - 3 + Math.sin(a) * (8 + p * 10) - 1.5, 3, 3); } }
+    if (warn && Math.sin(t * 3.5) > 0) {
+      ctx.fillStyle = FG; ctx.beginPath();
+      ctx.moveTo(cx, cy - 9); ctx.lineTo(cx + 7, cy + 4); ctx.lineTo(cx - 7, cy + 4); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = BG; ctx.fillRect(cx - 1, cy - 5, 2, 5); ctx.fillRect(cx - 1, cy + 1, 2, 1.8);
+    }
+  } },
+
+{ name: '3 · Dieter Rams · instrument', why: 'weniger, aber besser: a matte bar that extends to become its own meter; one orange index, one red lamp',
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn } = stateOf(st, s);
+    const active = st !== 'save';
+    const w = spr(s.c, 'w', warn ? 44 : st === 'save' ? 26 : 104, s.dt, 90, 14);
+    const hh = 16;
+    softShadow(ctx, () => { ctx.fillStyle = '#26262a';
+      ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - hh / 2, w, hh, 8); ctx.fill(); });
+    ctx.strokeStyle = 'rgba(255,255,255,0.14)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - hh / 2, w, hh, 8); ctx.stroke();
+    const x0 = cx - w / 2 + 14, x1 = cx + w / 2 - 8;
+    if (w > 60) {
+      ctx.fillStyle = 'rgba(255,255,255,0.25)';
+      for (let i = 0; i <= 8; i++) { const x = x0 + (i / 8) * (x1 - x0);
+        ctx.fillRect(x, cy + 2.5, 1, i % 4 === 0 ? 3.5 : 2); }
+    }
+    const lampOn = rec ? recPulse(t) > 0.4 : false;
+    ctx.fillStyle = lampOn ? '#ff3b30' : warn ? (Math.sin(t * 2.5) > 0 ? WARN : '#3a3a3e') : '#3a3a3e';
+    ctx.beginPath(); ctx.arc(cx - w / 2 + 8, cy, 2.6, 0, 7); ctx.fill();
+    if (w > 60) {
+      let pos;
+      if (st === 'transcribe') pos = 0.5 + 0.5 * Math.sin(t * 1.6);
+      else pos = Math.min(1, s.sm * 1.25);
+      const nx = spr(s.c, 'nx', x0 + pos * (x1 - x0), s.dt, 260, 18);
+      ctx.fillStyle = '#ff6a00';
+      ctx.fillRect(nx - 1.2, cy - 6, 2.4, 12);
+    }
+    if (st === 'save') { ctx.fillStyle = '#ff6a00'; ctx.fillRect(cx - 1.2, cy - 6, 2.4, 12); }
+  } },
+
+{ name: '4 · Teenage Engineering · modules', why: 'the pill is made of physical cells that snap in as you speak; the orange end-cap is the record key',
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn } = stateOf(st, s);
+    const maxN = 9, cw = 11, gap = 1.6, hh = 18;
+    let targetN;
+    if (warn) targetN = 1;
+    else if (st === 'transcribe') targetN = 5;
+    else if (st === 'save') targetN = Math.max(1, maxN - Math.floor((t * 6) % (maxN + 3)));
+    else targetN = 2 + Math.round(s.env * (maxN - 2));
+    const n = Math.round(spr(s.c, 'n', targetN, s.dt, 160, 16));
+    const total = (n + 1) * (cw + gap);
+    const x0 = cx - total / 2;
+    softShadow(ctx, () => { ctx.fillStyle = '#2b2b2e';
+      ctx.beginPath(); ctx.roundRect(x0 - 2, cy - hh / 2 - 2, total + 4, hh + 4, 6); ctx.fill(); });
+    for (let i = 0; i < n; i++) {
+      let lift = 0, col = '#cfccc4';
+      if (st === 'transcribe') lift = Math.sin(t * 6 - i * 0.9) * 2.2;
+      if (rec) col = recPulse(t) > 0.5 ? '#e8e5dd' : '#b9b6ae';
+      if (warn) col = Math.sin(t * 3) > 0 ? WARN : '#7a7770';
+      if (st === 'listen' && !warn) {
+        const v = s.hist[(s.hi + s.hist.length - 6 - i * 8 + s.hist.length) % s.hist.length];
+        lift = -v * 4;
+      }
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.roundRect(x0 + i * (cw + gap), cy - hh / 2 + lift, cw, hh, 3); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.roundRect(x0 + i * (cw + gap), cy - hh / 2 + lift, cw, hh, 3); ctx.stroke();
+      ctx.fillStyle = 'rgba(0,0,0,0.18)';
+      ctx.fillRect(x0 + i * (cw + gap) + 2, cy + hh / 2 - 4 + lift, cw - 4, 1.6);
+    }
+    const capCol = rec ? (recPulse(t) > 0.4 ? '#ff4b1f' : '#c23a18') : '#ff6a00';
+    ctx.fillStyle = capCol;
+    ctx.beginPath(); ctx.roundRect(x0 + n * (cw + gap), cy - hh / 2, cw, hh, 3); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.beginPath(); ctx.arc(x0 + n * (cw + gap) + cw / 2, cy, 2, 0, 7); ctx.fill();
+  } },
+
+{ name: '5 · Fukasawa · jelly object', why: 'no glow, no ornament: a soft object with body language — it wobbles, sags when deaf, blushes red to record',
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn } = stateOf(st, s);
+    const wob = spr(s.c, 'wob', (st === 'listen' || rec) && !warn ? s.level : 0, s.dt, 90, 6);
+    const sag = spr(s.c, 'sag', warn ? 1 : 0, s.dt, 60, 10);
+    const breathe = st === 'transcribe' ? Math.sin(t * 2.6) * 0.06 : 0;
+    const jump = st === 'save' ? Math.abs(Math.sin(t * 3.4)) * 6 : 0;
+    const sx = 1 + wob * 0.55 + breathe - sag * 0.12;
+    const sy = 1 - wob * 0.3 - breathe - sag * 0.28;
+    const W = 62 * sx, H = 26 * sy, tilt = sag * 0.16;
+    ctx.save(); ctx.translate(cx, cy + sag * 5 - jump); ctx.rotate(tilt);
+    ctx.shadowColor = 'rgba(0,0,0,0.35)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 4;
+    ctx.fillStyle = '#efece6';
+    ctx.beginPath(); ctx.roundRect(-W / 2, -H / 2, W, H, H / 2); ctx.fill();
+    ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+    ctx.strokeStyle = 'rgba(0,0,0,0.22)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(-W / 2, -H / 2, W, H, H / 2); ctx.stroke();
+    const blushA = rec ? 0.55 + 0.4 * recPulse(t) : warn ? 0.55 : 0;
+    if (blushA > 0.02) {
+      const bc = warn ? '255,179,64' : '255,59,48';
+      const g = ctx.createRadialGradient(0, 0, 1, 0, 0, W * 0.42);
+      g.addColorStop(0, `rgba(${bc},${blushA})`); g.addColorStop(1, `rgba(${bc},0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.roundRect(-W / 2, -H / 2, W, H, H / 2); ctx.fill();
+    }
+    ctx.fillStyle = '#2b2b2e';
+    const blink = ((t + 0.8) % 3.9) < 0.15 && st === 'listen' && !warn;
+    const ey = -H * 0.08, eh = blink || st === 'transcribe' ? 1.2 : 4.6;
+    ctx.beginPath(); ctx.roundRect(-9, ey - eh / 2, 2.6, eh, 1.3); ctx.fill();
+    ctx.beginPath(); ctx.roundRect(6.4, ey - eh / 2, 2.6, eh, 1.3); ctx.fill();
+    ctx.restore();
+  } },
+
+{ name: '6 · Leonardo · studio dell’occhio', why: 'sepia construction lines draw a mechanical iris; your voice opens the aperture; red chalk when it records',
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn } = stateOf(st, s);
+    const ink = rec ? 'rgba(158,54,38,' : warn ? 'rgba(178,124,32,' : 'rgba(94,72,44,';
+    const paper = ctx.createRadialGradient(cx, cy, 2, cx, cy, 44);
+    paper.addColorStop(0, 'rgba(240,230,205,0.94)'); paper.addColorStop(0.75, 'rgba(236,224,196,0.85)'); paper.addColorStop(1, 'rgba(236,224,196,0)');
+    ctx.fillStyle = paper; ctx.beginPath(); ctx.arc(cx, cy, 44, 0, 7); ctx.fill();
+    const open = st === 'transcribe' ? 0.3 + 0.1 * Math.sin(t * 2)
+      : st === 'save' ? Math.max(0.06, 1 - (t % 1.6) / 1.2)
+      : warn ? 0.10 : 0.2 + 0.75 * s.sm;
+    const R = 17;
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = ink + '0.35)';
+    ctx.setLineDash([1.5, 2.5]);
+    ctx.beginPath(); ctx.arc(cx, cy, R + 5, 0, 7); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx - R - 9, cy); ctx.lineTo(cx + R + 9, cy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, cy - R - 6); ctx.lineTo(cx, cy + R + 6); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = ink + '0.9)'; ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.stroke();
+    const blades = 8, ap = R * (1 - open * 0.85);
+    for (let i = 0; i < blades; i++) {
+      const a0 = (i / blades) * Math.PI * 2 + t * (st === 'transcribe' ? 0.5 : 0.1);
+      ctx.strokeStyle = ink + '0.75)';
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a0) * R, cy + Math.sin(a0) * R);
+      ctx.quadraticCurveTo(
+        cx + Math.cos(a0 + 0.5) * (R * 0.62), cy + Math.sin(a0 + 0.5) * (R * 0.62),
+        cx + Math.cos(a0 + 0.9) * ap, cy + Math.sin(a0 + 0.9) * ap);
+      ctx.stroke();
+    }
+    ctx.fillStyle = ink + (rec ? `${0.35 + 0.4 * recPulse(t)})` : '0.55)');
+    ctx.beginPath(); ctx.arc(cx, cy, Math.max(1.4, ap * 0.55), 0, 7); ctx.fill();
+    if (warn) {
+      const a = t * 2.2;
+      ctx.strokeStyle = ink + '0.85)'; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(cx, cy, R + 5, a, a + 1.1); ctx.stroke();
+    }
+    ctx.strokeStyle = ink + '0.5)'; ctx.lineWidth = 1;
+    const hn = Math.round(3 + open * 6);
+    for (let i = 0; i < hn; i++) {
+      const y = cy + R + 3 + i * 1.8;
+      ctx.beginPath(); ctx.moveTo(cx - 12 + i, y - 12); ctx.lineTo(cx - 4 + i, y - 16); ctx.stroke();
+    }
+  } },
+
+{ name: '7 · cassette futurism · slab', why: 'Nostromo hardware: a chamfered slab that racks open; red klaxon wash when recording',
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn } = stateOf(st, s);
+    const w = spr(s.c, 'w', warn ? 46 : st === 'save' ? 34 : 62 + 52 * s.env, s.dt, 110, 15);
+    const hh = 20, ch = 5;
+    softShadow(ctx, () => {
+      ctx.fillStyle = '#3a3d42';
+      ctx.beginPath();
+      ctx.moveTo(cx - w / 2 + ch, cy - hh / 2); ctx.lineTo(cx + w / 2 - ch, cy - hh / 2);
+      ctx.lineTo(cx + w / 2, cy - hh / 2 + ch); ctx.lineTo(cx + w / 2, cy + hh / 2 - ch);
+      ctx.lineTo(cx + w / 2 - ch, cy + hh / 2); ctx.lineTo(cx - w / 2 + ch, cy + hh / 2);
+      ctx.lineTo(cx - w / 2, cy + hh / 2 - ch); ctx.lineTo(cx - w / 2, cy - hh / 2 + ch);
+      ctx.closePath(); ctx.fill();
+    });
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx - w / 2 + ch, cy - hh / 2 + 1); ctx.lineTo(cx + w / 2 - ch, cy - hh / 2 + 1); ctx.stroke();
+    if (rec) {
+      const wash = ctx.createLinearGradient(cx - w / 2, 0, cx + w / 2, 0);
+      const p = (t * 0.9) % 1;
+      wash.addColorStop(Math.max(0, p - 0.25), 'rgba(255,45,32,0)');
+      wash.addColorStop(p, `rgba(255,45,32,${0.4 + 0.3 * recPulse(t)})`);
+      wash.addColorStop(Math.min(1, p + 0.25), 'rgba(255,45,32,0)');
+      ctx.fillStyle = wash;
+      ctx.fillRect(cx - w / 2, cy - hh / 2, w, hh);
+    }
+    const sw = Math.max(18, w - 26);
+    ctx.fillStyle = '#0c0f0c';
+    ctx.beginPath(); ctx.roundRect(cx - sw / 2, cy - 5.5, sw, 11, 2); ctx.fill();
+    const P = rec ? '#ff5449' : warn ? WARN : '#57ff8a';
+    ctx.save(); ctx.beginPath(); ctx.roundRect(cx - sw / 2, cy - 5.5, sw, 11, 2); ctx.clip();
+    ctx.shadowColor = P; ctx.shadowBlur = 5; ctx.strokeStyle = P; ctx.lineWidth = 1.4;
+    if (warn) {
+      const sx2 = cx - sw / 2 + ((t * 40) % sw);
+      ctx.beginPath(); ctx.moveTo(cx - sw / 2, cy); ctx.lineTo(cx + sw / 2, cy); ctx.stroke();
+      ctx.fillStyle = P; ctx.beginPath(); ctx.arc(sx2, cy, 1.6, 0, 7); ctx.fill();
+    } else if (st === 'save') {
+      const p = (t * 1.8) % 1;
+      ctx.fillStyle = P; ctx.fillRect(cx - sw / 2, cy - 5.5, sw * p, 11);
+    } else {
+      ctx.beginPath();
+      for (let x = 0; x <= sw; x++) {
+        const ph = x / sw;
+        const amp = st === 'transcribe' ? 0.2 * Math.sin(ph * Math.PI) : s.hist[(s.hi + Math.floor(ph * s.hist.length)) % s.hist.length];
+        const y = cy + Math.sin(t * 28 + ph * 22) * amp * 4.4;
+        x === 0 ? ctx.moveTo(cx - sw / 2 + x, y) : ctx.lineTo(cx - sw / 2 + x, y);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  } },
+
+{ name: '8 · Sottsass · Memphis toy', why: 'design as play: a terracotta pill with a squiggle of hair that dances to your voice and faints when deaf',
+  draw(ctx, cx, cy, st, s, t) {
+    const { rec, warn } = stateOf(st, s);
+    const w = spr(s.c, 'w', warn ? 44 : 52 + 30 * s.env, s.dt);
+    const hh = 19;
+    const tilt = warn ? 0.12 : Math.sin(t * 0.9) * 0.05;
+    ctx.save(); ctx.translate(cx, cy + (warn ? 3 : 0)); ctx.rotate(tilt);
+    softShadow(ctx, () => {
+      ctx.fillStyle = rec ? (recPulse(t) > 0.5 ? '#e8503a' : '#c23a2a') : warn ? '#c9c2b4' : '#d96f4e';
+      ctx.beginPath(); ctx.roundRect(-w / 2, -hh / 2, w, hh, hh / 2); ctx.fill();
+    });
+    if (rec) {
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      for (let i = 0; i < 4; i++) { const dx = -w / 2 + 10 + i * (w - 20) / 3;
+        ctx.beginPath(); ctx.arc(dx, (i % 2 ? -3 : 3), 1.7 + 0.9 * recPulse(t + i * 0.2), 0, 7); ctx.fill(); }
+    }
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.roundRect(-w / 2, -hh / 2, w, hh, hh / 2); ctx.stroke();
+    const sqCol = warn ? WARN : '#1fa8a0';
+    ctx.strokeStyle = sqCol; ctx.lineWidth = 2.6; ctx.lineCap = 'round';
+    ctx.beginPath();
+    const segs = 22, sw2 = Math.min(w - 14, 46);
+    for (let i = 0; i <= segs; i++) {
+      const ph = i / segs;
+      const x = -sw2 / 2 + ph * sw2;
+      let y;
+      if (warn) y = -hh / 2 - 3;
+      else {
+        const amp = st === 'transcribe' ? 4 : st === 'save' ? 6 * Math.abs(Math.sin(t * 3)) : 3 + s.sm * 9;
+        const speed = st === 'transcribe' ? 5 : 9;
+        y = -hh / 2 - 5 - Math.abs(Math.sin(ph * Math.PI * 3 + t * speed)) * amp;
+      }
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    const blink = ((t + 0.5) % 3.4) < 0.14 && st === 'listen' && !warn;
+    ctx.fillStyle = '#20242b';
+    const eh = blink || st === 'transcribe' ? 1.2 : 4.4;
+    ctx.beginPath(); ctx.roundRect(-8, -eh / 2, 2.4, eh, 1.2); ctx.fill();
+    ctx.beginPath(); ctx.roundRect(5.6, -eh / 2, 2.4, eh, 1.2); ctx.fill();
+    ctx.restore();
+  } },
+];
+/* ---------- grid ---------- */
+const STATES = [
+  ['listen', 'speak', 'Dictating · voice'],
+  ['listen', 'silent', 'Dictating · NO sound'],
+  ['transcribe', 'speak', 'Transcribing'],
+  ['record', 'speak', 'Recording · voice'],
+  ['record', 'silent', 'Recording · NO sound'],
+  ['save', 'speak', 'Saving clip'],
+];
+const table = document.getElementById('grid');
+const head = table.insertRow();
+head.innerHTML = '<th></th>' + STATES.map(s => `<th>${s[2]}</th>`).join('');
+const cells = [];
+VARIANTS.forEach((v) => {
+  const tr = table.insertRow();
+  const td = tr.insertCell(); td.className = 'name';
+  td.innerHTML = `<b>${v.name}</b><span>${v.why}</span>`;
+  STATES.forEach(([state, sig], si) => {
+    const c = tr.insertCell(); c.className = 'cell';
+    const stage = document.createElement('div'); stage.className = 'stage';
+    const cv = document.createElement('canvas');
+    cv.width = 496; cv.height = 140; cv.style.width = '248px'; cv.style.height = '70px';
+    stage.appendChild(cv); c.appendChild(stage);
+    cells.push({ v, state, bg: BGS[si], sig: makeSignal(sig === 'silent' ? 'silent' : 'speak'), ctx: cv.getContext('2d') });
+  });
+});
+let last = performance.now();
+(function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const t = now / 1000;
+  for (const c of cells) {
+    tickSignal(c.sig, t, dt);
+    c.ctx.save(); c.ctx.clearRect(0, 0, 496, 140); c.ctx.scale(2, 2);
+    c.bg(c.ctx, 248, 70);
+    try { c.v.draw(c.ctx, 124, 35, c.state, c.sig, t); }
+    catch (err) { c.ctx.fillStyle = '#f00'; c.ctx.font = '10px monospace'; c.ctx.fillText(String(err).slice(0, 60), 6, 20); }
+    c.ctx.restore();
+  }
+  requestAnimationFrame(loop);
+})(last);
+</script>
