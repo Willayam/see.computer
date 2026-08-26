@@ -11,7 +11,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use parakeet_rs::{TimestampMode, Transcriber};
+use parakeet_rs::{TimestampMode, TokenBias};
+
+use crate::boost::{Boost, Lexicon, Pieces};
 
 use super::{Engine, EngineError, ModelFiles, Segment, Transcription};
 use crate::mic::Audio16k;
@@ -24,14 +26,25 @@ const VOCAB: &str = "vocab.txt";
 
 pub struct Parakeet {
     model: parakeet_rs::ParakeetTDT,
+    /// The model's own sentencepiece inventory, kept so the trie can be
+    /// rebuilt when the user edits their vocabulary file.
+    pieces: Option<Pieces>,
+    lexicon: Lexicon,
+    boost: Option<Boost>,
 }
 
 impl Parakeet {
-    pub fn load(files: &ModelFiles) -> Result<Parakeet, EngineError> {
+    pub fn load(files: &ModelFiles, vocabulary: PathBuf) -> Result<Parakeet, EngineError> {
+        let mut engine = Self::open_weights(files)?;
+        engine.lexicon = Lexicon::load(vocabulary);
+        engine.rebuild_boost();
+        Ok(engine)
+    }
+
+    fn open_weights(files: &ModelFiles) -> Result<Parakeet, EngineError> {
         if files.prepared {
-            return open(&files.dir).map_err(|error| {
+            return open(&files.dir).inspect_err(|_| {
                 let _ = fs::remove_dir_all(&files.dir);
-                error
             });
         }
         match prepare(&files.dir).and_then(|prepared| open(&prepared).map(|ok| (prepared, ok))) {
@@ -42,6 +55,17 @@ impl Parakeet {
             }
             Err(_) => open(&files.dir),
         }
+    }
+
+    fn rebuild_boost(&mut self) {
+        let Some(pieces) = self.pieces.as_ref() else {
+            return;
+        };
+        let boost = Boost::build(pieces, self.lexicon.terms());
+        for term in boost.unencodable() {
+            eprintln!("vocabulary: \"{term}\" cannot be spelled from this model's tokens");
+        }
+        self.boost = (!boost.is_empty()).then_some(boost);
     }
 }
 
@@ -54,7 +78,12 @@ fn open(dir: &Path) -> Result<Parakeet, EngineError> {
         .with_intra_threads(threads)
         .with_custom_configure(|builder| Ok(builder.with_prepacking(false)?));
     parakeet_rs::ParakeetTDT::from_pretrained(dir, Some(config))
-        .map(|model| Parakeet { model })
+        .map(|model| Parakeet {
+            model,
+            pieces: Pieces::load(&dir.join(VOCAB)),
+            lexicon: Lexicon::load(PathBuf::new()),
+            boost: None,
+        })
         .map_err(|error| EngineError::Load(error.to_string()))
 }
 
@@ -90,12 +119,17 @@ fn write_external(original: &Path, prepared: &Path) -> ort::Result<()> {
 
 impl Engine for Parakeet {
     fn transcribe(&mut self, audio: &Audio16k) -> Result<Transcription, EngineError> {
+        // A stat per utterance, so editing the vocabulary file is all it takes.
+        if self.lexicon.refresh() {
+            self.rebuild_boost();
+        }
         self.model
-            .transcribe_samples(
+            .transcribe_samples_with_bias(
                 audio.samples().to_vec(),
                 16_000,
                 1,
                 Some(TimestampMode::Sentences),
+                self.boost.as_mut().map(|boost| boost as &mut dyn TokenBias),
             )
             .map(|result| Transcription {
                 segments: result

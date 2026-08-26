@@ -23,6 +23,21 @@ Turn history off with **Save Dictation History** in the tray's **Settings**. The
 
 The audio-never-leaves-the-machine promise does not extend to transcript files in Documents when iCloud Desktop & Documents syncing is on.
 
+## Custom vocabulary
+
+Parakeet has never heard `Tauri` or `pnpm`, so it writes down the nearest thing it knows. Put the words it keeps missing in `~/Documents/see.computer/vocabulary.md`, one per line, and they are pushed into the decoder while it is still choosing — not substituted afterwards, which could not tell `Tauri` from the `tao ry` that a different sentence really did say.
+
+```
+# see.computer vocabulary
+- Tauri
+- Convex
+- pnpm
+```
+
+Blank lines and `#` comments are skipped, a leading `- ` is allowed so the file reads as a list, and a tab-separated number after a term pushes that one harder. The file is re-read whenever it changes, so an edit takes effect on the next dictation with no restart. Case matters: the model capitalises, so write terms the way you want them written.
+
+Terms are matched against the model's own tokens, so a word it has no way to spell — one in a script the model does not cover — is reported on stderr and skipped rather than silently ignored. `SEE_COMPUTER_VOCABULARY` points at a different file, and `SEE_COMPUTER_BOOST_SCALE` changes how hard terms are pushed; the default of 6 fixes jargon while leaving ordinary speech untouched, and above about 10 the decoder starts hearing boosted terms that were never said.
+
 ## Build and run
 
 Requires macOS 14 or later on Apple Silicon, Xcode command line tools, Rust 1.85 or later, and `cargo install tauri-cli --version "^2"`.
