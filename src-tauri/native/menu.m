@@ -23,6 +23,14 @@ static const CGFloat kSectionHeight = 34.0;
 static const CGFloat kHintHeight = 22.0;
 static const CGFloat kSeparatorHeight = 11.0;
 static const CGFloat kPadding = 8.0;
+// One label column for every row, checked or not, so the left edge of the
+// panel reads as a single line and the glyph hangs beside it.
+static const CGFloat kTextLeft = 26.0;
+static const CGFloat kTextRight = 8.0;
+static const CGFloat kSingleLine = 17.0;
+// A dictation can be a paragraph. Three lines is where a row stops being a
+// row, so the rest is an ellipsis.
+static const NSInteger kMaxItemLines = 3;
 static const CGFloat kCornerRadius = 18.0;
 static const CGFloat kMenuBarGap = 6.0;
 
@@ -127,12 +135,47 @@ void see_menu_pick(NSString *identifier) {
     dispatch_async(dispatch_get_main_queue(), ^{ gPick(held.UTF8String); });
 }
 
-static NSTextField *label_field(NSString *text, NSFont *font, NSColor *color) {
+static NSTextField *label_field(NSString *text, NSFont *font, NSColor *color,
+                                NSInteger maxLines) {
     NSTextField *field = [NSTextField labelWithString:text];
     field.font = font;
     field.textColor = color;
-    field.lineBreakMode = NSLineBreakByTruncatingTail;
+    field.maximumNumberOfLines = maxLines;
+    if (maxLines > 1) {
+        // Truncating tail is a single-line mode: a cell in it never wraps, no
+        // matter how many lines it is allowed. Wrapping plus
+        // `truncatesLastVisibleLine` is the pair that fills the lines and then
+        // ends the last one in an ellipsis.
+        field.lineBreakMode = NSLineBreakByWordWrapping;
+        field.cell.wraps = YES;
+        field.usesSingleLineMode = NO;
+        field.cell.truncatesLastVisibleLine = YES;
+    } else {
+        field.lineBreakMode = NSLineBreakByTruncatingTail;
+    }
     return field;
+}
+
+static NSFont *item_font(void) {
+    return [NSFont systemFontOfSize:13];
+}
+
+static CGFloat item_line_height(void) {
+    NSFont *font = item_font();
+    return ceil(font.ascender - font.descender + font.leading);
+}
+
+/// How tall an item's label wraps, up to [`kMaxItemLines`] lines. Measured 4pt
+/// narrower than the field it lands in, because the cell insets its text and a
+/// line counted short would be the one the frame clips.
+static CGFloat item_text_height(NSString *text) {
+    CGFloat line = item_line_height();
+    CGFloat width = kPanelWidth - kPadding * 2 - kTextLeft - kTextRight - 4;
+    NSRect box = [text boundingRectWithSize:NSMakeSize(width, CGFLOAT_MAX)
+                                    options:NSStringDrawingUsesLineFragmentOrigin
+                                 attributes:@{NSFontAttributeName : item_font()}];
+    CGFloat lines = MAX(1.0, MIN(round(NSHeight(box) / line), (CGFloat)kMaxItemLines));
+    return lines * line;
 }
 
 static CGFloat row_height(const SeeMenuRow *row) {
@@ -140,7 +183,9 @@ static CGFloat row_height(const SeeMenuRow *row) {
         case SeeRowSeparator: return kSeparatorHeight;
         case SeeRowSection: return kSectionHeight;
         case SeeRowHint: return kHintHeight;
-        default: return kItemHeight;
+        // A one-line item keeps the height it always had; a wrapped one grows
+        // by what it wraps, and the panel is the sum either way.
+        default: return MAX(kItemHeight, item_text_height(@(row->label)) + kItemHeight - kSingleLine);
     }
 }
 
@@ -171,22 +216,23 @@ static CGFloat fill_body(const SeeMenuRow *rows, int count) {
 
         NSString *text = @(row->label);
         NSTextField *field;
-        // One label column for every row, checked or not, so the left edge of
-        // the panel reads as a single line and the checkmark hangs beside it.
-        const CGFloat textLeft = 26;
+        BOOL wraps = row->kind == SeeRowItem;
         if (row->kind == SeeRowSection) {
             field = label_field(text,
                                 [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold],
-                                NSColor.tertiaryLabelColor);
+                                NSColor.tertiaryLabelColor, 1);
         } else if (row->kind == SeeRowHint) {
             field = label_field(text,
                                 [NSFont systemFontOfSize:11 weight:NSFontWeightRegular],
-                                NSColor.tertiaryLabelColor);
+                                NSColor.tertiaryLabelColor, 1);
         } else {
-            field = label_field(text, [NSFont systemFontOfSize:13], NSColor.labelColor);
+            field = label_field(text, item_font(), NSColor.labelColor, kMaxItemLines);
         }
-        CGFloat labelY = row->kind == SeeRowSection ? 0 : (h - 17) / 2;
-        field.frame = NSMakeRect(textLeft, labelY, NSWidth(frame) - textLeft - 8, 17);
+        CGFloat lineHeight = wraps ? item_line_height() : kSingleLine;
+        CGFloat textHeight = wraps ? item_text_height(text) : kSingleLine;
+        CGFloat labelY = row->kind == SeeRowSection ? 0 : (h - textHeight) / 2;
+        field.frame =
+            NSMakeRect(kTextLeft, labelY, NSWidth(frame) - kTextLeft - kTextRight, textHeight);
         view.label = field;
         view.restingColor = field.textColor;
         [view addSubview:field];
@@ -196,7 +242,11 @@ static CGFloat fill_body(const SeeMenuRow *rows, int count) {
                                      accessibilityDescription:nil];
             NSImageView *check = [NSImageView imageViewWithImage:mark];
             check.contentTintColor = NSColor.labelColor;
-            check.frame = NSMakeRect(8, (h - 13) / 2, 13, 13);
+            // Beside the first line, not the middle of the block: three lines
+            // of text with a glyph floating at their centre reads as unmoored.
+            // On a one-line row this is the old centring exactly.
+            check.frame =
+                NSMakeRect(8, NSMaxY(field.frame) - lineHeight / 2 - 6.5, 13, 13);
             view.check = check;
             [view addSubview:check];
         }

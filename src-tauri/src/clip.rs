@@ -67,6 +67,49 @@ pub fn extract_audio(mov: &Path) -> Option<Audio16k> {
     audio
 }
 
+/// What a packaged clip folder says about itself, read back from disk. The
+/// panel draws its recent rows from this, so the JSON keys stay in one module.
+#[derive(Clone)]
+pub struct Summary {
+    pub markdown: PathBuf,
+    pub duration_ms: u64,
+    /// The narration, when there was any.
+    pub text: Option<String>,
+}
+
+impl Summary {
+    /// The same paragraph the recording pasted at the cursor.
+    pub fn paste(&self) -> String {
+        paste_line(self.duration_ms, self.text.as_deref(), &self.markdown)
+    }
+}
+
+/// Reads the clip folder written next to `<stem>.mov`. `None` when packaging
+/// never finished, or the movie predates the clip folder.
+pub fn summary(mov: &Path) -> Option<Summary> {
+    let dir = mov.with_extension("");
+    let markdown = dir.join("clip.md");
+    if dir == mov || !markdown.is_file() {
+        return None;
+    }
+    let transcript = std::fs::read_to_string(dir.join("transcript.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .unwrap_or(serde_json::Value::Null);
+    Some(Summary {
+        markdown,
+        duration_ms: transcript
+            .get("durationMs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        text: transcript
+            .get("fullText")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned),
+    })
+}
+
 pub struct Packaged {
     pub markdown: PathBuf,
     /// What lands at the cursor: the spoken words first, so the paste reads as
