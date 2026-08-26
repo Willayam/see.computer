@@ -46,10 +46,19 @@ const PANES: [(&str, &str, &str); 4] = [
 
 const RECENT_IDS: [&str; 5] = ["recent-0", "recent-1", "recent-2", "recent-3", "recent-4"];
 const WARNING: &str = "exclamationmark.triangle.fill";
+/// Both kinds of recent name themselves, so the glyph column reads as a pair
+/// rather than as one row being the exception: spoken words, or a screen.
+const DICTATION: &str = "waveform";
+const CLIP: &str = "video.fill";
 
 #[derive(Clone)]
 enum Payload {
     Transcript(String),
+    /// A recording that was packaged into a clip folder: the row reads as the
+    /// narration and copies the paragraph the recording pasted.
+    Clip(crate::clip::Summary),
+    /// A recording with no clip folder beside it — packaging failed, or the
+    /// movie predates the folder. The plain `file://` link is all there is.
     Recording(PathBuf),
 }
 
@@ -133,11 +142,8 @@ impl Panel {
         }
         let mut payloads = Vec::with_capacity(recents.len());
         for (index, recent) in recents.into_iter().enumerate() {
-            let (label, symbol) = match &recent.payload {
-                Payload::Transcript(text) => (transcript_label(text), None),
-                Payload::Recording(_) => (recording_label(recent.at), Some("video.fill")),
-            };
-            rows.push(item(RECENT_IDS[index], &label, false, symbol));
+            let (label, symbol) = recent_row(&recent);
+            rows.push(item(RECENT_IDS[index], &label, false, Some(symbol)));
             payloads.push(recent.payload);
         }
         replace_payloads(&self.payloads, payloads);
@@ -283,6 +289,7 @@ impl Panel {
         };
         let text = match payload {
             Payload::Transcript(text) => text,
+            Payload::Clip(summary) => summary.paste(),
             Payload::Recording(path) => recording_copy_text(path),
         };
         let result = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text));
@@ -360,12 +367,37 @@ fn merge_recents(
         })
         .chain(recordings.into_iter().map(|(at, path)| Recent {
             at: at.naive_local(),
-            payload: Payload::Recording(path),
+            payload: recording_payload(path),
         }))
         .collect::<Vec<_>>();
     recents.sort_by_key(|recent| std::cmp::Reverse(recent.at));
     recents.truncate(limit);
     recents
+}
+
+/// What a recent reads as: the words when there are any, and the glyph that
+/// says whether they were spoken into the cursor or over a screen recording.
+fn recent_row(recent: &Recent) -> (String, &'static str) {
+    match &recent.payload {
+        Payload::Transcript(text) => (transcript_label(text), DICTATION),
+        Payload::Clip(summary) => (
+            summary
+                .text
+                .as_deref()
+                .map_or_else(|| recording_label(recent.at), transcript_label),
+            CLIP,
+        ),
+        Payload::Recording(_) => (recording_label(recent.at), CLIP),
+    }
+}
+
+/// The clip folder is what the recording pasted, so the row follows it when
+/// it is there and falls back to the movie when it is not.
+fn recording_payload(path: PathBuf) -> Payload {
+    match crate::clip::summary(&path) {
+        Some(summary) => Payload::Clip(summary),
+        None => Payload::Recording(path),
+    }
 }
 
 fn transcript_label(text: &str) -> String {
@@ -494,6 +526,85 @@ mod tests {
         let label = transcript_label(&long);
         assert_eq!(label.chars().count(), 120);
         assert!(label.chars().all(|character| character == 'å'));
+    }
+
+    #[test]
+    fn a_packaged_recording_carries_its_clip_paragraph() {
+        let dir = temp_dir();
+        let mov = dir.join("2026-08-26_14-32-01.mov");
+        std::fs::write(&mov, b"not a movie").unwrap();
+        let clip = mov.with_extension("");
+        std::fs::create_dir_all(&clip).unwrap();
+        std::fs::write(clip.join("clip.md"), "# Screen recording with narration").unwrap();
+        std::fs::write(
+            clip.join("transcript.json"),
+            r#"{"durationMs": 25000, "fullText": "Look at the misaligned button."}"#,
+        )
+        .unwrap();
+
+        let merged = merge_recents(Vec::new(), recent_recordings(&dir, 1), 1);
+        let Payload::Clip(summary) = &merged[0].payload else {
+            panic!("a movie with a clip folder is a clip");
+        };
+        assert_eq!(
+            summary.text.as_deref(),
+            Some("Look at the misaligned button.")
+        );
+        assert_eq!(
+            summary.paste(),
+            format!(
+                "Screen recording (0:25): \"Look at the misaligned button.\" \u{2014} screen frames and video: {}",
+                clip.join("clip.md").display()
+            )
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_unpackaged_recording_stays_a_plain_movie() {
+        let dir = temp_dir();
+        std::fs::write(dir.join("lonely.mov"), b"not a movie").unwrap();
+
+        let merged = merge_recents(Vec::new(), recent_recordings(&dir, 1), 1);
+        assert!(
+            matches!(&merged[0].payload, Payload::Recording(path) if path.ends_with("lonely.mov"))
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn each_kind_of_recent_names_itself() {
+        let at = local("2026-08-20", "14:32:00").naive_local();
+        let dictation = Recent {
+            at,
+            payload: Payload::Transcript("Hej på dig".to_owned()),
+        };
+        assert_eq!(recent_row(&dictation), ("Hej på dig".to_owned(), DICTATION));
+
+        let clip = Recent {
+            at,
+            payload: Payload::Clip(crate::clip::Summary {
+                markdown: PathBuf::from("/tmp/demo/clip.md"),
+                duration_ms: 25_000,
+                text: Some("Look at the button.".to_owned()),
+            }),
+        };
+        assert_eq!(recent_row(&clip), ("Look at the button.".to_owned(), CLIP));
+
+        let silent = Recent {
+            at,
+            payload: Payload::Clip(crate::clip::Summary {
+                markdown: PathBuf::from("/tmp/demo/clip.md"),
+                duration_ms: 25_000,
+                text: None,
+            }),
+        };
+        assert_eq!(
+            recent_row(&silent),
+            ("Recording · Aug 20, 14:32".to_owned(), CLIP)
+        );
     }
 
     #[test]
