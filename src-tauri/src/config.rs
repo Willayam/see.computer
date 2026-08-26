@@ -8,12 +8,19 @@ use crate::trigger::Trigger;
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Config {
     pub trigger: Trigger,
+    #[serde(default = "history_default")]
+    pub history: bool,
+}
+
+fn history_default() -> bool {
+    true
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             trigger: Trigger::LeftOption,
+            history: true,
         }
     }
 }
@@ -41,4 +48,16 @@ pub fn config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("see.computer")
         .join("config.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_config_shape_enables_history() {
+        let config: Config = serde_json::from_str(r#"{"trigger":"left-option"}"#).unwrap();
+        assert_eq!(config.trigger, Trigger::LeftOption);
+        assert!(config.history);
+    }
 }

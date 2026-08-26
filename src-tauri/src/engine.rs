@@ -230,7 +230,7 @@ pub struct Worker {
 impl Worker {
     pub fn spawn<M: From<Event> + Send + 'static>(loader: Loader, reply: Sender<M>) -> Worker {
         let (jobs, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        crate::qos::spawn("see-engine", crate::qos::Class::Engine, move || {
             let loaded: Result<Box<dyn Engine>, EngineError> = match loader {
                 Loader::Models(models) => {
                     let mut progress = |value| {

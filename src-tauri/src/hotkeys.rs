@@ -45,17 +45,22 @@ pub fn plugin<R: Runtime>(inbox: Sender<Msg>) -> tauri::plugin::TauriPlugin<R> {
 /// Register the legacy chords only for the Chord trigger. A bare-modifier
 /// trigger leaves them unregistered so `Option+Space` still types normally in
 /// other apps and its release cannot cut a tap dictation short.
-pub fn set_chords_registered(app: &AppHandle, on: bool) {
+pub fn set_chords_registered(app: &AppHandle, on: bool) -> Result<(), String> {
     let shortcuts = app.global_shortcut();
+    let mut failure = None;
     for chord in [main_chord(), video_chord()] {
         let registered = shortcuts.is_registered(chord);
         if on && !registered {
             if let Err(error) = shortcuts.register(chord) {
-                crate::tray::set_status(app, &format!("Hotkey unavailable: {error}"));
+                failure.get_or_insert_with(|| error.to_string());
             }
         } else if !on && registered {
             let _ = shortcuts.unregister(chord);
         }
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 

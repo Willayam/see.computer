@@ -38,19 +38,27 @@ pub fn run(cmd: Cmd) -> i32 {
         }
     };
     eprintln!("model: loading and warming");
-    let mut engine = match crate::engine::load(files) {
-        Ok(engine) => engine,
-        Err(error) => {
+    // Same thread class the app's engine worker runs at, so the numbers this
+    // prints are the numbers a dictation gets, contention included.
+    let loaded = crate::qos::spawn("see-engine", crate::qos::Class::Engine, move || {
+        let mut engine = crate::engine::load(files).map_err(|error| error.to_string())?;
+        let inference_start = Instant::now();
+        let result = engine.transcribe(&audio);
+        Ok::<_, String>((result, inference_start.elapsed()))
+    })
+    .join();
+    let (result, inference) = match loaded {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(error)) => {
             eprintln!("{error}");
             return 1;
         }
+        Err(_) => {
+            eprintln!("transcription thread panicked");
+            return 1;
+        }
     };
-    let inference_start = Instant::now();
-    let result = engine.transcribe(&audio);
-    eprintln!(
-        "transcription: {:.3} ms",
-        inference_start.elapsed().as_secs_f64() * 1_000.0
-    );
+    eprintln!("transcription: {:.3} ms", inference.as_secs_f64() * 1_000.0);
     eprintln!(
         "wall: {:.3} ms",
         total_start.elapsed().as_secs_f64() * 1_000.0

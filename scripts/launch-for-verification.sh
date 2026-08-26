@@ -5,7 +5,7 @@
 set -eu
 root="$(cd "$(dirname "$0")/.." && pwd)"
 app="$root/src-tauri/target/debug/bundle/macos/see.computer.app"
-wav="${1:-$root/fixtures/en.wav}"
+wav="$(cd "$(dirname "${1:-$root/fixtures/en.wav}")" && pwd)/$(basename "${1:-$root/fixtures/en.wav}")"
 trail="${2:-/tmp/see-computer-trail.tsv}"
 pkill -f "see.computer.app/Contents/MacOS/see-computer" 2>/dev/null || true
 sleep 0.5

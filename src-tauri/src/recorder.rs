@@ -107,7 +107,7 @@ impl Active {
     }
 
     pub fn stop(self, reply: impl FnOnce(Finished) + Send + 'static) {
-        std::thread::spawn(move || {
+        crate::qos::spawn("see-recorder-stop", crate::qos::Class::Upkeep, move || {
             reply(stop_inner(self));
         });
     }
@@ -117,7 +117,7 @@ impl Active {
     }
 
     pub fn abort(self) {
-        std::thread::spawn(move || {
+        crate::qos::spawn("see-recorder-abort", crate::qos::Class::Upkeep, move || {
             let Active {
                 mut child,
                 path,

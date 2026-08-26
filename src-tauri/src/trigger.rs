@@ -176,11 +176,6 @@ impl Decoder {
 }
 
 static DICT_PHYSICALLY_HELD: OnceLock<Arc<AtomicBool>> = OnceLock::new();
-static STATUS_APP: OnceLock<tauri::AppHandle> = OnceLock::new();
-
-pub fn set_app_handle(app: tauri::AppHandle) {
-    let _ = STATUS_APP.set(app);
-}
 
 /// The watcher runs on a detached thread for the life of the process; its
 /// physical-key state lives in [`DICT_PHYSICALLY_HELD`] for the release
@@ -193,7 +188,6 @@ pub fn spawn_watcher(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>) {
         .spawn(move || watcher_thread(trigger, inbox, dict_physically_held))
     {
         eprintln!("could not start modifier watcher: {error}");
-        show_input_monitoring_status();
     }
 }
 
@@ -205,6 +199,7 @@ pub fn dictation_gesture_held() -> bool {
 }
 
 fn watcher_thread(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<AtomicBool>) {
+    crate::qos::apply(crate::qos::Class::Keystroke);
     loop {
         if !current_trigger(&trigger).uses_tap() {
             held.store(false, Ordering::SeqCst);
@@ -214,7 +209,6 @@ fn watcher_thread(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<At
         match run_tap(trigger.clone(), inbox.clone(), held.clone()) {
             TapExit::PermissionDenied => {
                 held.store(false, Ordering::SeqCst);
-                show_input_monitoring_status();
                 std::thread::sleep(Duration::from_secs(5));
             }
             TapExit::Rebuild => {
@@ -365,20 +359,23 @@ fn send_message(inbox: &Sender<Msg>, message: Option<Msg>) {
     }
 }
 
-fn show_input_monitoring_status() {
-    if let Some(app) = STATUS_APP.get() {
-        crate::tray::set_status(app, "Enable Input Monitoring for hold-to-talk");
-    }
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGPreflightListenEventAccess() -> bool;
+    fn CGEventSourceFlagsState(
+        state: core_graphics::event_source::CGEventSourceStateID,
+    ) -> core_graphics::event::CGEventFlags;
+}
+
+/// Whether macOS will let the event tap start. The tap is the only way a
+/// bare-modifier trigger sees key state, so `false` here is hold-to-talk
+/// being silently dead.
+pub fn listen_access_granted() -> bool {
+    unsafe { CGPreflightListenEventAccess() }
 }
 
 fn physical_modifier_held(trigger: Trigger) -> bool {
-    use core_graphics::event::CGEventFlags;
     use core_graphics::event_source::CGEventSourceStateID;
-
-    #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
-        fn CGEventSourceFlagsState(state: CGEventSourceStateID) -> CGEventFlags;
-    }
 
     let flags = unsafe { CGEventSourceFlagsState(CGEventSourceStateID::HIDSystemState) }.bits();
     // The source state canonicalizes left/right Option to one device bit, so it
