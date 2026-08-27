@@ -532,7 +532,7 @@ fn session_markdown_index(
     artifacts: &[Artifact],
 ) -> String {
     let mut md = String::new();
-    let _ = writeln!(md, "# Screen session with narration\n");
+    let _ = writeln!(md, "# Screen take\n");
     let length = if duration_ms > 0 {
         format!("{} long, ", timestamp(duration_ms))
     } else {
@@ -621,7 +621,7 @@ fn shots_markdown_index(
     shots: &[&Shot],
 ) -> String {
     let mut md = String::new();
-    let _ = writeln!(md, "# Screen session with screenshots\n");
+    let _ = writeln!(md, "# Screen take\n");
     let length = if duration_ms > 0 {
         format!("{} long, ", timestamp(duration_ms))
     } else {
@@ -808,7 +808,7 @@ fn markdown_index(
     frames: &[u64],
 ) -> String {
     let mut md = String::new();
-    let _ = writeln!(md, "# Screen recording with narration\n");
+    let _ = writeln!(md, "# Screen take\n");
     let length = if duration_ms > 0 {
         format!("{} long, ", timestamp(duration_ms))
     } else {
