@@ -39,7 +39,9 @@ const DIMS = {
   full: { w: 76, h: 24 }, load: { w: 20, h: 20 },
 };
 const RED = [255, 59, 48], CYAN = [80, 200, 245], AMBER = [255, 179, 64];
-const SHOT_FEEDBACK = 'flash';
+const WHITE = [255, 255, 255];
+const mix = (a, b, u) => [0, 1, 2].map(i => a[i] + (b[i] - a[i]) * u);
+const SHOT_FEEDBACK = 'bars';
 const css = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
 const OK_CYAN = [0.7834, 0.1232, 226.59], OK_RED = [0.6542, 0.2321, 28.66];
 const okLab = ([L, C, hDeg]) => {
@@ -95,7 +97,11 @@ window.__TAURI__.event.listen('pill', ({ payload: p }) => {
   clearTimeout(hideTimer);
   if (p.kind === 'hide') { activity = null; st = 'hidden'; clearText(); return; }
   if (p.kind === 'show') { activity = p; applyActivity(p); return; }
-  if (p.kind === 'shot') { fx[SHOT_FEEDBACK] = 1; return; }
+  // 'bars' and 'flash' both ride the same decay; only the shutter pinches.
+  if (p.kind === 'shot') {
+    fx[SHOT_FEEDBACK === 'shutter' ? 'shutter' : 'flash'] = 1;
+    return;
+  }
   if (p.ends) { activity = null; st = 'hidden'; }
   notice = true;
   showText(p.tone, p.text);
@@ -200,7 +206,7 @@ function frame(now) {
   store.morph.K = Math.pow(2 * Math.PI / morphResp, 2);
   store.morph.C = 2 * Math.sqrt(store.morph.K);
   const morph = Math.max(0, Math.min(1, stepSpring(store.morph, st === 'record' ? 1 : 0, dt)));
-  fx.flash = Math.max(0, fx.flash - dt * 6);
+  fx.flash = Math.max(0, fx.flash - dt * 4.5);
   fx.shutter = Math.max(0, fx.shutter - dt * 5);
   const pinch = fx.shutter > 0 ? Math.sin(Math.PI * fx.shutter) : 0;
   const H = SHOT_FEEDBACK === 'shutter' ? g.H * (1 - 0.68 * pinch) : g.H;
@@ -216,7 +222,10 @@ function frame(now) {
 function draw(t, W, H, morph, pinch) {
   const cx = 130, cy = 25;
   const wilted = (st === 'listen' || st === 'record') && silentFor > 1.2;
-  const accent = wilted ? AMBER : morphColor(morph);
+  // A shot whitens the sound itself rather than the chip behind it, so the
+  // thing that flashes is the thing that was listening.
+  const lift = SHOT_FEEDBACK === 'bars' && fx.flash > 0 ? Math.pow(fx.flash, 0.55) : 0;
+  const accent = mix(wilted ? AMBER : morphColor(morph), WHITE, lift);
   bodyShell(cx, cy, W, H, Math.min(W, H) / 2);
   const pad = Math.min(10, Math.max(4, W * 0.1)), innerW = Math.max(6, W - pad * 2);
   const maxBarH = H - 10, x0 = cx - innerW / 2, lineTh = 2.5;
@@ -255,14 +264,6 @@ function draw(t, W, H, morph, pinch) {
       fillGlow(x0 + i * (bw + gap), cy - bh / 2, bw, bh, Math.min(bw / 2, 2),
                0.9 * (0.45 + 0.55 * Math.min(1, vs[i] * 1.4)), accent);
     }
-  }
-  if (SHOT_FEEDBACK === 'flash' && fx.flash > 0) {
-    ctx.save();
-    ctx.globalAlpha = Math.min(1, fx.flash * fx.flash * 0.95);
-    ctx.shadowColor = 'rgba(255,255,255,0.9)'; ctx.shadowBlur = 12;
-    ctx.fillStyle = '#fff';
-    ctx.beginPath(); ctx.roundRect(cx - W / 2, cy - H / 2, W, H, Math.min(W, H) / 2); ctx.fill();
-    ctx.restore();
   }
   if (SHOT_FEEDBACK === 'shutter' && pinch > 0.5) {
     ctx.save();
