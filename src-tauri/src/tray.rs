@@ -391,7 +391,7 @@ fn recent_row(recent: &Recent) -> (String, &'static str) {
     }
 }
 
-/// The clip folder is what the recording pasted, so the row follows it when
+/// The take folder is what the recording pasted, so the row follows it when
 /// it is there and falls back to the movie when it is not.
 fn recording_payload(path: PathBuf) -> Payload {
     match crate::clip::summary(&path) {
@@ -529,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn a_packaged_recording_carries_its_clip_paragraph() {
+    fn a_packaged_recording_carries_its_take_paste() {
         let dir = temp_dir();
         let mov = dir.join("2026-08-26_14-32-01.mov");
         std::fs::write(&mov, b"not a movie").unwrap();
@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(
             summary.paste(),
             format!(
-                "Screen recording (0:25): \"Look at the misaligned button.\" \u{2014} screen frames and video: {}",
+                "\"Look at the misaligned button.\"\n\n1 clip (0:25): {}",
                 clip.join("clip.md").display()
             )
         );
@@ -586,9 +586,11 @@ mod tests {
         let clip = Recent {
             at,
             payload: Payload::Clip(crate::clip::Summary {
-                markdown: PathBuf::from("/tmp/demo/clip.md"),
-                duration_ms: 25_000,
+                markdown: PathBuf::from("/tmp/demo/take.md"),
                 text: Some("Look at the button.".to_owned()),
+                screenshot_count: 0,
+                clip_count: 1,
+                clip_duration_ms: 25_000,
             }),
         };
         assert_eq!(recent_row(&clip), ("Look at the button.".to_owned(), CLIP));
@@ -596,9 +598,11 @@ mod tests {
         let silent = Recent {
             at,
             payload: Payload::Clip(crate::clip::Summary {
-                markdown: PathBuf::from("/tmp/demo/clip.md"),
-                duration_ms: 25_000,
+                markdown: PathBuf::from("/tmp/demo/take.md"),
                 text: None,
+                screenshot_count: 0,
+                clip_count: 1,
+                clip_duration_ms: 25_000,
             }),
         };
         assert_eq!(

@@ -1,9 +1,9 @@
-//! Package a finished recording into an agent-readable clip folder.
+//! Package a finished take into an agent-readable folder.
 //!
 //! Next to `<stem>.mov` this writes:
 //!
 //! ```text
-//! <stem>/clip.md          the file whose path gets pasted
+//! <stem>/take.md          the file whose path gets pasted
 //! <stem>/transcript.json  the same segments, machine-readable
 //! <stem>/frames/<ms>.jpg  one screen frame per interesting moment
 //! ```
@@ -71,53 +71,120 @@ pub fn extract_audio(mov: &Path) -> Option<Audio16k> {
     audio
 }
 
-/// What a packaged clip folder says about itself, read back from disk. The
+/// What a packaged take folder says about itself, read back from disk. The
 /// panel draws its recent rows from this, so the JSON keys stay in one module.
 #[derive(Clone)]
 pub struct Summary {
     pub markdown: PathBuf,
-    pub duration_ms: u64,
     /// The narration, when there was any.
     pub text: Option<String>,
+    pub screenshot_count: usize,
+    pub clip_count: usize,
+    pub clip_duration_ms: u64,
 }
 
 impl Summary {
-    /// The same paragraph the recording pasted at the cursor.
+    /// The same text the take pasted at the cursor.
     pub fn paste(&self) -> String {
-        paste_line(self.duration_ms, self.text.as_deref(), &self.markdown)
+        paste(
+            self.text.as_deref(),
+            self.screenshot_count,
+            self.clip_count,
+            self.clip_duration_ms,
+            &self.markdown,
+        )
     }
 }
 
-/// Reads the clip folder written next to `<stem>.mov`. `None` when packaging
-/// never finished, or the movie predates the clip folder.
+/// Reads the take folder written next to `<stem>.mov`. `None` when packaging
+/// never finished, or the movie predates the folder.
 pub fn summary(mov: &Path) -> Option<Summary> {
     let dir = mov.with_extension("");
-    let markdown = dir.join("clip.md");
-    if dir == mov || !markdown.is_file() {
+    if dir == mov {
         return None;
     }
+    // Existing installs wrote clip.md, and the tray must keep showing those
+    // recordings after new packages switch to take.md.
+    let take = dir.join("take.md");
+    let markdown = if take.is_file() {
+        take
+    } else {
+        let legacy = dir.join("clip.md");
+        legacy.is_file().then_some(legacy)?
+    };
     let transcript = std::fs::read_to_string(dir.join("transcript.json"))
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         .unwrap_or(serde_json::Value::Null);
+    let captures = capture_counts(&transcript);
     Some(Summary {
         markdown,
-        duration_ms: transcript
-            .get("durationMs")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
         text: transcript
             .get("fullText")
             .and_then(serde_json::Value::as_str)
             .filter(|text| !text.is_empty())
             .map(str::to_owned),
+        screenshot_count: captures.screenshots,
+        clip_count: captures.clips,
+        clip_duration_ms: captures.clip_duration_ms,
     })
+}
+
+#[derive(Clone, Copy)]
+struct CaptureCounts {
+    screenshots: usize,
+    clips: usize,
+    clip_duration_ms: u64,
+}
+
+fn capture_counts(transcript: &serde_json::Value) -> CaptureCounts {
+    let Some(captures) = transcript
+        .get("captures")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return CaptureCounts {
+            screenshots: 0,
+            clips: 1,
+            clip_duration_ms: transcript
+                .get("durationMs")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        };
+    };
+    captures.iter().fold(
+        CaptureCounts {
+            screenshots: 0,
+            clips: 0,
+            clip_duration_ms: 0,
+        },
+        |mut counts, capture| {
+            match capture.get("type").and_then(serde_json::Value::as_str) {
+                Some("shot") => counts.screenshots += 1,
+                Some("clip") => {
+                    counts.clips += 1;
+                    counts.clip_duration_ms = counts.clip_duration_ms.saturating_add(
+                        capture
+                            .get("durationMs")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0),
+                    );
+                    counts.screenshots += capture
+                        .get("shots")
+                        .and_then(serde_json::Value::as_array)
+                        .map(Vec::len)
+                        .unwrap_or(0);
+                }
+                _ => {}
+            }
+            counts
+        },
+    )
 }
 
 pub struct Packaged {
     pub markdown: PathBuf,
     /// What lands at the cursor: the spoken words first, so the paste reads as
-    /// a message anywhere, then the `clip.md` path for agents that can follow it.
+    /// a message anywhere, then the `take.md` path for agents that can follow it.
     pub paste: String,
 }
 
@@ -145,7 +212,7 @@ pub enum SessionCapture {
 pub enum PackageError {
     #[error("recording has no file stem")]
     NoStem,
-    #[error("could not write clip folder: {0}")]
+    #[error("could not write take folder: {0}")]
     Io(#[from] std::io::Error),
 }
 
@@ -183,37 +250,47 @@ pub fn package_recorded(
         dir.join("transcript.json"),
         transcript_json(&mov_name, duration_ms, transcription, &frames),
     )?;
-    let markdown = dir.join("clip.md");
+    let markdown = dir.join("take.md");
     std::fs::write(
         &markdown,
         markdown_index(&mov_name, duration_ms, &transcription.segments, &frames),
     )?;
-    let paste = paste_line(
-        duration_ms,
+    let paste = paste(
         transcription.text.as_ref().map(|text| text.as_str()),
+        0,
+        1,
+        duration_ms,
         &markdown,
     );
     Ok(Packaged { markdown, paste })
 }
 
-/// One plain paragraph: quoted narration, then the folder path. Humans and
-/// web chatboxes get the words even where a local path is dead; file-capable
-/// agents take the path to the frames and video.
-pub fn paste_line(duration_ms: u64, full_text: Option<&str>, markdown: &Path) -> String {
-    let length = if duration_ms > 0 {
-        format!(" ({})", timestamp(duration_ms))
-    } else {
-        String::new()
-    };
+/// The empty line keeps the narration as the message and the take path as a
+/// supporting note, which is the sparse shape that made agents inspect selectively.
+pub fn paste(
+    full_text: Option<&str>,
+    screenshot_count: usize,
+    clip_count: usize,
+    clip_duration_ms: u64,
+    markdown: &Path,
+) -> String {
+    let mut kinds = Vec::with_capacity(2);
+    match screenshot_count {
+        0 => {}
+        1 => kinds.push("1 screenshot".to_owned()),
+        count => kinds.push(format!("{count} screenshots")),
+    }
+    match clip_count {
+        0 => {}
+        1 => kinds.push(format!("1 clip ({})", timestamp(clip_duration_ms))),
+        count => kinds.push(format!("{count} clips ({})", timestamp(clip_duration_ms))),
+    }
+    let tail = kinds.join(", ");
     match full_text {
-        Some(text) if !text.is_empty() => format!(
-            "Screen recording{length}: \"{text}\" \u{2014} screen frames and video: {}",
-            markdown.display()
-        ),
-        _ => format!(
-            "Screen recording{length}, no narration \u{2014} screen frames and video: {}",
-            markdown.display()
-        ),
+        Some(text) if !text.is_empty() => {
+            format!("\"{text}\"\n\n{tail}: {}", markdown.display())
+        }
+        _ => format!("No narration.\n\n{tail}: {}", markdown.display()),
     }
 }
 
@@ -237,37 +314,19 @@ pub fn package_shots(
         dir.join("transcript.json"),
         shots_transcript_json(dir, duration_ms, transcription, &shots),
     )?;
-    let markdown = dir.join("session.md");
+    let markdown = dir.join("take.md");
     std::fs::write(
         &markdown,
         shots_markdown_index(dir, duration_ms, &transcription.segments, &shots),
     )?;
-    let paste = shots_paste_line(
-        duration_ms,
+    let paste = paste(
         transcription.text.as_ref().map(|text| text.as_str()),
+        shots.len(),
+        0,
+        0,
         &markdown,
     );
     Ok(Packaged { markdown, paste })
-}
-
-/// The folder carries the capture structure so the cursor only needs the
-/// narration and one path, the shape that made agents inspect selectively.
-pub fn shots_paste_line(duration_ms: u64, full_text: Option<&str>, markdown: &Path) -> String {
-    let length = if duration_ms > 0 {
-        format!(" ({})", timestamp(duration_ms))
-    } else {
-        String::new()
-    };
-    match full_text {
-        Some(text) if !text.is_empty() => format!(
-            "Screen session{length}: \"{text}\" \u{2014} screenshots: {}",
-            markdown.display()
-        ),
-        _ => format!(
-            "Screen session{length}, no narration \u{2014} screenshots: {}",
-            markdown.display()
-        ),
-    }
 }
 
 pub fn package_session(
@@ -293,11 +352,14 @@ pub fn package_session(
     let mut json_captures = Vec::new();
     let mut clip_number = 0;
     let mut shot_number = 0;
+    let mut screenshot_count = 0;
+    let mut clip_duration_ms = 0_u64;
 
     for capture in captures {
         match capture {
             SessionCapture::Shot(shot) => {
                 shot_number += 1;
+                screenshot_count += 1;
                 let file = path_from(dir, &shot.path);
                 artifacts.push(Artifact::image(shot.at_ms, file.clone()));
                 json_captures.push(serde_json::json!({
@@ -309,6 +371,8 @@ pub fn package_session(
             }
             SessionCapture::Clip(clip) => {
                 clip_number += 1;
+                clip_duration_ms =
+                    clip_duration_ms.saturating_add(clip.end_ms.saturating_sub(clip.start_ms));
                 let video = path_from(dir, &clip.path);
                 artifacts.push(Artifact::clip(
                     clip.start_ms,
@@ -355,6 +419,7 @@ pub fn package_session(
                     let file = shots_dir.join(format!("{shot_number:03}.jpg"));
                     let local_at = at_ms.saturating_sub(clip.recording_start_ms);
                     if extract_frame(&clip.path, local_at, 0, &file) {
+                        screenshot_count += 1;
                         let relative = path_from(dir, &file);
                         artifacts.push(Artifact::image(*at_ms, relative.clone()));
                         shots.push(serde_json::json!({
@@ -389,14 +454,16 @@ pub fn package_session(
         dir.join("transcript.json"),
         session_transcript_json(duration_ms, transcription, json_captures),
     )?;
-    let markdown = dir.join("session.md");
+    let markdown = dir.join("take.md");
     std::fs::write(
         &markdown,
         session_markdown_index(duration_ms, &transcription.segments, &artifacts),
     )?;
-    let paste = session_paste_line(
-        duration_ms,
+    let paste = paste(
         transcription.text.as_ref().map(|text| text.as_str()),
+        screenshot_count,
+        clip_number,
+        clip_duration_ms,
         &markdown,
     );
     Ok(Packaged { markdown, paste })
@@ -418,32 +485,7 @@ pub fn package_single_clip(
         &[SessionCapture::Clip(clip)],
     )?;
     let _ = std::fs::remove_dir(dir.join("shots"));
-    let markdown = dir.join("clip.md");
-    std::fs::rename(packaged.markdown, &markdown)?;
-    let paste = paste_line(
-        duration_ms,
-        transcription.text.as_ref().map(|text| text.as_str()),
-        &markdown,
-    );
-    Ok(Packaged { markdown, paste })
-}
-
-pub fn session_paste_line(duration_ms: u64, full_text: Option<&str>, markdown: &Path) -> String {
-    let length = if duration_ms > 0 {
-        format!(" ({})", timestamp(duration_ms))
-    } else {
-        String::new()
-    };
-    match full_text {
-        Some(text) if !text.is_empty() => format!(
-            "Screen session{length}: \"{text}\" \u{2014} screen frames and video: {}",
-            markdown.display()
-        ),
-        _ => format!(
-            "Screen session{length}, no narration \u{2014} screen frames and video: {}",
-            markdown.display()
-        ),
-    }
+    Ok(packaged)
 }
 
 struct Artifact {
@@ -922,7 +964,7 @@ mod tests {
             segments: vec![segment(0, 1_500, "Hello there.")],
         };
         let packaged = package(&mov, &transcription).unwrap();
-        assert_eq!(packaged.markdown, dir.join("fake").join("clip.md"));
+        assert_eq!(packaged.markdown, dir.join("fake").join("take.md"));
         let md = std::fs::read_to_string(&packaged.markdown).unwrap();
         assert!(md.contains("Hello there."));
         let json = std::fs::read_to_string(dir.join("fake").join("transcript.json")).unwrap();
@@ -931,33 +973,110 @@ mod tests {
     }
 
     #[test]
-    fn paste_line_reads_as_a_message_with_the_path_last() {
-        let md = Path::new("/tmp/demo/clip.md");
-        let spoken = paste_line(25_000, Some("Look at the misaligned button."), md);
-        assert_eq!(
-            spoken,
-            "Screen recording (0:25): \"Look at the misaligned button.\" \u{2014} screen frames and video: /tmp/demo/clip.md"
-        );
-        let silent = paste_line(0, None, md);
+    fn paste_names_each_capture_combination() {
+        let markdown = Path::new("/tmp/demo/take.md");
+        let cases = [
+            (1, 0, 0, "1 screenshot"),
+            (2, 0, 0, "2 screenshots"),
+            (0, 1, 2_000, "1 clip (0:02)"),
+            (0, 2, 47_000, "2 clips (0:47)"),
+            (2, 1, 2_000, "2 screenshots, 1 clip (0:02)"),
+            (3, 2, 72_000, "3 screenshots, 2 clips (1:12)"),
+        ];
+        for (screenshots, clips, duration_ms, tail) in cases {
+            assert_eq!(
+                paste(
+                    Some("Look at the misaligned button."),
+                    screenshots,
+                    clips,
+                    duration_ms,
+                    markdown,
+                ),
+                format!("\"Look at the misaligned button.\"\n\n{tail}: /tmp/demo/take.md")
+            );
+        }
+    }
+
+    #[test]
+    fn paste_omits_duration_without_a_clip_and_drops_empty_quotes() {
+        let markdown = Path::new("/tmp/demo/take.md");
+        let stills = paste(Some("Narration."), 2, 0, 99_000, markdown);
+        assert_eq!(stills, "\"Narration.\"\n\n2 screenshots: /tmp/demo/take.md");
+        assert!(!stills.contains('('));
+
+        let silent = paste(None, 2, 1, 2_000, markdown);
         assert_eq!(
             silent,
-            "Screen recording, no narration \u{2014} screen frames and video: /tmp/demo/clip.md"
+            "No narration.\n\n2 screenshots, 1 clip (0:02): /tmp/demo/take.md"
         );
     }
 
     #[test]
-    fn shot_session_paste_is_one_plain_paragraph_with_one_path() {
-        let md = Path::new("/tmp/demo/session.md");
-        let spoken = shots_paste_line(25_000, Some("Look at the misaligned button."), md);
+    fn summary_reads_a_legacy_clip_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "see-computer-legacy-summary-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mov = root.join("legacy.mov");
+        let dir = mov.with_extension("");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&mov, b"not a movie").unwrap();
+        std::fs::write(dir.join("clip.md"), "# Legacy recording").unwrap();
+        std::fs::write(
+            dir.join("transcript.json"),
+            r#"{"durationMs": 25000, "fullText": "Keep this recent."}"#,
+        )
+        .unwrap();
+
+        let summary = summary(&mov).expect("legacy clip should remain in recents");
+        assert_eq!(summary.markdown, dir.join("clip.md"));
         assert_eq!(
-            spoken,
-            "Screen session (0:25): \"Look at the misaligned button.\" \u{2014} screenshots: /tmp/demo/session.md"
+            summary.paste(),
+            format!(
+                "\"Keep this recent.\"\n\n1 clip (0:25): {}",
+                dir.join("clip.md").display()
+            )
         );
-        let silent = shots_paste_line(0, None, md);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn summary_prefers_take_and_rebuilds_its_capture_tail() {
+        let root = std::env::temp_dir().join(format!(
+            "see-computer-take-summary-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mov = root.join("current.mov");
+        let dir = mov.with_extension("");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&mov, b"not a movie").unwrap();
+        std::fs::write(dir.join("take.md"), "# Current take").unwrap();
+        std::fs::write(dir.join("clip.md"), "# Stale legacy take").unwrap();
+        std::fs::write(
+            dir.join("transcript.json"),
+            r#"{
+                "fullText": "Inspect this.",
+                "captures": [
+                    {"type": "shot"},
+                    {"type": "shot"},
+                    {"type": "clip", "durationMs": 2000, "shots": []}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let summary = summary(&mov).expect("take should appear in recents");
+        assert_eq!(summary.markdown, dir.join("take.md"));
         assert_eq!(
-            silent,
-            "Screen session, no narration \u{2014} screenshots: /tmp/demo/session.md"
+            summary.paste(),
+            format!(
+                "\"Inspect this.\"\n\n2 screenshots, 1 clip (0:02): {}",
+                dir.join("take.md").display()
+            )
         );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1029,8 +1148,8 @@ mod tests {
         assert_eq!(
             packaged.paste,
             format!(
-                "Screen session (0:08): \"First thing. Second thing.\" \u{2014} screen frames and video: {}",
-                dir.join("session.md").display()
+                "\"First thing. Second thing.\"\n\n1 screenshot, 1 clip (0:02): {}",
+                dir.join("take.md").display()
             )
         );
         let markdown = std::fs::read_to_string(packaged.markdown).unwrap();
@@ -1072,10 +1191,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(packaged.markdown, root.join("capture/clip.md"));
+        assert_eq!(packaged.markdown, root.join("capture/take.md"));
         assert!(mov.is_file());
         assert!(root.join("capture/frames").is_dir());
         assert!(root.join("capture/transcript.json").is_file());
+        assert!(!root.join("capture/clip.md").exists());
         assert!(!root.join("capture/session.md").exists());
         assert!(!root.join("capture/shots").exists());
         std::fs::remove_dir_all(root).unwrap();

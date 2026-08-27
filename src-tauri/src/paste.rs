@@ -37,7 +37,7 @@ pub struct Paste {
 enum Mode {
     System(Sender<Job>),
     #[cfg(test)]
-    Dry,
+    Dry(std::sync::Arc<std::sync::Mutex<Option<String>>>),
 }
 
 /// Dictated text gives the clipboard back; a share link is the thing the user
@@ -67,7 +67,17 @@ impl Paste {
 
     #[cfg(test)]
     pub fn dry() -> Paste {
-        Paste { mode: Mode::Dry }
+        Paste {
+            mode: Mode::Dry(std::sync::Arc::default()),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn last_text(&self) -> Option<String> {
+        match &self.mode {
+            Mode::System(_) => None,
+            Mode::Dry(last) => last.lock().ok()?.clone(),
+        }
     }
 
     pub fn paste(
@@ -90,7 +100,12 @@ impl Paste {
                 }
             }
             #[cfg(test)]
-            Mode::Dry => done(Outcome(Ok(()))),
+            Mode::Dry(last) => {
+                if let Ok(mut last_text) = last.lock() {
+                    *last_text = Some(text.as_str().to_owned());
+                }
+                done(Outcome(Ok(())));
+            }
         }
     }
 }

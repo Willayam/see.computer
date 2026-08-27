@@ -1544,8 +1544,8 @@ mod tests {
                 assert_eq!(
                     paste,
                     format!(
-                        "Screen session (0:00), no narration \u{2014} screenshots: {}",
-                        session_dir.join("session.md").display()
+                        "No narration.\n\n1 screenshot: {}",
+                        session_dir.join("take.md").display()
                     )
                 );
                 controller.step(Msg::Packaged(turn, Ok(paste)));
@@ -1557,7 +1557,7 @@ mod tests {
         assert!(matches!(controller.session, Session::Pasting { .. }));
         assert!(session_dir.join("shots/001.png").is_file());
         assert!(session_dir.join("transcript.json").is_file());
-        assert!(session_dir.join("session.md").is_file());
+        assert!(session_dir.join("take.md").is_file());
         let transcript: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(session_dir.join("transcript.json")).unwrap(),
         )
@@ -1585,6 +1585,10 @@ mod tests {
                 segments: Vec::new(),
             }),
         )));
+        assert_eq!(
+            controller.paste.last_text().as_deref(),
+            Some("hello world ")
+        );
         assert!(matches!(controller.session, Session::Pasting { .. }));
         assert!(!std::fs::read_dir(dir)
             .unwrap()
