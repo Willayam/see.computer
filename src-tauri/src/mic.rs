@@ -16,6 +16,10 @@ pub const PREROLL: Duration = Duration::from_millis(300);
 pub struct Audio16k(Vec<f32>);
 
 impl Audio16k {
+    pub(crate) fn from_samples(samples: Vec<f32>) -> Self {
+        Self(samples)
+    }
+
     pub fn from_wav(path: &std::path::Path) -> Result<Self, MicError> {
         let mut reader = hound::WavReader::open(path).map_err(|error| MicError::Wav {
             path: path.to_path_buf(),
@@ -71,6 +75,7 @@ pub enum Source {
 
 pub struct Mic {
     inner: Inner,
+    resampler: Option<StreamingResampler>,
 }
 
 enum Inner {
@@ -96,6 +101,7 @@ impl Mic {
         match source {
             Source::Replay(path) => Ok(Mic {
                 inner: Inner::Replay(Audio16k::from_wav(&path)?),
+                resampler: None,
             }),
             Source::Default => {
                 let host = cpal::default_host();
@@ -171,12 +177,16 @@ impl Mic {
                         device_rate,
                         channels,
                     },
+                    resampler: Some(StreamingResampler::new(device_rate, RATE)),
                 })
             }
         }
     }
 
     pub fn arm(&mut self) -> Armed {
+        if let Some(resampler) = self.resampler.as_mut() {
+            resampler.reset();
+        }
         if let Inner::Live { shared, .. } = &self.inner {
             if let Ok(preroll) = shared.preroll.lock() {
                 if let Ok(mut buf) = shared.buf.lock() {
@@ -187,6 +197,27 @@ impl Mic {
             }
         }
         Armed(())
+    }
+
+    pub fn drain(&mut self, _armed: &Armed) -> Audio16k {
+        let Inner::Live {
+            shared, channels, ..
+        } = &self.inner
+        else {
+            return Audio16k::from_samples(Vec::new());
+        };
+        let interleaved = shared
+            .buf
+            .lock()
+            .map(|mut buf| std::mem::take(&mut *buf))
+            .unwrap_or_default();
+        let mono = downmix(&interleaved, *channels);
+        Audio16k::from_samples(
+            self.resampler
+                .as_mut()
+                .map(|resampler| resampler.push(&mono, false))
+                .unwrap_or_default(),
+        )
     }
 
     pub fn disarm(&mut self, _armed: Armed) -> Audio16k {
@@ -204,13 +235,75 @@ impl Mic {
                     .lock()
                     .map(|mut buf| std::mem::take(&mut *buf))
                     .unwrap_or_default();
-                Audio16k(resample(
-                    &downmix(&interleaved, *channels),
-                    *device_rate,
-                    RATE,
-                ))
+                let mono = downmix(&interleaved, *channels);
+                Audio16k::from_samples(
+                    self.resampler
+                        .as_mut()
+                        .map(|resampler| resampler.push(&mono, true))
+                        .unwrap_or_else(|| resample(&mono, *device_rate, RATE)),
+                )
             }
         }
+    }
+}
+
+struct StreamingResampler {
+    from: u32,
+    to: u32,
+    input: Vec<f32>,
+    input_offset: usize,
+    output_index: usize,
+}
+
+impl StreamingResampler {
+    fn new(from: u32, to: u32) -> Self {
+        Self {
+            from,
+            to,
+            input: Vec::new(),
+            input_offset: 0,
+            output_index: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.input.clear();
+        self.input_offset = 0;
+        self.output_index = 0;
+    }
+
+    fn push(&mut self, input: &[f32], finalize: bool) -> Vec<f32> {
+        if self.from == self.to {
+            return input.to_vec();
+        }
+        self.input.extend_from_slice(input);
+        let total_input = self.input_offset + self.input.len();
+        let ratio = self.from as f64 / self.to as f64;
+        let final_len = (total_input as f64 / ratio).floor() as usize;
+        let mut output = Vec::new();
+        loop {
+            if self.output_index >= final_len {
+                break;
+            }
+            let position = self.output_index as f64 * ratio;
+            let source = position as usize;
+            if !finalize && source + 1 >= total_input {
+                break;
+            }
+            let local = source - self.input_offset;
+            let fraction = (position - source as f64) as f32;
+            let a = self.input[local];
+            let b = *self.input.get(local + 1).unwrap_or(&a);
+            output.push(a + (b - a) * fraction);
+            self.output_index += 1;
+        }
+        let next_source = (self.output_index as f64 * ratio) as usize;
+        let discard = next_source
+            .saturating_sub(self.input_offset)
+            .min(self.input.len());
+        self.input.drain(..discard);
+        self.input_offset += discard;
+        output
     }
 }
 
@@ -333,5 +426,55 @@ mod tests {
         let output = resample(&input, 48_000, 16_000);
         assert_eq!(output.len(), 160);
         assert!((output[1] - output[0] - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn streaming_resample_matches_one_shot_across_arbitrary_blocks() {
+        for rate in [48_000, 44_100] {
+            let mono = signal(12_347);
+            assert_stream_matches(&mono, 1, rate, &[1, 17, 503, 2, 997, 31]);
+
+            let stereo = mono
+                .iter()
+                .flat_map(|sample| [*sample, *sample * -0.37 + 0.11])
+                .collect::<Vec<_>>();
+            assert_stream_matches(&stereo, 2, rate, &[3, 29, 401, 7, 1_003]);
+        }
+    }
+
+    fn signal(len: usize) -> Vec<f32> {
+        (0..len)
+            .map(|index| {
+                let value = index.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                (value % 65_537) as f32 / 32_768.0 - 1.0
+            })
+            .collect()
+    }
+
+    fn assert_stream_matches(
+        interleaved: &[f32],
+        channels: u16,
+        from: u32,
+        block_frames: &[usize],
+    ) {
+        let expected = resample(&downmix(interleaved, channels), from, RATE);
+        let mut streaming = StreamingResampler::new(from, RATE);
+        let mut actual = Vec::new();
+        let channels = channels as usize;
+        let mut frame = 0;
+        let frames = interleaved.len() / channels;
+        let mut block = 0;
+        while frame < frames {
+            let end = (frame + block_frames[block % block_frames.len()]).min(frames);
+            let mono = downmix(
+                &interleaved[frame * channels..end * channels],
+                channels as u16,
+            );
+            actual.extend(streaming.push(&mono, false));
+            frame = end;
+            block += 1;
+        }
+        actual.extend(streaming.push(&[], true));
+        assert_eq!(actual, expected, "{from} Hz, {channels} channels");
     }
 }

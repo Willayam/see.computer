@@ -28,6 +28,9 @@ pub enum Session {
     Dictating {
         armed: mic::Armed,
         since: Instant,
+        /// 16 kHz samples already drained to the engine, so release math sees
+        /// the whole utterance, not just the tail.
+        fed: usize,
         capture_dir: Option<PathBuf>,
         captures: Vec<Capture>,
         active_clip: Option<ActiveClip>,
@@ -361,6 +364,7 @@ impl Controller {
                             Session::Dictating {
                                 armed,
                                 since: Instant::now(),
+                                fed: 0,
                                 capture_dir: self.recorder.session_dir().ok(),
                                 captures: Vec::new(),
                                 active_clip: None,
@@ -387,6 +391,7 @@ impl Controller {
             (
                 Session::Dictating {
                     armed,
+                    fed,
                     capture_dir,
                     captures,
                     active_clip: None,
@@ -399,8 +404,9 @@ impl Controller {
                 }
                 let audio = self.mic.as_mut().map(|mic| mic.disarm(armed));
                 if audio.as_ref().is_some_and(|audio| {
-                    audio.seconds() < (mic::PREROLL + MIN_DICTATION).as_secs_f32()
+                    utterance_seconds(fed, audio) < (mic::PREROLL + MIN_DICTATION).as_secs_f32()
                 }) {
+                    self.engine.discard();
                     self.finish(Notice::NothingHeard);
                     Session::Idle
                 } else if let Some(audio) = audio {
@@ -418,6 +424,7 @@ impl Controller {
                         }
                     }
                 } else {
+                    self.engine.discard();
                     self.finish(Notice::MicUnavailable("microphone closed".to_owned()));
                     Session::Idle
                 }
@@ -425,6 +432,7 @@ impl Controller {
             (
                 Session::Dictating {
                     armed,
+                    fed,
                     capture_dir,
                     captures,
                     active_clip: None,
@@ -435,7 +443,7 @@ impl Controller {
                 let audio = self.mic.as_mut().map(|mic| mic.disarm(armed));
                 let duration_ms = audio
                     .as_ref()
-                    .map(audio_duration_ms)
+                    .map(|audio| (utterance_seconds(fed, audio) * 1_000.0).round() as u64)
                     .unwrap_or_default()
                     .max(captures.iter().map(capture_end_ms).max().unwrap_or(0));
                 let capture_dir = if capture_dir.is_none() {
@@ -464,6 +472,7 @@ impl Controller {
                         }
                     }
                     Some(Err(_)) | None => {
+                        self.engine.discard();
                         self.spawn_shots_package(shots, duration_ms, engine::Transcription::empty())
                     }
                 }
@@ -481,6 +490,7 @@ impl Controller {
                 Session::Dictating {
                     armed,
                     since,
+                    fed,
                     mut capture_dir,
                     mut captures,
                     mut active_clip,
@@ -497,6 +507,7 @@ impl Controller {
                 Session::Dictating {
                     armed,
                     since,
+                    fed,
                     capture_dir,
                     captures,
                     active_clip,
@@ -506,6 +517,7 @@ impl Controller {
                 Session::Dictating {
                     armed,
                     since,
+                    fed,
                     capture_dir,
                     captures,
                     active_clip,
@@ -531,6 +543,7 @@ impl Controller {
                 Session::Dictating {
                     armed,
                     since,
+                    fed,
                     capture_dir,
                     captures,
                     active_clip,
@@ -540,6 +553,7 @@ impl Controller {
                 Session::Dictating {
                     armed,
                     since,
+                    fed,
                     capture_dir,
                     captures,
                     active_clip,
@@ -549,6 +563,7 @@ impl Controller {
                 Session::Dictating {
                     armed,
                     since,
+                    fed,
                     capture_dir,
                     captures,
                     active_clip,
@@ -569,6 +584,7 @@ impl Controller {
                 if let Some(mic) = self.mic.as_mut() {
                     let _ = mic.disarm(armed);
                 }
+                self.engine.discard();
                 if let Some(clip) = active_clip {
                     clip.active.abort();
                 }
@@ -814,6 +830,7 @@ impl Controller {
         let Session::Dictating {
             armed,
             since,
+            fed,
             mut capture_dir,
             mut captures,
             active_clip,
@@ -847,6 +864,7 @@ impl Controller {
         Session::Dictating {
             armed,
             since,
+            fed,
             capture_dir,
             captures,
             active_clip: None,
@@ -873,8 +891,17 @@ impl Controller {
 
     fn expire(&mut self) {
         if let Session::Dictating { since, .. } = &self.session {
-            if since.elapsed() >= MAX_DICTATION || !crate::trigger::dictation_gesture_held() {
+            let release =
+                since.elapsed() >= MAX_DICTATION || !crate::trigger::dictation_gesture_held();
+            if release {
                 self.step(Msg::MainReleased);
+            } else if let Session::Dictating { armed, fed, .. } = &mut self.session {
+                if let Some(audio) = self.mic.as_mut().map(|mic| mic.drain(armed)) {
+                    if !audio.samples().is_empty() {
+                        *fed += audio.samples().len();
+                        self.engine.feed(audio);
+                    }
+                }
             }
             return;
         }
@@ -1087,6 +1114,7 @@ impl Controller {
                 if let Some(mic) = self.mic.as_mut() {
                     let _ = mic.disarm(armed);
                 }
+                self.engine.discard();
                 if let Some(clip) = active_clip {
                     clip.active.abort();
                 }
@@ -1130,8 +1158,8 @@ fn capture_offset_ms(since: Instant, at: Instant) -> u64 {
     u64::try_from(offset.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn audio_duration_ms(audio: &mic::Audio16k) -> u64 {
-    (audio.seconds() * 1_000.0).round() as u64
+fn utterance_seconds(fed: usize, tail: &mic::Audio16k) -> f32 {
+    (fed + tail.samples().len()) as f32 / mic::RATE as f32
 }
 
 fn capture_end_ms(capture: &Capture) -> u64 {

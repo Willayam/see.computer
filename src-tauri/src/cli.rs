@@ -8,12 +8,17 @@ use crate::engine::{EngineError, Transcription};
 
 pub enum Cmd {
     Transcribe(PathBuf),
+    TranscribeLive(PathBuf),
     Clip(PathBuf),
 }
 
 pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
     match args.next().as_deref() {
-        Some("transcribe") => args.next().map(PathBuf::from).map(Cmd::Transcribe),
+        Some("transcribe") => match args.next().as_deref() {
+            Some("--live") => args.next().map(PathBuf::from).map(Cmd::TranscribeLive),
+            Some(path) => Some(Cmd::Transcribe(PathBuf::from(path))),
+            None => None,
+        },
         Some("clip") => args.next().map(PathBuf::from).map(Cmd::Clip),
         _ => None,
     }
@@ -22,7 +27,83 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
 pub fn run(cmd: Cmd) -> i32 {
     match cmd {
         Cmd::Transcribe(path) => transcribe(path),
+        Cmd::TranscribeLive(path) => transcribe_live(path),
         Cmd::Clip(path) => clip(path),
+    }
+}
+
+fn transcribe_live(path: PathBuf) -> i32 {
+    let audio = match crate::mic::Audio16k::from_wav(&path) {
+        Ok(audio) => audio,
+        Err(error) => {
+            eprintln!("{error}");
+            return 1;
+        }
+    };
+    eprintln!("audio: {:.3}s", audio.seconds());
+    let split = audio
+        .samples()
+        .len()
+        .saturating_sub(15 * crate::mic::RATE as usize);
+    let head = audio.samples()[..split].to_vec();
+    let tail = crate::mic::Audio16k::from_samples(audio.samples()[split..].to_vec());
+    let models = crate::engine::Models::default_root();
+    let files = match models.ensure(&mut |progress| {
+        if let Some(percent) = progress.percent() {
+            eprintln!("model: {percent}%");
+        }
+    }) {
+        Ok(files) => files,
+        Err(error) => {
+            eprintln!("{error}");
+            return 1;
+        }
+    };
+    eprintln!("model: loading and warming");
+    let loaded = crate::qos::spawn("see-engine", crate::qos::Class::Engine, move || {
+        let mut engine = crate::engine::load(files).map_err(|error| error.to_string())?;
+        let mut utterance = crate::engine::Utterance::default();
+        for block in head.chunks(crate::mic::RATE as usize / 5) {
+            utterance.feed(
+                engine.as_mut(),
+                &crate::mic::Audio16k::from_samples(block.to_vec()),
+            );
+        }
+        let inference_start = Instant::now();
+        let result = utterance.finish(engine.as_mut(), &tail);
+        Ok::<_, String>((result, inference_start.elapsed()))
+    })
+    .join();
+    let result = match loaded {
+        Ok(Ok((result, inference))) => {
+            eprintln!(
+                "tail transcription: {:.3} ms",
+                inference.as_secs_f64() * 1_000.0
+            );
+            result
+        }
+        Ok(Err(error)) => {
+            eprintln!("{error}");
+            return 1;
+        }
+        Err(_) => {
+            eprintln!("transcription thread panicked");
+            return 1;
+        }
+    };
+    match result.map(|transcription| transcription.text) {
+        Ok(Some(text)) => {
+            println!("{}", text.as_str());
+            0
+        }
+        Ok(None) => {
+            eprintln!("nothing heard");
+            2
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            1
+        }
     }
 }
 
