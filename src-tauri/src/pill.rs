@@ -7,6 +7,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 #[derive(Clone, Debug, PartialEq)]
 pub enum PillEvent {
     Show(Activity),
+    Shot,
     Flash(Notice),
     Finish(Notice),
     Hide,
@@ -30,7 +31,6 @@ pub enum Notice {
     NothingHeard,
     StillTranscribing,
     RecordingInProgress,
-    RecordingNeedsIdle,
     Cancelled,
     Loading(Option<u8>),
     TriggerChanged(String),
@@ -58,7 +58,6 @@ impl Notice {
             Notice::NothingHeard
             | Notice::StillTranscribing
             | Notice::RecordingInProgress
-            | Notice::RecordingNeedsIdle
             | Notice::Cancelled
             | Notice::Loading(_)
             | Notice::TriggerChanged(_)
@@ -79,7 +78,6 @@ impl Notice {
             Notice::NothingHeard => "Nothing heard".to_owned(),
             Notice::StillTranscribing => "Still transcribing".to_owned(),
             Notice::RecordingInProgress => "Screen recording in progress".to_owned(),
-            Notice::RecordingNeedsIdle => "Finish dictation before recording".to_owned(),
             Notice::Cancelled => "Cancelled".to_owned(),
             Notice::Loading(Some(percent)) => format!("Model loading {percent}%"),
             Notice::Loading(None) => "Model loading".to_owned(),
@@ -105,6 +103,7 @@ impl Notice {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum Wire {
     Show(Activity),
+    Shot,
     Flash {
         tone: Tone,
         text: String,
@@ -129,10 +128,11 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
             match &event {
                 PillEvent::Show(activity) => current = Some(*activity),
                 PillEvent::Finish(_) | PillEvent::Hide => current = None,
-                PillEvent::Flash(_) => {}
+                PillEvent::Shot | PillEvent::Flash(_) => {}
             }
             let wire = match event {
                 PillEvent::Show(activity) => Wire::Show(activity),
+                PillEvent::Shot => Wire::Shot,
                 PillEvent::Flash(notice) => Wire::Flash {
                     tone: notice.tone(),
                     text: notice.text(),

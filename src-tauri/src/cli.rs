@@ -61,7 +61,7 @@ fn transcribe(path: PathBuf) -> i32 {
 }
 
 /// Rebuild the agent-readable folder for a finished recording and print the
-/// path of its `clip.md`.
+/// path of its `take.md`.
 fn clip(mov: PathBuf) -> i32 {
     if !mov.exists() {
         eprintln!("no such file: {}", mov.display());

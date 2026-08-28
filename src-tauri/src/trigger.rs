@@ -18,7 +18,14 @@ const ANY_SHIFT: u64 = 0x0002_0000;
 const COMMAND: u64 = 0x0010_0000;
 const CONTROL: u64 = 0x0004_0000;
 const HOLD_THRESHOLD: Duration = Duration::from_millis(180);
-const VIDEO_COOLDOWN: Duration = Duration::from_millis(350);
+/// Shift down for longer than this commits to a clip; shorter is one screenshot.
+/// Longer than [`HOLD_THRESHOLD`] because a Shift tap is a deliberate camera
+/// press, where the trigger's threshold only has to reject an accidental brush.
+const TAP_WINDOW: Duration = Duration::from_millis(250);
+/// Shift up for longer than this ends the clip; shorter is a shot taken without
+/// breaking it. The same fork as [`TAP_WINDOW`] read on the other edge, and it
+/// gets its own name because there is no law that the two have to match.
+const BLIP_WINDOW: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -75,12 +82,30 @@ impl Trigger {
     }
 }
 
+/// Where the Shift gesture stands inside a live session. The trigger is the
+/// session and Shift is the camera, so this runs alongside dictation rather
+/// than instead of it: narration never stops for a capture.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Capture {
+    Off,
+    /// Shift is down and the [`TAP_WINDOW`] has not expired, so this is still
+    /// either one screenshot or the opening of a clip.
+    Pending {
+        pressed: Instant,
+    },
+    Clip,
+    /// Shift came up during a clip and the [`BLIP_WINDOW`] has not expired, so
+    /// this is still either a shot inside the clip or the clip's end.
+    Gap {
+        released: Instant,
+    },
+}
+
 pub struct Decoder {
     trigger: Trigger,
     arming_since: Option<Instant>,
     dictating: bool,
-    video_held: bool,
-    video_cooldown_until: Option<Instant>,
+    capture: Capture,
 }
 
 pub enum Input {
@@ -95,8 +120,7 @@ impl Decoder {
             trigger,
             arming_since: None,
             dictating: false,
-            video_held: false,
-            video_cooldown_until: None,
+            capture: Capture::Off,
         }
     }
 
@@ -104,22 +128,23 @@ impl Decoder {
         self.trigger = trigger;
         self.arming_since = None;
         self.dictating = false;
-        self.video_held = false;
-        self.video_cooldown_until = None;
+        self.capture = Capture::Off;
     }
 
-    pub fn step(&mut self, input: Input, now: Instant) -> Option<Msg> {
+    /// One input event can resolve two things at once, because the finger that
+    /// ends a clip is usually the same finger that ends the session.
+    pub fn step(&mut self, input: Input, now: Instant) -> Vec<Msg> {
         if !self.trigger.uses_tap() {
-            return None;
+            return Vec::new();
         }
         match input {
             Input::KeyDown => {
                 if !self.dictating() {
                     self.arming_since = None;
                 }
-                None
+                Vec::new()
             }
-            Input::Tick => self.maybe_begin_dictation(now),
+            Input::Tick => self.tick(now),
             Input::Flags(flags) => self.flags_changed(flags, now),
         }
     }
@@ -128,55 +153,126 @@ impl Decoder {
         self.dictating
     }
 
-    fn flags_changed(&mut self, flags: u64, now: Instant) -> Option<Msg> {
+    fn tick(&mut self, now: Instant) -> Vec<Msg> {
+        let mut out = Vec::new();
+        out.extend(self.maybe_begin_dictation(now));
+        out.extend(self.expire_capture(now));
+        out
+    }
+
+    fn flags_changed(&mut self, flags: u64, now: Instant) -> Vec<Msg> {
         let mod_held = self.trigger.held_in(flags);
         let shift_held = flags & (LEFT_SHIFT | RIGHT_SHIFT | ANY_SHIFT) != 0;
         let fn_is_other = self.trigger != Trigger::Fn && flags & FN != 0;
         let other_held = flags & (COMMAND | CONTROL) != 0 || fn_is_other;
-        let dict_target = mod_held && !shift_held && !other_held;
-        let video_combo = mod_held && shift_held && !other_held;
+        // Shift no longer disqualifies the trigger. Under the grammar it is the
+        // camera inside a session, not a separate gesture that replaces one.
+        let session_held = mod_held && !other_held;
 
-        if video_combo {
+        let mut out = Vec::new();
+        if !session_held {
             self.arming_since = None;
-            self.video_cooldown_until = Some(now + VIDEO_COOLDOWN);
-            if !self.video_held {
-                self.video_held = true;
-                self.dictating = false;
-                return Some(Msg::VideoPressed);
-            }
-        } else if self.video_held {
-            self.video_held = false;
-            return Some(Msg::VideoReleased);
-        }
-
-        if !dict_target {
-            self.arming_since = None;
+            out.extend(self.close_capture(now));
             if self.dictating() {
                 self.dictating = false;
-                return Some(Msg::MainReleased);
+                out.push(Msg::MainReleased);
             }
-            return None;
-        }
-
-        if self.video_cooldown_until.is_some_and(|t| now < t) {
-            self.arming_since = None;
-            return None;
+            return out;
         }
 
         if !self.dictating() && self.arming_since.is_none() {
             self.arming_since = Some(now);
         }
-        self.maybe_begin_dictation(now)
+        out.extend(self.maybe_begin_dictation(now));
+        out.extend(self.expire_capture(now));
+        out.extend(self.shift_edge(shift_held, now));
+        out
     }
 
-    fn maybe_begin_dictation(&mut self, now: Instant) -> Option<Msg> {
-        let since = self.arming_since?;
+    /// The Shift edge itself, once [`Decoder::expire_capture`] has aged out any
+    /// fork the tick loop was too slow to resolve.
+    fn shift_edge(&mut self, shift_held: bool, now: Instant) -> Vec<Msg> {
+        match (self.capture, shift_held) {
+            (Capture::Off, true) => {
+                self.capture = Capture::Pending { pressed: now };
+                self.live(Msg::CaptureStarted).into_iter().collect()
+            }
+            (Capture::Gap { released }, true) => {
+                self.capture = Capture::Clip;
+                self.live(Msg::ShotTaken(released)).into_iter().collect()
+            }
+            (Capture::Pending { pressed }, false) => {
+                self.capture = Capture::Off;
+                [Msg::ShotTaken(pressed), Msg::CaptureEnded]
+                    .into_iter()
+                    .filter_map(|msg| self.live(msg))
+                    .collect()
+            }
+            (Capture::Clip, false) => {
+                self.capture = Capture::Gap { released: now };
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// A fork whose window has run out. A pending Shift becomes a clip, a gap
+    /// becomes the clip's end, and both are stamped where the finger moved
+    /// rather than where the window happened to close.
+    fn expire_capture(&mut self, now: Instant) -> Vec<Msg> {
+        match self.capture {
+            Capture::Pending { pressed }
+                if now.saturating_duration_since(pressed) >= TAP_WINDOW =>
+            {
+                self.capture = Capture::Clip;
+                self.live(Msg::ClipStarted(pressed)).into_iter().collect()
+            }
+            Capture::Gap { released } if now.saturating_duration_since(released) >= BLIP_WINDOW => {
+                self.capture = Capture::Off;
+                [Msg::ClipEnded(released), Msg::CaptureEnded]
+                    .into_iter()
+                    .filter_map(|msg| self.live(msg))
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The session is ending, so every fork resolves the way it currently leans.
+    fn close_capture(&mut self, now: Instant) -> Vec<Msg> {
+        let messages = match self.capture {
+            Capture::Off => return Vec::new(),
+            Capture::Pending { pressed } => [Msg::ShotTaken(pressed), Msg::CaptureEnded],
+            Capture::Clip => [Msg::ClipEnded(now), Msg::CaptureEnded],
+            Capture::Gap { released } => [Msg::ClipEnded(released), Msg::CaptureEnded],
+        };
+        self.capture = Capture::Off;
+        messages
+            .into_iter()
+            .filter_map(|msg| self.live(msg))
+            .collect()
+    }
+
+    /// Captures only exist inside a session. A Shift brushed against a trigger
+    /// that never armed is not a screenshot.
+    fn live(&self, msg: Msg) -> Option<Msg> {
+        self.dictating.then_some(msg)
+    }
+
+    fn maybe_begin_dictation(&mut self, now: Instant) -> Vec<Msg> {
+        let Some(since) = self.arming_since else {
+            return Vec::new();
+        };
         if now.saturating_duration_since(since) < HOLD_THRESHOLD {
-            return None;
+            return Vec::new();
         }
         self.arming_since = None;
         self.dictating = true;
-        Some(Msg::MainPressed)
+        let mut messages = vec![Msg::MainPressed];
+        if !matches!(self.capture, Capture::Off) {
+            messages.push(Msg::CaptureStarted);
+        }
+        messages
     }
 }
 
@@ -339,8 +435,8 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<AtomicBoo
 fn with_decoder(
     decoder: &Mutex<Decoder>,
     trigger: Trigger,
-    step: impl FnOnce(&mut Decoder) -> Option<Msg>,
-) -> Option<Msg> {
+    step: impl FnOnce(&mut Decoder) -> Vec<Msg>,
+) -> Vec<Msg> {
     let mut decoder = match decoder.lock() {
         Ok(decoder) => decoder,
         Err(poisoned) => poisoned.into_inner(),
@@ -358,8 +454,8 @@ fn current_trigger(trigger: &Mutex<Trigger>) -> Trigger {
     }
 }
 
-fn send_message(inbox: &Sender<Msg>, message: Option<Msg>) {
-    if let Some(message) = message {
+fn send_message(inbox: &Sender<Msg>, messages: Vec<Msg>) {
+    for message in messages {
         let _ = inbox.send(message);
     }
 }
@@ -407,9 +503,23 @@ fn event_tap_is_enabled(tap: &core_graphics::event::CGEventTap<'static>) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::msg_label;
 
     fn after(start: Instant, millis: u64) -> Instant {
         start + Duration::from_millis(millis)
+    }
+
+    /// Decoder output as the trail spells it, so a test reads as the sequence a
+    /// state log would show.
+    fn out(messages: &[Msg]) -> Vec<&'static str> {
+        messages.iter().map(msg_label).collect()
+    }
+
+    fn at(messages: &[Msg], index: usize) -> Instant {
+        match messages[index] {
+            Msg::ShotTaken(at) | Msg::ClipStarted(at) | Msg::ClipEnded(at) => at,
+            _ => panic!("message {index} carries no instant"),
+        }
     }
 
     #[test]
@@ -432,162 +542,69 @@ mod tests {
     fn hold_past_threshold_fires_once() {
         let start = Instant::now();
         let mut decoder = Decoder::new(Trigger::LeftOption);
-        assert!(decoder.step(Input::Flags(LEFT_OPTION), start).is_none());
-        assert!(decoder.step(Input::Tick, after(start, 179)).is_none());
-        assert!(matches!(
-            decoder.step(Input::Tick, after(start, 180)),
-            Some(Msg::MainPressed)
-        ));
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), start)).is_empty());
+        assert!(out(&decoder.step(Input::Tick, after(start, 179))).is_empty());
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 180))),
+            ["MainPressed"]
+        );
         assert!(decoder.dictating());
-        assert!(decoder.step(Input::Tick, after(start, 500)).is_none());
+        assert!(out(&decoder.step(Input::Tick, after(start, 500))).is_empty());
     }
 
     #[test]
     fn generic_option_flag_matches_the_chosen_side() {
         let start = Instant::now();
         let mut left = Decoder::new(Trigger::LeftOption);
-        assert!(left.step(Input::Flags(ANY_OPTION), start).is_none());
-        assert!(matches!(
-            left.step(Input::Tick, after(start, 200)),
-            Some(Msg::MainPressed)
-        ));
+        assert!(out(&left.step(Input::Flags(ANY_OPTION), start)).is_empty());
+        assert_eq!(
+            out(&left.step(Input::Tick, after(start, 200))),
+            ["MainPressed"]
+        );
         let mut right = Decoder::new(Trigger::RightOption);
-        assert!(right.step(Input::Flags(ANY_OPTION), start).is_none());
-        assert!(matches!(
-            right.step(Input::Tick, after(start, 200)),
-            Some(Msg::MainPressed)
-        ));
+        assert!(out(&right.step(Input::Flags(ANY_OPTION), start)).is_empty());
+        assert_eq!(
+            out(&right.step(Input::Tick, after(start, 200))),
+            ["MainPressed"]
+        );
         // A device-tagged left press must not satisfy the right trigger.
         let mut right_only = Decoder::new(Trigger::RightOption);
-        assert!(right_only
-            .step(Input::Flags(LEFT_OPTION | ANY_OPTION), start)
-            .is_none());
-        assert!(right_only.step(Input::Tick, after(start, 200)).is_none());
+        assert!(out(&right_only.step(Input::Flags(LEFT_OPTION | ANY_OPTION), start)).is_empty());
+        assert!(out(&right_only.step(Input::Tick, after(start, 200))).is_empty());
     }
 
     #[test]
     fn quick_tap_fires_nothing() {
         let start = Instant::now();
         let mut decoder = Decoder::new(Trigger::LeftOption);
-        assert!(decoder.step(Input::Flags(LEFT_OPTION), start).is_none());
-        assert!(decoder.step(Input::Flags(0), after(start, 100)).is_none());
-        assert!(decoder.step(Input::Tick, after(start, 300)).is_none());
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), start)).is_empty());
+        assert!(out(&decoder.step(Input::Flags(0), after(start, 100))).is_empty());
+        assert!(out(&decoder.step(Input::Tick, after(start, 300))).is_empty());
     }
 
     #[test]
     fn option_key_down_cancels_the_arm() {
         let start = Instant::now();
         let mut decoder = Decoder::new(Trigger::LeftOption);
-        assert!(decoder.step(Input::Flags(LEFT_OPTION), start).is_none());
-        assert!(decoder.step(Input::KeyDown, after(start, 50)).is_none());
-        assert!(decoder.step(Input::Tick, after(start, 300)).is_none());
-    }
-
-    #[test]
-    fn shift_during_arm_selects_video() {
-        let start = Instant::now();
-        let mut decoder = Decoder::new(Trigger::LeftOption);
-        assert!(decoder.step(Input::Flags(LEFT_OPTION), start).is_none());
-        assert!(matches!(
-            decoder.step(Input::Flags(LEFT_OPTION | LEFT_SHIFT), after(start, 50)),
-            Some(Msg::VideoPressed)
-        ));
-        assert!(decoder.step(Input::Tick, after(start, 300)).is_none());
-    }
-
-    #[test]
-    fn video_combo_emits_press_then_release() {
-        let start = Instant::now();
-        let mut decoder = Decoder::new(Trigger::LeftOption);
-        let combo = LEFT_OPTION | RIGHT_SHIFT;
-        assert!(matches!(
-            decoder.step(Input::Flags(combo), start),
-            Some(Msg::VideoPressed)
-        ));
-        assert!(decoder
-            .step(Input::Flags(combo), after(start, 10))
-            .is_none());
-        assert!(matches!(
-            decoder.step(Input::Flags(0), after(start, 20)),
-            Some(Msg::VideoReleased)
-        ));
-        assert!(matches!(
-            decoder.step(Input::Flags(combo), after(start, 30)),
-            Some(Msg::VideoPressed)
-        ));
-    }
-
-    #[test]
-    fn releasing_shift_first_releases_video() {
-        let start = Instant::now();
-        let mut decoder = Decoder::new(Trigger::LeftOption);
-        let combo = LEFT_OPTION | LEFT_SHIFT;
-        assert!(matches!(
-            decoder.step(Input::Flags(combo), start),
-            Some(Msg::VideoPressed)
-        ));
-        assert!(matches!(
-            decoder.step(Input::Flags(LEFT_OPTION), after(start, 100)),
-            Some(Msg::VideoReleased)
-        ));
-        assert!(decoder.step(Input::Flags(0), after(start, 110)).is_none());
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), start)).is_empty());
+        assert!(out(&decoder.step(Input::KeyDown, after(start, 50))).is_empty());
+        assert!(out(&decoder.step(Input::Tick, after(start, 300))).is_empty());
     }
 
     #[test]
     fn releasing_modifier_while_dictating_releases_main() {
         let start = Instant::now();
         let mut decoder = Decoder::new(Trigger::LeftOption);
-        assert!(decoder.step(Input::Flags(LEFT_OPTION), start).is_none());
-        assert!(matches!(
-            decoder.step(Input::Tick, after(start, 180)),
-            Some(Msg::MainPressed)
-        ));
-        assert!(matches!(
-            decoder.step(Input::Flags(0), after(start, 200)),
-            Some(Msg::MainReleased)
-        ));
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), start)).is_empty());
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 180))),
+            ["MainPressed"]
+        );
+        assert_eq!(
+            out(&decoder.step(Input::Flags(0), after(start, 200))),
+            ["MainReleased"]
+        );
         assert!(!decoder.dictating());
-    }
-
-    #[test]
-    fn video_combo_overrides_stale_dictation() {
-        let start = Instant::now();
-        let mut decoder = Decoder::new(Trigger::LeftOption);
-        let combo = LEFT_OPTION | LEFT_SHIFT;
-        assert!(decoder.step(Input::Flags(LEFT_OPTION), start).is_none());
-        assert!(matches!(
-            decoder.step(Input::Tick, after(start, 200)),
-            Some(Msg::MainPressed)
-        ));
-        assert!(matches!(
-            decoder.step(Input::Flags(combo), after(start, 250)),
-            Some(Msg::VideoPressed)
-        ));
-        assert!(!decoder.dictating());
-    }
-
-    #[test]
-    fn video_cooldown_blocks_modifier_release_tail() {
-        let start = Instant::now();
-        let mut decoder = Decoder::new(Trigger::LeftOption);
-        let combo = LEFT_OPTION | LEFT_SHIFT;
-        assert!(matches!(
-            decoder.step(Input::Flags(combo), start),
-            Some(Msg::VideoPressed)
-        ));
-        assert!(matches!(
-            decoder.step(Input::Flags(LEFT_OPTION), after(start, 100)),
-            Some(Msg::VideoReleased)
-        ));
-        assert!(decoder.step(Input::Tick, after(start, 300)).is_none());
-        assert!(decoder.step(Input::Flags(0), after(start, 350)).is_none());
-        assert!(decoder
-            .step(Input::Flags(LEFT_OPTION), after(start, 351))
-            .is_none());
-        assert!(matches!(
-            decoder.step(Input::Tick, after(start, 551)),
-            Some(Msg::MainPressed)
-        ));
     }
 
     #[test]
@@ -595,10 +612,8 @@ mod tests {
         let start = Instant::now();
         for other in [COMMAND, CONTROL, FN] {
             let mut decoder = Decoder::new(Trigger::LeftOption);
-            assert!(decoder
-                .step(Input::Flags(LEFT_OPTION | other), start)
-                .is_none());
-            assert!(decoder.step(Input::Tick, after(start, 180)).is_none());
+            assert!(out(&decoder.step(Input::Flags(LEFT_OPTION | other), start)).is_empty());
+            assert!(out(&decoder.step(Input::Tick, after(start, 180))).is_empty());
         }
     }
 
@@ -606,11 +621,11 @@ mod tests {
     fn fn_can_be_the_trigger() {
         let start = Instant::now();
         let mut decoder = Decoder::new(Trigger::Fn);
-        assert!(decoder.step(Input::Flags(FN), start).is_none());
-        assert!(matches!(
-            decoder.step(Input::Tick, after(start, 180)),
-            Some(Msg::MainPressed)
-        ));
+        assert!(out(&decoder.step(Input::Flags(FN), start)).is_empty());
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 180))),
+            ["MainPressed"]
+        );
     }
 
     #[test]
@@ -618,41 +633,273 @@ mod tests {
         let start = Instant::now();
         let mut left = Decoder::new(Trigger::LeftOption);
         let mut right = Decoder::new(Trigger::RightOption);
-        assert!(left.step(Input::Flags(RIGHT_OPTION), start).is_none());
-        assert!(right.step(Input::Flags(LEFT_OPTION), start).is_none());
-        assert!(left.step(Input::Tick, after(start, 180)).is_none());
-        assert!(right.step(Input::Tick, after(start, 180)).is_none());
-        assert!(left.step(Input::Flags(LEFT_OPTION), start).is_none());
-        assert!(right.step(Input::Flags(RIGHT_OPTION), start).is_none());
-        assert!(matches!(
-            left.step(Input::Tick, after(start, 180)),
-            Some(Msg::MainPressed)
-        ));
-        assert!(matches!(
-            right.step(Input::Tick, after(start, 180)),
-            Some(Msg::MainPressed)
-        ));
+        assert!(out(&left.step(Input::Flags(RIGHT_OPTION), start)).is_empty());
+        assert!(out(&right.step(Input::Flags(LEFT_OPTION), start)).is_empty());
+        assert!(out(&left.step(Input::Tick, after(start, 180))).is_empty());
+        assert!(out(&right.step(Input::Tick, after(start, 180))).is_empty());
+        assert!(out(&left.step(Input::Flags(LEFT_OPTION), start)).is_empty());
+        assert!(out(&right.step(Input::Flags(RIGHT_OPTION), start)).is_empty());
+        assert_eq!(
+            out(&left.step(Input::Tick, after(start, 180))),
+            ["MainPressed"]
+        );
+        assert_eq!(
+            out(&right.step(Input::Tick, after(start, 180))),
+            ["MainPressed"]
+        );
     }
 
     #[test]
     fn chord_never_emits_from_decoder() {
         let start = Instant::now();
         let mut decoder = Decoder::new(Trigger::Chord);
-        assert!(decoder.step(Input::Flags(LEFT_OPTION), start).is_none());
-        assert!(decoder.step(Input::Tick, after(start, 500)).is_none());
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), start)).is_empty());
+        assert!(out(&decoder.step(Input::Tick, after(start, 500))).is_empty());
     }
 
     #[test]
     fn changing_trigger_resets_active_state() {
         let start = Instant::now();
         let mut decoder = Decoder::new(Trigger::LeftOption);
-        assert!(decoder.step(Input::Flags(LEFT_OPTION), start).is_none());
-        assert!(matches!(
-            decoder.step(Input::Tick, after(start, 180)),
-            Some(Msg::MainPressed)
-        ));
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), start)).is_empty());
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 180))),
+            ["MainPressed"]
+        );
         decoder.set_trigger(Trigger::RightOption);
         assert!(!decoder.dictating());
-        assert!(decoder.step(Input::Tick, after(start, 500)).is_none());
+        assert!(out(&decoder.step(Input::Tick, after(start, 500))).is_empty());
+    }
+
+    /// Opens a session and returns the clock it started on.
+    fn dictating() -> (Decoder, Instant) {
+        let start = Instant::now();
+        let mut decoder = Decoder::new(Trigger::LeftOption);
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), start)).is_empty());
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 180))),
+            ["MainPressed"]
+        );
+        (decoder, start)
+    }
+
+    const SHIFTED: u64 = LEFT_OPTION | LEFT_SHIFT;
+
+    #[test]
+    fn shift_tap_is_one_shot_stamped_at_the_press() {
+        let (mut decoder, start) = dictating();
+        assert_eq!(
+            out(&decoder.step(Input::Flags(SHIFTED), after(start, 1_000))),
+            ["CaptureStarted"]
+        );
+        assert!(out(&decoder.step(Input::Tick, after(start, 1_100))).is_empty());
+        let taken = decoder.step(Input::Flags(LEFT_OPTION), after(start, 1_200));
+        assert_eq!(out(&taken), ["ShotTaken", "CaptureEnded"]);
+        assert_eq!(at(&taken, 0), after(start, 1_000));
+        // The session is untouched by the capture.
+        assert!(decoder.dictating());
+        assert_eq!(
+            out(&decoder.step(Input::Flags(0), after(start, 2_000))),
+            ["MainReleased"]
+        );
+    }
+
+    #[test]
+    fn shift_held_past_the_window_starts_a_clip_at_the_press() {
+        let (mut decoder, start) = dictating();
+        assert_eq!(
+            out(&decoder.step(Input::Flags(SHIFTED), after(start, 1_000))),
+            ["CaptureStarted"]
+        );
+        assert!(out(&decoder.step(Input::Tick, after(start, 1_249))).is_empty());
+        let started = decoder.step(Input::Tick, after(start, 1_250));
+        assert_eq!(out(&started), ["ClipStarted"]);
+        assert_eq!(at(&started, 0), after(start, 1_000));
+        assert!(decoder.dictating());
+    }
+
+    #[test]
+    fn dictation_continues_across_a_clip_with_no_second_session() {
+        let (mut decoder, start) = dictating();
+        decoder.step(Input::Flags(SHIFTED), after(start, 1_000));
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 1_300))),
+            ["ClipStarted"]
+        );
+        assert_eq!(
+            out(&decoder.step(Input::Flags(LEFT_OPTION), after(start, 4_000))),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 4_300))),
+            ["ClipEnded", "CaptureEnded"]
+        );
+        // No cooldown, no re-arm: the same session runs on to its own release.
+        assert!(decoder.dictating());
+        for millis in [4_350, 4_400, 4_600, 5_000] {
+            assert!(out(&decoder.step(Input::Tick, after(start, millis))).is_empty());
+        }
+        assert_eq!(
+            out(&decoder.step(Input::Flags(0), after(start, 6_000))),
+            ["MainReleased"]
+        );
+    }
+
+    #[test]
+    fn a_blip_inside_a_clip_is_a_shot_and_the_clip_survives() {
+        let (mut decoder, start) = dictating();
+        decoder.step(Input::Flags(SHIFTED), after(start, 1_000));
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 1_300))),
+            ["ClipStarted"]
+        );
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), after(start, 3_000))).is_empty());
+        let blip = decoder.step(Input::Flags(SHIFTED), after(start, 3_100));
+        assert_eq!(out(&blip), ["ShotTaken"]);
+        assert_eq!(at(&blip, 0), after(start, 3_000));
+        // The gap closed into the same clip, so ticks past the window say nothing.
+        assert!(out(&decoder.step(Input::Tick, after(start, 3_400))).is_empty());
+        let ended = decoder.step(Input::Flags(0), after(start, 5_000));
+        assert_eq!(out(&ended), ["ClipEnded", "CaptureEnded", "MainReleased"]);
+        assert_eq!(at(&ended, 0), after(start, 5_000));
+    }
+
+    #[test]
+    fn releasing_option_and_shift_together_ends_the_clip_then_the_session() {
+        let (mut decoder, start) = dictating();
+        decoder.step(Input::Flags(SHIFTED), after(start, 1_000));
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 1_300))),
+            ["ClipStarted"]
+        );
+        let ended = decoder.step(Input::Flags(0), after(start, 9_000));
+        assert_eq!(out(&ended), ["ClipEnded", "CaptureEnded", "MainReleased"]);
+        assert_eq!(at(&ended, 0), after(start, 9_000));
+        assert!(!decoder.dictating());
+    }
+
+    #[test]
+    fn option_released_inside_the_blip_window_ends_the_clip_where_shift_came_up() {
+        let (mut decoder, start) = dictating();
+        decoder.step(Input::Flags(SHIFTED), after(start, 1_000));
+        decoder.step(Input::Tick, after(start, 1_300));
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), after(start, 5_000))).is_empty());
+        let ended = decoder.step(Input::Flags(0), after(start, 5_100));
+        assert_eq!(out(&ended), ["ClipEnded", "CaptureEnded", "MainReleased"]);
+        assert_eq!(
+            at(&ended, 0),
+            after(start, 5_000),
+            "the clip ends where the finger came up, not where the window closed"
+        );
+    }
+
+    #[test]
+    fn a_pending_tap_still_resolves_when_the_session_ends_under_it() {
+        let (mut decoder, start) = dictating();
+        decoder.step(Input::Flags(SHIFTED), after(start, 1_000));
+        let ended = decoder.step(Input::Flags(0), after(start, 1_120));
+        assert_eq!(out(&ended), ["ShotTaken", "CaptureEnded", "MainReleased"]);
+        assert_eq!(at(&ended, 0), after(start, 1_000));
+    }
+
+    #[test]
+    fn several_captures_accumulate_inside_one_session() {
+        let (mut decoder, start) = dictating();
+        let mut seen = Vec::new();
+        for (input, millis) in [
+            (Input::Flags(SHIFTED), 1_000),
+            (Input::Flags(LEFT_OPTION), 1_100),
+            (Input::Flags(SHIFTED), 2_000),
+            (Input::Tick, 2_300),
+            (Input::Flags(LEFT_OPTION), 6_000),
+            (Input::Tick, 6_300),
+            (Input::Flags(SHIFTED), 7_000),
+            (Input::Flags(LEFT_OPTION), 7_100),
+            (Input::Flags(0), 8_000),
+        ] {
+            seen.extend(out(&decoder.step(input, after(start, millis))));
+        }
+        assert_eq!(
+            seen,
+            [
+                "CaptureStarted",
+                "ShotTaken",
+                "CaptureEnded",
+                "CaptureStarted",
+                "ClipStarted",
+                "ClipEnded",
+                "CaptureEnded",
+                "CaptureStarted",
+                "ShotTaken",
+                "CaptureEnded",
+                "MainReleased"
+            ]
+        );
+    }
+
+    #[test]
+    fn shift_down_with_the_trigger_opens_a_session_that_is_already_recording() {
+        let start = Instant::now();
+        let mut decoder = Decoder::new(Trigger::LeftOption);
+        assert!(out(&decoder.step(Input::Flags(SHIFTED), start)).is_empty());
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 200))),
+            ["MainPressed", "CaptureStarted"]
+        );
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 260))),
+            ["ClipStarted"]
+        );
+    }
+
+    #[test]
+    fn a_shift_brush_before_the_session_arms_is_not_a_screenshot() {
+        let start = Instant::now();
+        let mut decoder = Decoder::new(Trigger::LeftOption);
+        assert!(out(&decoder.step(Input::Flags(SHIFTED), start)).is_empty());
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), after(start, 90))).is_empty());
+        assert!(!decoder.dictating());
+    }
+
+    #[test]
+    fn a_slow_tick_still_forks_a_long_hold_into_a_clip() {
+        let (mut decoder, start) = dictating();
+        assert_eq!(
+            out(&decoder.step(Input::Flags(SHIFTED), after(start, 1_000))),
+            ["CaptureStarted"]
+        );
+        // No tick lands for 400 ms, then Shift comes up. The window expired
+        // while nobody was looking, so this is a clip and not a shot.
+        let late = decoder.step(Input::Flags(LEFT_OPTION), after(start, 1_400));
+        assert_eq!(out(&late), ["ClipStarted"]);
+        assert_eq!(at(&late, 0), after(start, 1_000));
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 1_700))),
+            ["ClipEnded", "CaptureEnded"]
+        );
+    }
+
+    #[test]
+    fn the_arm_lands_before_a_capture_taken_under_it() {
+        let start = Instant::now();
+        let mut decoder = Decoder::new(Trigger::LeftOption);
+        assert!(out(&decoder.step(Input::Flags(SHIFTED), start)).is_empty());
+        // Shift comes up after the arm is due but before any tick reads it.
+        assert_eq!(
+            out(&decoder.step(Input::Flags(LEFT_OPTION), after(start, 190))),
+            ["MainPressed", "CaptureStarted", "ShotTaken", "CaptureEnded"],
+            "the session has to be open before the shot inside it"
+        );
+    }
+
+    #[test]
+    fn a_blocking_modifier_ends_the_clip_and_the_session() {
+        let (mut decoder, start) = dictating();
+        decoder.step(Input::Flags(SHIFTED), after(start, 1_000));
+        decoder.step(Input::Tick, after(start, 1_300));
+        assert_eq!(
+            out(&decoder.step(Input::Flags(SHIFTED | COMMAND), after(start, 2_000))),
+            ["ClipEnded", "CaptureEnded", "MainReleased"]
+        );
     }
 }

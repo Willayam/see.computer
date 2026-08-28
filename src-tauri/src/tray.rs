@@ -338,13 +338,16 @@ fn recent_recordings(dir: &Path, limit: usize) -> Vec<(DateTime<Local>, PathBuf)
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
-            if path.extension().is_none_or(|extension| extension != "mov") {
-                return None;
-            }
             entry
                 .metadata()
                 .ok()
-                .filter(|metadata| metadata.is_file())
+                .filter(|metadata| {
+                    metadata.is_file()
+                        && path.extension().is_some_and(|extension| extension == "mov")
+                        || metadata.is_dir()
+                            && path.join("clips").is_dir()
+                            && (path.join("take.md").is_file() || path.join("clip.md").is_file())
+                })
                 .and_then(|metadata| metadata.modified().ok())
                 .map(|modified| (DateTime::<Local>::from(modified), path))
         })
@@ -391,7 +394,7 @@ fn recent_row(recent: &Recent) -> (String, &'static str) {
     }
 }
 
-/// The clip folder is what the recording pasted, so the row follows it when
+/// The take folder is what the recording pasted, so the row follows it when
 /// it is there and falls back to the movie when it is not.
 fn recording_payload(path: PathBuf) -> Payload {
     match crate::clip::summary(&path) {
@@ -520,6 +523,20 @@ mod tests {
     }
 
     #[test]
+    fn recent_recordings_include_nested_take_directories() {
+        let dir = temp_dir();
+        let take = dir.join("2026-08-28-10-12-09");
+        std::fs::create_dir_all(take.join("clips/001")).unwrap();
+        std::fs::write(take.join("clips/001/clip.mov"), b"movie").unwrap();
+        std::fs::write(take.join("take.md"), "# Screen take").unwrap();
+
+        let recordings = recent_recordings(&dir, 10);
+
+        assert!(recordings.iter().any(|(_, path)| path == &take));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn transcript_labels_collapse_whitespace_and_cap_on_chars() {
         assert_eq!(transcript_label("  hej\n  på\t dig  "), "hej på dig");
         let long = "å".repeat(121);
@@ -529,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn a_packaged_recording_carries_its_clip_paragraph() {
+    fn a_packaged_recording_carries_its_take_paste() {
         let dir = temp_dir();
         let mov = dir.join("2026-08-26_14-32-01.mov");
         std::fs::write(&mov, b"not a movie").unwrap();
@@ -553,7 +570,7 @@ mod tests {
         assert_eq!(
             summary.paste(),
             format!(
-                "Screen recording (0:25): \"Look at the misaligned button.\" \u{2014} screen frames and video: {}",
+                "\"Look at the misaligned button.\"\n\n1 clip (0:25): {}",
                 clip.join("clip.md").display()
             )
         );
@@ -586,9 +603,11 @@ mod tests {
         let clip = Recent {
             at,
             payload: Payload::Clip(crate::clip::Summary {
-                markdown: PathBuf::from("/tmp/demo/clip.md"),
-                duration_ms: 25_000,
+                markdown: PathBuf::from("/tmp/demo/take.md"),
                 text: Some("Look at the button.".to_owned()),
+                screenshot_count: 0,
+                clip_count: 1,
+                clip_duration_ms: 25_000,
             }),
         };
         assert_eq!(recent_row(&clip), ("Look at the button.".to_owned(), CLIP));
@@ -596,9 +615,11 @@ mod tests {
         let silent = Recent {
             at,
             payload: Payload::Clip(crate::clip::Summary {
-                markdown: PathBuf::from("/tmp/demo/clip.md"),
-                duration_ms: 25_000,
+                markdown: PathBuf::from("/tmp/demo/take.md"),
                 text: None,
+                screenshot_count: 0,
+                clip_count: 1,
+                clip_duration_ms: 25_000,
             }),
         };
         assert_eq!(

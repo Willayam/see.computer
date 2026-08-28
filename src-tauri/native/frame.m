@@ -19,7 +19,13 @@ double sc_clip_duration_seconds(const char *path) {
     }
 }
 
-int sc_frame_jpeg(const char *path, long long at_ms, int max_width, const char *out_path) {
+int sc_frame_jpeg(
+    const char *path,
+    long long at_ms,
+    int max_width,
+    int tolerance_ms,
+    const char *out_path
+) {
     @autoreleasepool {
         NSString *file = [NSString stringWithUTF8String:path];
         AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:file] options:nil];
@@ -27,8 +33,8 @@ int sc_frame_jpeg(const char *path, long long at_ms, int max_width, const char *
         AVAssetImageGenerator *generator = [[AVAssetImageGenerator alloc] initWithAsset:asset];
         generator.appliesPreferredTrackTransform = YES;
         generator.maximumSize = CGSizeMake(max_width, 0);
-        generator.requestedTimeToleranceBefore = CMTimeMake(500, 1000);
-        generator.requestedTimeToleranceAfter = CMTimeMake(500, 1000);
+        generator.requestedTimeToleranceBefore = CMTimeMake(tolerance_ms, 1000);
+        generator.requestedTimeToleranceAfter = CMTimeMake(tolerance_ms, 1000);
         NSError *error = nil;
         CGImageRef image = [generator copyCGImageAtTime:CMTimeMake(at_ms, 1000)
                                              actualTime:NULL
@@ -42,7 +48,7 @@ int sc_frame_jpeg(const char *path, long long at_ms, int max_width, const char *
             return 3;
         }
         NSDictionary *options =
-            @{(__bridge NSString *)kCGImageDestinationLossyCompressionQuality : @0.8};
+            @{(__bridge NSString *)kCGImageDestinationLossyCompressionQuality : @0.92};
         CGImageDestinationAddImage(sink, image, (__bridge CFDictionaryRef)options);
         bool finished = CGImageDestinationFinalize(sink);
         CFRelease(sink);
