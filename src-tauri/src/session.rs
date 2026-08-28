@@ -158,7 +158,6 @@ pub fn spawn(wiring: Wiring, inbox: (Sender<Msg>, Receiver<Msg>)) -> std::thread
     })
 }
 
-pub const MAX_DICTATION: Duration = Duration::from_secs(120);
 /// Captured audio always includes the pre-roll, so this is time after the press.
 pub const MIN_DICTATION: Duration = Duration::from_millis(250);
 /// A shorter hold is an accidental combo tap; the file would be unplayable noise.
@@ -873,9 +872,7 @@ impl Controller {
 
     fn deadline(&self) -> Option<Instant> {
         match &self.session {
-            Session::Dictating { since, .. } => {
-                Some((*since + MAX_DICTATION).min(Instant::now() + RELEASE_POLL))
-            }
+            Session::Dictating { .. } => Some(Instant::now() + RELEASE_POLL),
             Session::Transcribing { since, .. } | Session::TranscribingShots { since, .. } => {
                 Some(*since + TRANSCRIBE_TIMEOUT)
             }
@@ -890,9 +887,8 @@ impl Controller {
     }
 
     fn expire(&mut self) {
-        if let Session::Dictating { since, .. } = &self.session {
-            let release =
-                since.elapsed() >= MAX_DICTATION || !crate::trigger::dictation_gesture_held();
+        if let Session::Dictating { .. } = &self.session {
+            let release = !crate::trigger::dictation_gesture_held();
             if release {
                 self.step(Msg::MainReleased);
             } else if let Session::Dictating { armed, fed, .. } = &mut self.session {
