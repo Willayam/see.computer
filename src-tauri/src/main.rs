@@ -5,6 +5,7 @@ mod cli;
 mod clip;
 mod config;
 mod engine;
+mod filler;
 mod history;
 mod hotkeys;
 mod menu;

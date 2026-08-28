@@ -13,6 +13,8 @@ Choose Left Option, Right Option, Fn (Globe), or the legacy Option+Space trigger
 
 Dictation runs NVIDIA Parakeet TDT 0.6b v3 (INT8, ONNX) on the CPU. On an M3 Max a six-second Swedish sentence comes back in about 155 ms. The model is 670 MB and downloads on first launch into `~/Library/Application Support/see.computer/models/`.
 
+Hesitation is dropped before anything is pasted. `um`, `uh` and `hm` go, along with the comma or full stop stuck to them, and the next word takes over the capital letter they were holding. Hedges like `like` and `actually` stay, because they are real words far more often than they are filler, and so does `er`, which is Swedish for "your". A dictation that was nothing but a hum pastes nothing at all.
+
 Recordings land in `~/Documents/see.computer/`, next to the dictation history. Each `<stamp>/` take contains `take.md`, `transcript.json`, screenshots under `shots/`, and numbered clips under `clips/`. A clip keeps its movie at `clips/001/clip.mov` and its JPEG frames under `clips/001/frames/`. The paste puts the narration in quotes, leaves a blank line, then names the screenshots and clips before the `take.md` path. A human or a web chatbox gets the words even where a local path is dead. An agent that can read files can open the exact frames where each thing was said without decoding the video. If transcription or packaging fails or times out, the plain `file://` link to the `.mov` is pasted instead. The tray panel lists recordings among the recent dictations by their narration, under a video glyph where a dictation carries a waveform, and picking one copies that same text. `see-computer clip <mov>` moves an existing recording into a new take folder and prints its `take.md` path.
 
 ## Dictation history
