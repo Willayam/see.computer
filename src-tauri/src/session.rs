@@ -361,7 +361,7 @@ impl Controller {
                             Session::Dictating {
                                 armed,
                                 since: Instant::now(),
-                                capture_dir: None,
+                                capture_dir: self.recorder.session_dir().ok(),
                                 captures: Vec::new(),
                                 active_clip: None,
                             }
@@ -387,12 +387,16 @@ impl Controller {
             (
                 Session::Dictating {
                     armed,
+                    capture_dir,
                     captures,
                     active_clip: None,
                     ..
                 },
                 Msg::MainReleased,
             ) if captures.is_empty() => {
+                if let Some(dir) = capture_dir {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
                 let audio = self.mic.as_mut().map(|mic| mic.disarm(armed));
                 if audio.as_ref().is_some_and(|audio| {
                     audio.seconds() < (mic::PREROLL + MIN_DICTATION).as_secs_f32()
@@ -434,7 +438,7 @@ impl Controller {
                     .map(audio_duration_ms)
                     .unwrap_or_default()
                     .max(captures.iter().map(capture_end_ms).max().unwrap_or(0));
-                let capture_dir = if capture_dir.is_none() && !is_flat_clip(&captures) {
+                let capture_dir = if capture_dir.is_none() {
                     match self.recorder.session_dir() {
                         Ok(dir) => Some(dir),
                         Err(error) => {
@@ -787,7 +791,7 @@ impl Controller {
             Ok(dir) => {
                 let path = dir
                     .join("shots")
-                    .join(format!("{:03}.png", captures.len() + 1));
+                    .join(format!("{:03}.png", capture_screenshot_count(captures) + 1));
                 match self.recorder.screenshot(&path) {
                     Ok(pending) => {
                         *capture_dir = Some(dir);
@@ -984,7 +988,6 @@ impl Controller {
         let turn = self.mint_turn();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let flat = is_flat_clip(&shots.captures);
             let shots_only = captures_only_shots(&shots.captures);
             let mut captured = Vec::new();
             for capture in shots.captures {
@@ -1031,17 +1034,15 @@ impl Controller {
                     }
                     None => Err(clip::PackageError::NoStem),
                 }
-            } else if flat {
+            } else if let Some(dir) = shots.dir {
+                clip::package_session(&dir, duration_ms, &transcription, &captured)
+            } else {
                 match captured.into_iter().next() {
                     Some(clip::SessionCapture::Clip(clip)) => {
                         clip::package_single_clip(duration_ms, &transcription, clip)
                     }
                     _ => Err(clip::PackageError::NoStem),
                 }
-            } else if let Some(dir) = shots.dir {
-                clip::package_session(&dir, duration_ms, &transcription, &captured)
-            } else {
-                Err(clip::PackageError::NoStem)
             }
             .map(|packaged| packaged.paste)
             .map_err(|error| error.to_string());
@@ -1146,14 +1147,14 @@ fn captures_only_shots(captures: &[Capture]) -> bool {
         .all(|capture| matches!(capture, Capture::Shot { .. }))
 }
 
-fn is_flat_clip(captures: &[Capture]) -> bool {
-    matches!(
-        captures,
-        [Capture::Clip {
-            shots_ms,
-            ..
-        }] if shots_ms.is_empty()
-    )
+fn capture_screenshot_count(captures: &[Capture]) -> usize {
+    captures
+        .iter()
+        .map(|capture| match capture {
+            Capture::Shot { .. } => 1,
+            Capture::Clip { shots_ms, .. } => shots_ms.len(),
+        })
+        .sum()
 }
 
 fn discard_captures(dir: Option<PathBuf>, captures: Vec<Capture>) {
@@ -1427,7 +1428,7 @@ mod tests {
         else {
             panic!("the clip must stay inside dictation");
         };
-        assert!(capture_dir.is_none());
+        assert!(capture_dir.is_some());
         assert!(captures.is_empty());
         assert_eq!(
             clip.shots_ms,
@@ -1737,7 +1738,7 @@ mod tests {
         assert!(std::fs::read_dir(dir)
             .unwrap()
             .flatten()
-            .any(|entry| entry.path().extension().is_some_and(|ext| ext == "mov")));
+            .any(|entry| entry.path().join("clips/001/clip.mov").is_file()));
     }
 
     #[test]

@@ -1,16 +1,18 @@
 //! Package a finished take into an agent-readable folder.
 //!
-//! Next to `<stem>.mov` this writes:
+//! Each take owns its movies, screenshots, and extracted frames:
 //!
 //! ```text
-//! <stem>/take.md          the file whose path gets pasted
-//! <stem>/transcript.json  the same segments, machine-readable
-//! <stem>/frames/<ms>.jpg  one screen frame per interesting moment
+//! <take>/take.md
+//! <take>/transcript.json
+//! <take>/shots/001.png
+//! <take>/clips/001/clip.mov
+//! <take>/clips/001/frames/<ms>.jpg
 //! ```
 //!
-//! The markdown interleaves frames with the timestamped transcript so an agent
-//! can read what was said and open the screen exactly where it was said,
-//! without ever decoding the video.
+//! Clips use recording order for their directory number. The markdown
+//! interleaves captures with the timestamped transcript so an agent can read
+//! what was said and open the screen exactly where it was said.
 
 use std::fmt::Write as _;
 use std::os::raw::{c_char, c_int, c_longlong};
@@ -96,13 +98,18 @@ impl Summary {
     }
 }
 
-/// Reads the take folder written next to `<stem>.mov`. `None` when packaging
-/// never finished, or the movie predates the folder.
-pub fn summary(mov: &Path) -> Option<Summary> {
-    let dir = mov.with_extension("");
-    if dir == mov {
-        return None;
-    }
+/// Reads a nested take directory or a legacy movie with its sibling folder.
+/// `None` when packaging never finished.
+pub fn summary(path: &Path) -> Option<Summary> {
+    let dir = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        let dir = path.with_extension("");
+        if dir == path {
+            return None;
+        }
+        dir
+    };
     // Existing installs wrote clip.md, and the tray must keep showing those
     // recordings after new packages switch to take.md.
     let take = dir.join("take.md");
@@ -229,11 +236,13 @@ pub fn package_recorded(
     if dir == mov || mov.file_stem().is_none() {
         return Err(PackageError::NoStem);
     }
-    let frames_dir = dir.join("frames");
-    let _ = std::fs::remove_dir_all(&frames_dir);
+    let clip_dir = dir.join("clips/001");
+    let frames_dir = clip_dir.join("frames");
+    std::fs::create_dir_all(&clip_dir)?;
+    let nested_mov = clip_dir.join("clip.mov");
+    let duration_ms = duration_ms(mov, &transcription.segments, recorded_duration_ms);
     std::fs::create_dir_all(&frames_dir)?;
 
-    let duration_ms = duration_ms(mov, &transcription.segments, recorded_duration_ms);
     let mut frames = Vec::new();
     for at in frame_times(duration_ms, &transcription.segments) {
         let file = frames_dir.join(format!("{at:07}.jpg"));
@@ -242,19 +251,16 @@ pub fn package_recorded(
         }
     }
 
-    let mov_name = mov
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
     std::fs::write(
         dir.join("transcript.json"),
-        transcript_json(&mov_name, duration_ms, transcription, &frames),
+        transcript_json(duration_ms, transcription, &frames),
     )?;
     let markdown = dir.join("take.md");
     std::fs::write(
         &markdown,
-        markdown_index(&mov_name, duration_ms, &transcription.segments, &frames),
+        markdown_index(duration_ms, &transcription.segments, &frames),
     )?;
+    move_file(mov, &nested_mov)?;
     let paste = paste(
         transcription.text.as_ref().map(|text| text.as_str()),
         0,
@@ -282,8 +288,11 @@ pub fn paste(
     }
     match clip_count {
         0 => {}
-        1 => kinds.push(format!("1 clip ({})", timestamp(clip_duration_ms))),
-        count => kinds.push(format!("{count} clips ({})", timestamp(clip_duration_ms))),
+        1 => kinds.push(format!("1 clip ({})", duration_timestamp(clip_duration_ms))),
+        count => kinds.push(format!(
+            "{count} clips ({})",
+            duration_timestamp(clip_duration_ms)
+        )),
     }
     let tail = kinds.join(", ");
     match full_text {
@@ -303,6 +312,17 @@ pub fn package_shots(
     std::fs::create_dir_all(dir.join("shots"))?;
     let mut shots = shots.iter().collect::<Vec<_>>();
     shots.sort_by_key(|shot| shot.at_ms);
+    let shots = shots
+        .into_iter()
+        .enumerate()
+        .map(|(index, shot)| {
+            Ok(Shot {
+                at_ms: shot.at_ms,
+                path: place_shot(dir, &shot.path, index + 1)?,
+            })
+        })
+        .collect::<Result<Vec<_>, PackageError>>()?;
+    let shots = shots.iter().collect::<Vec<_>>();
     let duration_ms = duration_ms.max(
         transcription
             .segments
@@ -335,10 +355,18 @@ pub fn package_session(
     transcription: &Transcription,
     captures: &[SessionCapture],
 ) -> Result<Packaged, PackageError> {
-    let frames_dir = dir.join("frames");
+    package_session_with(dir, duration_ms, transcription, captures, extract_frame)
+}
+
+fn package_session_with(
+    dir: &Path,
+    duration_ms: u64,
+    transcription: &Transcription,
+    captures: &[SessionCapture],
+    extract: impl Fn(&Path, u64, i32, &Path) -> bool,
+) -> Result<Packaged, PackageError> {
     let shots_dir = dir.join("shots");
-    let _ = std::fs::remove_dir_all(&frames_dir);
-    std::fs::create_dir_all(&frames_dir)?;
+    let _ = std::fs::remove_dir_all(dir.join("frames"));
     std::fs::create_dir_all(&shots_dir)?;
 
     let duration_ms = duration_ms.max(
@@ -352,20 +380,20 @@ pub fn package_session(
     let mut json_captures = Vec::new();
     let mut clip_number = 0;
     let mut shot_number = 0;
-    let mut screenshot_count = 0;
     let mut clip_duration_ms = 0_u64;
+    let mut movies = Vec::new();
 
     for capture in captures {
         match capture {
             SessionCapture::Shot(shot) => {
                 shot_number += 1;
-                screenshot_count += 1;
-                let file = path_from(dir, &shot.path);
+                let path = place_shot(dir, &shot.path, shot_number)?;
+                let file = path_from(dir, &path);
                 artifacts.push(Artifact::image(shot.at_ms, file.clone()));
                 json_captures.push(serde_json::json!({
                     "type": "shot",
                     "atMs": shot.at_ms,
-                    "timestamp": timestamp(shot.at_ms),
+                    "timestamp": position_timestamp(shot.at_ms),
                     "file": file,
                 }));
             }
@@ -373,7 +401,11 @@ pub fn package_session(
                 clip_number += 1;
                 clip_duration_ms =
                     clip_duration_ms.saturating_add(clip.end_ms.saturating_sub(clip.start_ms));
-                let video = path_from(dir, &clip.path);
+                let clip_dir = dir.join(format!("clips/{clip_number:03}"));
+                let frames_dir = clip_dir.join("frames");
+                std::fs::create_dir_all(&frames_dir)?;
+                let nested_mov = clip_dir.join("clip.mov");
+                let video = path_from(dir, &nested_mov);
                 artifacts.push(Artifact::clip(
                     clip.start_ms,
                     clip.end_ms.saturating_sub(clip.start_ms),
@@ -400,14 +432,13 @@ pub fn package_session(
                 let mut frames = Vec::new();
                 for local_at in frame_times(readable_duration, &local_segments) {
                     let session_at = readable_start.saturating_add(local_at);
-                    let file =
-                        frames_dir.join(format!("clip-{clip_number:03}-{session_at:07}.jpg"));
-                    if extract_frame(&clip.path, local_at, NEARBY_FRAME_TOLERANCE_MS, &file) {
+                    let file = frames_dir.join(format!("{session_at:07}.jpg"));
+                    if extract(&clip.path, local_at, NEARBY_FRAME_TOLERANCE_MS, &file) {
                         let relative = path_from(dir, &file);
                         artifacts.push(Artifact::image(session_at, relative.clone()));
                         frames.push(serde_json::json!({
                             "atMs": session_at,
-                            "timestamp": timestamp(session_at),
+                            "timestamp": position_timestamp(session_at),
                             "file": relative,
                         }));
                     }
@@ -415,18 +446,19 @@ pub fn package_session(
 
                 let mut shots = Vec::new();
                 for at_ms in &clip.shots_ms {
-                    shot_number += 1;
-                    let file = shots_dir.join(format!("{shot_number:03}.jpg"));
+                    let file = shots_dir.join(format!("{:03}.jpg", shot_number + 1));
                     let local_at = at_ms.saturating_sub(clip.recording_start_ms);
-                    if extract_frame(&clip.path, local_at, 0, &file) {
-                        screenshot_count += 1;
+                    if extract(&clip.path, local_at, 0, &file) {
+                        shot_number += 1;
                         let relative = path_from(dir, &file);
                         artifacts.push(Artifact::image(*at_ms, relative.clone()));
                         shots.push(serde_json::json!({
                             "atMs": at_ms,
-                            "timestamp": timestamp(*at_ms),
+                            "timestamp": position_timestamp(*at_ms),
                             "file": relative,
                         }));
+                    } else {
+                        let _ = std::fs::remove_file(file);
                     }
                 }
                 json_captures.push(serde_json::json!({
@@ -438,6 +470,7 @@ pub fn package_session(
                     "frames": frames,
                     "shots": shots,
                 }));
+                movies.push((&clip.path, nested_mov));
             }
         }
     }
@@ -459,9 +492,12 @@ pub fn package_session(
         &markdown,
         session_markdown_index(duration_ms, &transcription.segments, &artifacts),
     )?;
+    for (source, destination) in movies {
+        move_file(source, &destination)?;
+    }
     let paste = paste(
         transcription.text.as_ref().map(|text| text.as_str()),
-        screenshot_count,
+        shot_number,
         clip_number,
         clip_duration_ms,
         &markdown,
@@ -497,7 +533,7 @@ impl Artifact {
     fn image(at_ms: u64, file: String) -> Artifact {
         Artifact {
             at_ms,
-            markdown: format!("![{}]({file})", timestamp(at_ms)),
+            markdown: format!("![{}]({file})", position_timestamp(at_ms)),
         }
     }
 
@@ -506,8 +542,8 @@ impl Artifact {
             at_ms,
             markdown: format!(
                 "[Video clip at {} ({} long)]({file})",
-                timestamp(at_ms),
-                timestamp(duration_ms)
+                position_timestamp(at_ms),
+                duration_timestamp(duration_ms)
             ),
         }
     }
@@ -526,6 +562,26 @@ fn path_from(dir: &Path, path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn move_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    if source == destination {
+        return Ok(());
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(source, destination)
+}
+
+fn place_shot(dir: &Path, source: &Path, number: usize) -> std::io::Result<PathBuf> {
+    let extension = source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("png");
+    let destination = dir.join("shots").join(format!("{number:03}.{extension}"));
+    move_file(source, &destination)?;
+    Ok(destination)
+}
+
 fn session_markdown_index(
     duration_ms: u64,
     segments: &[Segment],
@@ -534,7 +590,7 @@ fn session_markdown_index(
     let mut md = String::new();
     let _ = writeln!(md, "# Screen take\n");
     let length = if duration_ms > 0 {
-        format!("{} long, ", timestamp(duration_ms))
+        format!("{} long, ", duration_timestamp(duration_ms))
     } else {
         String::new()
     };
@@ -567,8 +623,8 @@ fn session_markdown_index(
         let _ = writeln!(
             md,
             "**{}\u{2013}{}** {}\n",
-            timestamp(segment.start_ms),
-            timestamp(segment.end_ms),
+            position_timestamp(segment.start_ms),
+            position_timestamp(segment.end_ms),
             segment.text
         );
         while let Some(artifact) = remaining.peek() {
@@ -598,7 +654,11 @@ fn session_transcript_json(
             serde_json::json!({
                 "startMs": segment.start_ms,
                 "endMs": segment.end_ms,
-                "range": format!("{}-{}", timestamp(segment.start_ms), timestamp(segment.end_ms)),
+                "range": format!(
+                    "{}-{}",
+                    position_timestamp(segment.start_ms),
+                    position_timestamp(segment.end_ms)
+                ),
                 "text": segment.text,
             })
         })
@@ -623,7 +683,7 @@ fn shots_markdown_index(
     let mut md = String::new();
     let _ = writeln!(md, "# Screen take\n");
     let length = if duration_ms > 0 {
-        format!("{} long, ", timestamp(duration_ms))
+        format!("{} long, ", duration_timestamp(duration_ms))
     } else {
         String::new()
     };
@@ -655,8 +715,8 @@ fn shots_markdown_index(
         let _ = writeln!(
             md,
             "**{}\u{2013}{}** {}\n",
-            timestamp(segment.start_ms),
-            timestamp(segment.end_ms),
+            position_timestamp(segment.start_ms),
+            position_timestamp(segment.end_ms),
             segment.text
         );
         while let Some(shot) = remaining.peek() {
@@ -676,7 +736,7 @@ fn shots_markdown_index(
 
 fn write_shot(md: &mut String, dir: &Path, shot: &Shot) {
     let file = shot_file(dir, shot);
-    let _ = writeln!(md, "![{}]({file})\n", timestamp(shot.at_ms));
+    let _ = writeln!(md, "![{}]({file})\n", position_timestamp(shot.at_ms));
 }
 
 fn shot_file(dir: &Path, shot: &Shot) -> String {
@@ -700,7 +760,11 @@ fn shots_transcript_json(
             serde_json::json!({
                 "startMs": segment.start_ms,
                 "endMs": segment.end_ms,
-                "range": format!("{}-{}", timestamp(segment.start_ms), timestamp(segment.end_ms)),
+                "range": format!(
+                    "{}-{}",
+                    position_timestamp(segment.start_ms),
+                    position_timestamp(segment.end_ms)
+                ),
                 "text": segment.text,
             })
         })
@@ -711,7 +775,7 @@ fn shots_transcript_json(
             serde_json::json!({
                 "type": "shot",
                 "atMs": shot.at_ms,
-                "timestamp": timestamp(shot.at_ms),
+                "timestamp": position_timestamp(shot.at_ms),
                 "file": shot_file(dir, shot),
             })
         })
@@ -791,8 +855,17 @@ pub fn frame_times(duration_ms: u64, segments: &[Segment]) -> Vec<u64> {
     times
 }
 
-pub fn timestamp(ms: u64) -> String {
-    let total = ms / 1000;
+// Durations round to report the nearest useful length. Positions floor so a
+// marker never jumps ahead of the words or frame it labels.
+fn duration_timestamp(ms: u64) -> String {
+    format_seconds(ms.saturating_add(500) / 1000)
+}
+
+fn position_timestamp(ms: u64) -> String {
+    format_seconds(ms / 1000)
+}
+
+fn format_seconds(total: u64) -> String {
     let (hours, minutes, seconds) = (total / 3600, (total % 3600) / 60, total % 60);
     if hours > 0 {
         format!("{hours}:{minutes:02}:{seconds:02}")
@@ -801,16 +874,11 @@ pub fn timestamp(ms: u64) -> String {
     }
 }
 
-fn markdown_index(
-    mov_name: &str,
-    duration_ms: u64,
-    segments: &[Segment],
-    frames: &[u64],
-) -> String {
+fn markdown_index(duration_ms: u64, segments: &[Segment], frames: &[u64]) -> String {
     let mut md = String::new();
     let _ = writeln!(md, "# Screen take\n");
     let length = if duration_ms > 0 {
-        format!("{} long, ", timestamp(duration_ms))
+        format!("{} long, ", duration_timestamp(duration_ms))
     } else {
         String::new()
     };
@@ -819,8 +887,9 @@ fn markdown_index(
         "{length}recorded with see.computer. This folder is the agent-readable clip: the \
          transcript below is timestamped, and each image is the screen at that moment, so you \
          can read AND see it. Open the frames whose timestamps matter for your task; every \
-         extracted frame is in `frames/`, the segments are in [`transcript.json`](transcript.json), \
-         and the full video is [`{mov_name}`](../{mov_name}).\n",
+         extracted frame is in `clips/001/frames/`, the segments are in \
+         [`transcript.json`](transcript.json), and the full video is \
+         [`clip.mov`](clips/001/clip.mov).\n",
     );
     let _ = writeln!(md, "## Transcript\n");
     if segments.is_empty() {
@@ -829,7 +898,11 @@ fn markdown_index(
             "No speech was detected; the frames below sample the screen instead.\n"
         );
         for at in frames {
-            let _ = writeln!(md, "![{}](frames/{at:07}.jpg)\n", timestamp(*at));
+            let _ = writeln!(
+                md,
+                "![{}](clips/001/frames/{at:07}.jpg)\n",
+                position_timestamp(*at)
+            );
         }
         return md;
     }
@@ -837,7 +910,11 @@ fn markdown_index(
     for segment in segments {
         while let Some(at) = remaining.peek() {
             if **at <= segment.start_ms {
-                let _ = writeln!(md, "![{}](frames/{at:07}.jpg)\n", timestamp(**at));
+                let _ = writeln!(
+                    md,
+                    "![{}](clips/001/frames/{at:07}.jpg)\n",
+                    position_timestamp(**at)
+                );
                 remaining.next();
             } else {
                 break;
@@ -846,23 +923,22 @@ fn markdown_index(
         let _ = writeln!(
             md,
             "**{}\u{2013}{}** {}\n",
-            timestamp(segment.start_ms),
-            timestamp(segment.end_ms),
+            position_timestamp(segment.start_ms),
+            position_timestamp(segment.end_ms),
             segment.text
         );
     }
     for at in remaining {
-        let _ = writeln!(md, "![{}](frames/{at:07}.jpg)\n", timestamp(*at));
+        let _ = writeln!(
+            md,
+            "![{}](clips/001/frames/{at:07}.jpg)\n",
+            position_timestamp(*at)
+        );
     }
     md
 }
 
-fn transcript_json(
-    mov_name: &str,
-    duration_ms: u64,
-    transcription: &Transcription,
-    frames: &[u64],
-) -> String {
+fn transcript_json(duration_ms: u64, transcription: &Transcription, frames: &[u64]) -> String {
     let segments: Vec<serde_json::Value> = transcription
         .segments
         .iter()
@@ -870,7 +946,11 @@ fn transcript_json(
             serde_json::json!({
                 "startMs": segment.start_ms,
                 "endMs": segment.end_ms,
-                "range": format!("{}-{}", timestamp(segment.start_ms), timestamp(segment.end_ms)),
+                "range": format!(
+                    "{}-{}",
+                    position_timestamp(segment.start_ms),
+                    position_timestamp(segment.end_ms)
+                ),
                 "text": segment.text,
             })
         })
@@ -880,15 +960,15 @@ fn transcript_json(
         .map(|at| {
             serde_json::json!({
                 "atMs": at,
-                "timestamp": timestamp(*at),
-                "file": format!("frames/{at:07}.jpg"),
+                "timestamp": position_timestamp(*at),
+                "file": format!("clips/001/frames/{at:07}.jpg"),
             })
         })
         .collect();
     let value = serde_json::json!({
         "type": "see-computer.clip",
         "version": 1,
-        "video": format!("../{mov_name}"),
+        "video": "clips/001/clip.mov",
         "durationMs": duration_ms,
         "fullText": transcription.text.as_ref().map(|text| text.as_str()).unwrap_or(""),
         "segments": segments,
@@ -943,17 +1023,17 @@ mod tests {
             segment(0, 4_000, "First thing."),
             segment(4_200, 9_000, "Second thing."),
         ];
-        let md = markdown_index("demo.mov", 10_000, &segments, &[0, 4_200]);
+        let md = markdown_index(10_000, &segments, &[0, 4_200]);
         let first = md.find("First thing.").unwrap();
         let second = md.find("Second thing.").unwrap();
-        let frame_two = md.find("frames/0004200.jpg").unwrap();
+        let frame_two = md.find("clips/001/frames/0004200.jpg").unwrap();
         assert!(first < frame_two && frame_two < second);
         assert!(md.contains("**0:00\u{2013}0:04** First thing."));
-        assert!(md.contains("[`demo.mov`](../demo.mov)"));
+        assert!(md.contains("[`clip.mov`](clips/001/clip.mov)"));
     }
 
     #[test]
-    fn package_writes_the_folder_even_when_the_movie_is_unreadable() {
+    fn package_nests_the_movie_even_when_it_is_unreadable() {
         let dir =
             std::env::temp_dir().join(format!("see-computer-clip-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -965,8 +1045,12 @@ mod tests {
         };
         let packaged = package(&mov, &transcription).unwrap();
         assert_eq!(packaged.markdown, dir.join("fake").join("take.md"));
+        assert!(!mov.exists());
+        assert!(dir.join("fake/clips/001/clip.mov").is_file());
+        assert!(dir.join("fake/clips/001/frames").is_dir());
         let md = std::fs::read_to_string(&packaged.markdown).unwrap();
         assert!(md.contains("Hello there."));
+        assert!(md.contains("clips/001/clip.mov"));
         let json = std::fs::read_to_string(dir.join("fake").join("transcript.json")).unwrap();
         assert!(json.contains("\"startMs\": 0"));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1030,6 +1114,7 @@ mod tests {
         .unwrap();
 
         let summary = summary(&mov).expect("legacy clip should remain in recents");
+        assert!(mov.is_file(), "legacy movie stays outside its folder");
         assert_eq!(summary.markdown, dir.join("clip.md"));
         assert_eq!(
             summary.paste(),
@@ -1073,6 +1158,40 @@ mod tests {
             summary.paste(),
             format!(
                 "\"Inspect this.\"\n\n2 screenshots, 1 clip (0:02): {}",
+                dir.join("take.md").display()
+            )
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn summary_reads_a_nested_take_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "see-computer-nested-summary-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("2026-08-28-10-12-09");
+        std::fs::create_dir_all(dir.join("clips/001")).unwrap();
+        std::fs::write(dir.join("clips/001/clip.mov"), b"movie").unwrap();
+        std::fs::write(dir.join("take.md"), "# Nested take").unwrap();
+        std::fs::write(
+            dir.join("transcript.json"),
+            r#"{
+                "fullText": "Nested and recent.",
+                "captures": [
+                    {"type": "clip", "durationMs": 2918, "shots": []}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let summary = summary(&dir).expect("nested take should appear in recents");
+        assert_eq!(summary.markdown, dir.join("take.md"));
+        assert_eq!(
+            summary.paste(),
+            format!(
+                "\"Nested and recent.\"\n\n1 clip (0:03): {}",
                 dir.join("take.md").display()
             )
         );
@@ -1158,13 +1277,125 @@ mod tests {
         let second = markdown.find("Second thing.").unwrap();
         let clip = markdown.find("Video clip at 0:05").unwrap();
         assert!(first < shot && shot < second && second < clip);
+        assert!(!mov.exists());
+        assert!(dir.join("clips/001/clip.mov").is_file());
 
-        std::fs::remove_file(mov).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn one_clip_without_shots_keeps_the_flat_clip_layout() {
+    fn blip_shot_lands_in_shots_without_breaking_numbering() {
+        let root = std::env::temp_dir().join(format!(
+            "see-computer-blip-shot-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("take");
+        std::fs::create_dir_all(dir.join("shots")).unwrap();
+        let first = dir.join("shots/001.png");
+        let third = dir.join("shots/003.png");
+        std::fs::write(&first, b"first screenshot").unwrap();
+        std::fs::write(&third, b"third screenshot").unwrap();
+        let mov = root.join("recording.mov");
+        std::fs::write(&mov, b"movie").unwrap();
+        let captures = [
+            SessionCapture::Shot(Shot {
+                at_ms: 500,
+                path: first,
+            }),
+            SessionCapture::Clip(SessionClip {
+                start_ms: 1_000,
+                end_ms: 3_000,
+                recording_start_ms: 1_250,
+                path: mov,
+                shots_ms: vec![1_800],
+            }),
+            SessionCapture::Shot(Shot {
+                at_ms: 3_500,
+                path: third,
+            }),
+        ];
+
+        let packaged = package_session_with(
+            &dir,
+            4_000,
+            &Transcription::empty(),
+            &captures,
+            |_mov, _at_ms, _tolerance_ms, out| std::fs::write(out, b"jpeg frame").is_ok(),
+        )
+        .unwrap();
+
+        let mut names = std::fs::read_dir(dir.join("shots"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["001.png", "002.jpg", "003.png"]);
+        assert_eq!(
+            packaged.paste,
+            format!(
+                "No narration.\n\n3 screenshots, 1 clip (0:02): {}",
+                dir.join("take.md").display()
+            )
+        );
+        let transcript = std::fs::read_to_string(dir.join("transcript.json")).unwrap();
+        assert!(transcript.contains(r#""file": "shots/002.jpg""#));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clips_are_nested_in_recording_order() {
+        let root = std::env::temp_dir().join(format!(
+            "see-computer-ordered-clips-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("take");
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = root.join("later-stamp.mov");
+        let second = root.join("latest-stamp.mov");
+        std::fs::write(&first, b"first movie").unwrap();
+        std::fs::write(&second, b"second movie").unwrap();
+        let captures = [
+            SessionCapture::Clip(SessionClip {
+                start_ms: 1_000,
+                end_ms: 2_000,
+                recording_start_ms: 1_250,
+                path: first,
+                shots_ms: Vec::new(),
+            }),
+            SessionCapture::Clip(SessionClip {
+                start_ms: 3_000,
+                end_ms: 4_000,
+                recording_start_ms: 3_250,
+                path: second,
+                shots_ms: Vec::new(),
+            }),
+        ];
+
+        package_session_with(
+            &dir,
+            4_000,
+            &Transcription::empty(),
+            &captures,
+            |_mov, _at_ms, _tolerance_ms, _out| false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(dir.join("clips/001/clip.mov")).unwrap(),
+            b"first movie"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("clips/002/clip.mov")).unwrap(),
+            b"second movie"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_clip_without_shots_uses_the_nested_layout() {
         let root = std::env::temp_dir().join(format!(
             "see-computer-flat-session-test-{}",
             std::process::id()
@@ -1192,8 +1423,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(packaged.markdown, root.join("capture/take.md"));
-        assert!(mov.is_file());
-        assert!(root.join("capture/frames").is_dir());
+        assert!(!mov.exists());
+        assert!(root.join("capture/clips/001/clip.mov").is_file());
+        assert!(root.join("capture/clips/001/frames").is_dir());
         assert!(root.join("capture/transcript.json").is_file());
         assert!(!root.join("capture/clip.md").exists());
         assert!(!root.join("capture/session.md").exists());
@@ -1202,9 +1434,11 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_read_like_a_player() {
-        assert_eq!(timestamp(0), "0:00");
-        assert_eq!(timestamp(65_000), "1:05");
-        assert_eq!(timestamp(3_725_000), "1:02:05");
+    fn durations_round_while_positions_floor() {
+        assert_eq!(duration_timestamp(2_918), "0:03");
+        assert_eq!(position_timestamp(2_918), "0:02");
+        assert_eq!(duration_timestamp(65_500), "1:06");
+        assert_eq!(position_timestamp(65_999), "1:05");
+        assert_eq!(position_timestamp(3_725_000), "1:02:05");
     }
 }

@@ -338,13 +338,16 @@ fn recent_recordings(dir: &Path, limit: usize) -> Vec<(DateTime<Local>, PathBuf)
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
-            if path.extension().is_none_or(|extension| extension != "mov") {
-                return None;
-            }
             entry
                 .metadata()
                 .ok()
-                .filter(|metadata| metadata.is_file())
+                .filter(|metadata| {
+                    metadata.is_file()
+                        && path.extension().is_some_and(|extension| extension == "mov")
+                        || metadata.is_dir()
+                            && path.join("clips").is_dir()
+                            && (path.join("take.md").is_file() || path.join("clip.md").is_file())
+                })
                 .and_then(|metadata| metadata.modified().ok())
                 .map(|modified| (DateTime::<Local>::from(modified), path))
         })
@@ -517,6 +520,20 @@ mod tests {
         assert_eq!(recordings.len(), 2);
         assert_eq!(recordings[0].1.file_name().unwrap(), "new.mov");
         assert_eq!(recordings[1].1.file_name().unwrap(), "middle.mov");
+    }
+
+    #[test]
+    fn recent_recordings_include_nested_take_directories() {
+        let dir = temp_dir();
+        let take = dir.join("2026-08-28-10-12-09");
+        std::fs::create_dir_all(take.join("clips/001")).unwrap();
+        std::fs::write(take.join("clips/001/clip.mov"), b"movie").unwrap();
+        std::fs::write(take.join("take.md"), "# Screen take").unwrap();
+
+        let recordings = recent_recordings(&dir, 10);
+
+        assert!(recordings.iter().any(|(_, path)| path == &take));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
