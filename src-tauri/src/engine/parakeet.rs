@@ -136,15 +136,15 @@ impl Engine for Parakeet {
                     .tokens
                     .iter()
                     .filter_map(|token| {
-                        let text = token.text.trim();
+                        let text = crate::filler::strip(&token.text);
                         (!text.is_empty()).then(|| Segment {
                             start_ms: (token.start.max(0.0) * 1000.0).round() as u64,
                             end_ms: (token.end.max(0.0) * 1000.0).round() as u64,
-                            text: text.to_owned(),
+                            text,
                         })
                     })
                     .collect(),
-                text: Text::parse(result.text),
+                text: Text::parse(crate::filler::strip(&result.text)),
             })
             .map_err(|error| EngineError::Inference(error.to_string()))
     }
