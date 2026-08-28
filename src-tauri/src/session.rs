@@ -124,6 +124,9 @@ pub enum Msg {
     ShotTaken(Instant),
     ClipStarted(Instant),
     ClipEnded(Instant),
+    /// The take just opened is locked: it stays live with nothing on the
+    /// trigger, until a tap of the trigger finishes it or Esc cancels it.
+    TakeLocked,
     Cancel,
     Quit,
     RetryEngine,
@@ -481,8 +484,12 @@ impl Controller {
                 self.show(Activity::Recording);
                 state
             }
+            (state @ Session::Dictating { .. }, Msg::TakeLocked) => {
+                self.show(Activity::Locked);
+                state
+            }
             (state @ Session::Dictating { .. }, Msg::CaptureEnded) => {
-                self.show(Activity::Listening);
+                self.show(self.take_activity());
                 state
             }
             (
@@ -584,6 +591,7 @@ impl Controller {
                     let _ = mic.disarm(armed);
                 }
                 self.engine.discard();
+                crate::trigger::request_unlock();
                 if let Some(clip) = active_clip {
                     clip.active.abort();
                 }
@@ -870,6 +878,16 @@ impl Controller {
         }
     }
 
+    /// What a take rests on once a capture inside it ends. A locked take goes
+    /// back to looking locked, not to looking like a finger is on the trigger.
+    fn take_activity(&self) -> Activity {
+        if crate::trigger::take_is_locked() {
+            Activity::Locked
+        } else {
+            Activity::Listening
+        }
+    }
+
     fn deadline(&self) -> Option<Instant> {
         match &self.session {
             Session::Dictating { .. } => Some(Instant::now() + RELEASE_POLL),
@@ -888,7 +906,11 @@ impl Controller {
 
     fn expire(&mut self) {
         if let Session::Dictating { .. } = &self.session {
-            let release = !crate::trigger::dictation_gesture_held();
+            // A locked take has no key left to poll, so the watchdog stands
+            // down for it. The flag is cleared by the event tap itself if the
+            // tap dies, and the take then ends here as it always would.
+            let release =
+                !crate::trigger::dictation_gesture_held() && !crate::trigger::take_is_locked();
             if release {
                 self.step(Msg::MainReleased);
             } else if let Session::Dictating { armed, fed, .. } = &mut self.session {
@@ -1111,6 +1133,7 @@ impl Controller {
                     let _ = mic.disarm(armed);
                 }
                 self.engine.discard();
+                crate::trigger::request_unlock();
                 if let Some(clip) = active_clip {
                     clip.active.abort();
                 }
@@ -1229,6 +1252,7 @@ pub fn msg_label(message: &Msg) -> &'static str {
         Msg::ShotTaken(_) => "ShotTaken",
         Msg::ClipStarted(_) => "ClipStarted",
         Msg::ClipEnded(_) => "ClipEnded",
+        Msg::TakeLocked => "TakeLocked",
         Msg::Cancel => "Cancel",
         Msg::Quit => "Quit",
         Msg::RetryEngine => "RetryEngine",

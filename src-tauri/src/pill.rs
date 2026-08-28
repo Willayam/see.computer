@@ -17,6 +17,9 @@ pub enum PillEvent {
 #[serde(tag = "activity", rename_all = "kebab-case")]
 pub enum Activity {
     Listening,
+    /// Listening with nothing on the trigger. Its own state because a live mic
+    /// the user is not touching must never look like an idle one.
+    Locked,
     Transcribing,
     Recording,
     Finalizing,
@@ -151,13 +154,17 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
                 let _ = dispatcher.run_on_main_thread(move || move_to_cursor_monitor(&window));
             }
             levels_on.store(
-                matches!(current, Some(Activity::Listening | Activity::Recording)),
+                matches!(
+                    current,
+                    Some(Activity::Listening | Activity::Locked | Activity::Recording)
+                ),
                 std::sync::atomic::Ordering::Relaxed,
             );
             let armed = matches!(
                 current,
                 Some(
                     Activity::Listening
+                        | Activity::Locked
                         | Activity::Transcribing
                         | Activity::Recording
                         | Activity::Finalizing

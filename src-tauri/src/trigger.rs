@@ -26,6 +26,11 @@ const TAP_WINDOW: Duration = Duration::from_millis(250);
 /// breaking it. The same fork as [`TAP_WINDOW`] read on the other edge, and it
 /// gets its own name because there is no law that the two have to match.
 const BLIP_WINDOW: Duration = Duration::from_millis(250);
+/// Trigger up for less than this between two taps locks the take the second one
+/// opens. Shorter than the windows above because a double tap is one deliberate
+/// motion, and every millisecond here is a millisecond in which an ordinary tap
+/// followed by an ordinary hold gets mistaken for it.
+const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -49,12 +54,14 @@ impl Trigger {
     pub fn gestures(&self) -> String {
         match self {
             Self::LeftOption => {
-                "Hold Left Option to talk · hold Left Option+Shift to record".to_owned()
+                "Hold Left Option to talk · double tap to lock · hold Left Option+Shift to record"
+                    .to_owned()
             }
             Self::RightOption => {
-                "Hold Right Option to talk · hold Right Option+Shift to record".to_owned()
+                "Hold Right Option to talk · double tap to lock · hold Right Option+Shift to record"
+                    .to_owned()
             }
-            Self::Fn => "Hold Fn to talk · hold Fn+Shift to record".to_owned(),
+            Self::Fn => "Hold Fn to talk · double tap to lock · hold Fn+Shift to record".to_owned(),
             Self::Chord => {
                 "Hold Option+Space to talk · hold Cmd+Shift+Option+Space to record".to_owned()
             }
@@ -101,10 +108,45 @@ enum Capture {
     },
 }
 
+/// Whether a take is running, and if so what is holding it open.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Take {
+    Off,
+    /// Under the finger. Ends when the trigger comes up.
+    Held,
+    /// Open with no finger on the trigger, so nothing but a deliberate gesture
+    /// ends it.
+    Locked(Locked),
+}
+
+/// What the trigger is doing during a locked take. It is no longer the thing
+/// keeping the take alive, so it is free to mean something else: a tap ends the
+/// take, and holding it reopens the camera.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Locked {
+    Up,
+    /// Down, and the tap/hold fork has not resolved yet.
+    Pressed(Instant),
+    /// Down past [`HOLD_THRESHOLD`], so Shift is the camera exactly as it is
+    /// inside a held take.
+    Camera,
+    /// Down, but meaning nothing: the press turned out to be the modifier of
+    /// an ordinary keyboard shortcut. Its release ends nothing.
+    Inert,
+}
+
 pub struct Decoder {
     trigger: Trigger,
     arming_since: Option<Instant>,
-    dictating: bool,
+    take: Take,
+    /// A trigger press that came up before [`HOLD_THRESHOLD`], so it opened no
+    /// take. A second one inside [`DOUBLE_TAP_WINDOW`] locks.
+    tapped_at: Option<Instant>,
+    /// The press now arming followed a tap close enough to be its other half,
+    /// so releasing it early locks instead of doing nothing. Held past the
+    /// threshold it is an ordinary hold and this goes away.
+    arm_locks: bool,
+    shift_held: bool,
     capture: Capture,
 }
 
@@ -119,7 +161,10 @@ impl Decoder {
         Self {
             trigger,
             arming_since: None,
-            dictating: false,
+            take: Take::Off,
+            tapped_at: None,
+            arm_locks: false,
+            shift_held: false,
             capture: Capture::Off,
         }
     }
@@ -127,7 +172,10 @@ impl Decoder {
     pub fn set_trigger(&mut self, trigger: Trigger) {
         self.trigger = trigger;
         self.arming_since = None;
-        self.dictating = false;
+        self.take = Take::Off;
+        self.tapped_at = None;
+        self.arm_locks = false;
+        self.shift_held = false;
         self.capture = Capture::Off;
     }
 
@@ -142,6 +190,12 @@ impl Decoder {
                 if !self.dictating() {
                     self.arming_since = None;
                 }
+                // The trigger is down during a locked take and a key went with
+                // it, so it was the modifier of a shortcut. Neither stop nor
+                // camera: let its release pass without meaning.
+                if let Take::Locked(Locked::Pressed(_)) = self.take {
+                    self.take = Take::Locked(Locked::Inert);
+                }
                 Vec::new()
             }
             Input::Tick => self.tick(now),
@@ -150,12 +204,32 @@ impl Decoder {
     }
 
     pub fn dictating(&self) -> bool {
-        self.dictating
+        !matches!(self.take, Take::Off)
+    }
+
+    /// Whether the take is being held open with nothing on the trigger.
+    pub fn locked(&self) -> bool {
+        matches!(self.take, Take::Locked(_))
+    }
+
+    /// Drop a locked take because something outside the gesture ended it. The
+    /// held take is left alone: its own key-up is still coming, and the release
+    /// watchdog still covers it if it never does.
+    pub fn unlock(&mut self) {
+        if !self.locked() {
+            return;
+        }
+        self.take = Take::Off;
+        self.capture = Capture::Off;
+        self.arming_since = None;
+        self.arm_locks = false;
+        self.tapped_at = None;
     }
 
     fn tick(&mut self, now: Instant) -> Vec<Msg> {
         let mut out = Vec::new();
         out.extend(self.maybe_begin_dictation(now));
+        out.extend(self.maybe_open_camera(now, self.shift_held));
         out.extend(self.expire_capture(now));
         out
     }
@@ -169,24 +243,141 @@ impl Decoder {
         // camera inside a session, not a separate gesture that replaces one.
         let session_held = mod_held && !other_held;
 
+        let out = match self.take {
+            Take::Locked(_) => self.locked_flags(session_held, shift_held, now),
+            _ => self.open_flags(session_held, shift_held, now),
+        };
+        // Stored last, so the handlers above can still see the Shift that was
+        // down before this edge as well as the one after it.
+        self.shift_held = shift_held;
+        out
+    }
+
+    /// The held take, unchanged except that a press which comes up before the
+    /// threshold is remembered, because a second one right after it locks.
+    fn open_flags(&mut self, session_held: bool, shift_held: bool, now: Instant) -> Vec<Msg> {
         let mut out = Vec::new();
         if !session_held {
+            if let Some(since) = self.arming_since {
+                if now.saturating_duration_since(since) < HOLD_THRESHOLD {
+                    if self.arm_locks {
+                        return self.lock();
+                    }
+                    self.tapped_at = Some(now);
+                }
+            }
+            self.arm_locks = false;
             self.arming_since = None;
             out.extend(self.close_capture(now));
             if self.dictating() {
-                self.dictating = false;
+                self.take = Take::Off;
                 out.push(Msg::MainReleased);
+                // A hold that ran its course is not the first half of anything.
+                self.tapped_at = None;
             }
             return out;
         }
 
         if !self.dictating() && self.arming_since.is_none() {
+            self.arm_locks = self.second_tap(now);
             self.arming_since = Some(now);
         }
         out.extend(self.maybe_begin_dictation(now));
         out.extend(self.expire_capture(now));
         out.extend(self.shift_edge(shift_held, now));
         out
+    }
+
+    /// Trigger edges during a locked take. The take itself is not listening to
+    /// them any more, so they only ever end it or work the camera.
+    fn locked_flags(&mut self, session_held: bool, shift_held: bool, now: Instant) -> Vec<Msg> {
+        // A press that outran the tick loop is still a hold, so resolve it
+        // before reading this edge rather than letting the camera it should
+        // have opened fall through the gap. Shift counts as down if it was down
+        // on either side of this edge, because a Shift coming up right now was
+        // held for the whole of the press that just became the camera.
+        let mut out = self.maybe_open_camera(now, self.shift_held || shift_held);
+        let Take::Locked(locked) = self.take else {
+            return out;
+        };
+        let next = match (locked, session_held) {
+            (Locked::Up, true) => Locked::Pressed(now),
+            (Locked::Pressed(at), false) => {
+                if now.saturating_duration_since(at) < HOLD_THRESHOLD {
+                    return self.end_locked();
+                }
+                Locked::Up
+            }
+            (Locked::Camera, false) => {
+                out.extend(self.close_capture(now));
+                Locked::Up
+            }
+            (Locked::Inert, false) => Locked::Up,
+            (held, _) => held,
+        };
+        self.take = Take::Locked(next);
+        out.extend(self.expire_capture(now));
+        if matches!(next, Locked::Camera) {
+            out.extend(self.shift_edge(shift_held, now));
+        }
+        out
+    }
+
+    /// A bare tap close enough behind this press to be its other half. Consumed
+    /// either way, so one tap cannot arm two locks.
+    fn second_tap(&mut self, now: Instant) -> bool {
+        self.tapped_at
+            .take()
+            .is_some_and(|at| now.saturating_duration_since(at) < DOUBLE_TAP_WINDOW)
+    }
+
+    /// The second tap opens the take and locks it in one step, on the release
+    /// rather than the press. Both halves have to be taps, so a stray tap
+    /// followed by an ordinary hold gives an ordinary held take, and the hold
+    /// path never waits on anything.
+    fn lock(&mut self) -> Vec<Msg> {
+        self.arming_since = None;
+        self.arm_locks = false;
+        self.tapped_at = None;
+        self.take = Take::Locked(Locked::Up);
+        self.capture = Capture::Off;
+        vec![Msg::MainPressed, Msg::TakeLocked]
+    }
+
+    /// One tap of the trigger is the way out. It finishes the take and pastes,
+    /// the same ending a held take gets when the finger comes up.
+    fn end_locked(&mut self) -> Vec<Msg> {
+        self.take = Take::Off;
+        self.capture = Capture::Off;
+        self.arming_since = None;
+        self.arm_locks = false;
+        // The tap that ended this take must not be read as the opening half of
+        // a double tap that immediately locks another one.
+        self.tapped_at = None;
+        vec![Msg::MainReleased]
+    }
+
+    /// The trigger held back down during a locked take reopens the camera, so
+    /// Shift means what it means inside a held take. Seeded from the live Shift
+    /// state rather than whatever the capture machine last saw, because Shift
+    /// during a locked take is ordinary typing and leaves no usable trail.
+    fn maybe_open_camera(&mut self, now: Instant, shift_down: bool) -> Vec<Msg> {
+        let Take::Locked(Locked::Pressed(at)) = self.take else {
+            return Vec::new();
+        };
+        if now.saturating_duration_since(at) < HOLD_THRESHOLD {
+            return Vec::new();
+        }
+        self.take = Take::Locked(Locked::Camera);
+        if !shift_down {
+            self.capture = Capture::Off;
+            return Vec::new();
+        }
+        // Stamped here rather than at the Shift that happens to be down: a
+        // capture inside a locked take cannot start before the camera did, and
+        // that Shift may have been holding a text selection for a minute.
+        self.capture = Capture::Pending { pressed: now };
+        vec![Msg::CaptureStarted]
     }
 
     /// The Shift edge itself, once [`Decoder::expire_capture`] has aged out any
@@ -253,10 +444,18 @@ impl Decoder {
             .collect()
     }
 
-    /// Captures only exist inside a session. A Shift brushed against a trigger
-    /// that never armed is not a screenshot.
+    /// Captures only exist while the camera is open: anywhere inside a held
+    /// take, and inside a locked take only while the trigger is pressed back
+    /// down. A Shift brushed against a trigger that never armed is not a
+    /// screenshot, and neither is the Shift you type a capital letter with two
+    /// minutes into a locked take.
     fn live(&self, msg: Msg) -> Option<Msg> {
-        self.dictating.then_some(msg)
+        let open = match self.take {
+            Take::Off => false,
+            Take::Held => true,
+            Take::Locked(locked) => matches!(locked, Locked::Camera),
+        };
+        open.then_some(msg)
     }
 
     fn maybe_begin_dictation(&mut self, now: Instant) -> Vec<Msg> {
@@ -267,7 +466,8 @@ impl Decoder {
             return Vec::new();
         }
         self.arming_since = None;
-        self.dictating = true;
+        self.arm_locks = false;
+        self.take = Take::Held;
         let mut messages = vec![Msg::MainPressed];
         if !matches!(self.capture, Capture::Off) {
             messages.push(Msg::CaptureStarted);
@@ -277,16 +477,22 @@ impl Decoder {
 }
 
 static DICT_PHYSICALLY_HELD: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+static TAKE_LOCKED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+static UNLOCK_REQUESTED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
 /// The watcher runs on a detached thread for the life of the process; its
 /// physical-key state lives in [`DICT_PHYSICALLY_HELD`] for the release
 /// watchdog to read.
 pub fn spawn_watcher(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>) {
     let dict_physically_held = Arc::new(AtomicBool::new(false));
+    let locked = Arc::new(AtomicBool::new(false));
+    let unlock = Arc::new(AtomicBool::new(false));
     let _ = DICT_PHYSICALLY_HELD.set(dict_physically_held.clone());
+    let _ = TAKE_LOCKED.set(locked.clone());
+    let _ = UNLOCK_REQUESTED.set(unlock.clone());
     if let Err(error) = std::thread::Builder::new()
         .name("see-trigger-tap".to_owned())
-        .spawn(move || watcher_thread(trigger, inbox, dict_physically_held))
+        .spawn(move || watcher_thread(trigger, inbox, dict_physically_held, locked, unlock))
     {
         eprintln!("could not start modifier watcher: {error}");
     }
@@ -299,21 +505,62 @@ pub fn dictation_gesture_held() -> bool {
             .is_some_and(|held| held.load(Ordering::SeqCst))
 }
 
-fn watcher_thread(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<AtomicBool>) {
+/// Whether a take is locked open with nothing on the trigger. The controller's
+/// release watchdog reads this, because a locked take has no key left to poll.
+///
+/// Only the live tap sets it, and every path out of the tap clears it. A lock
+/// is worth exactly as much as the event tap that can still hear the tap that
+/// ends it, so losing the tap drops the lock and lets the watchdog finish the
+/// take rather than leaving a mic open that nothing can close.
+pub fn take_is_locked() -> bool {
+    TAKE_LOCKED
+        .get()
+        .is_some_and(|locked| locked.load(Ordering::SeqCst))
+}
+
+/// Tell the decoder to let go of any lock. The controller calls this when a
+/// take dies by a route the decoder never saw, Esc above all, so a cancelled
+/// take cannot leave a lock standing over the take after it.
+pub fn request_unlock() {
+    if let Some(unlock) = UNLOCK_REQUESTED.get() {
+        unlock.store(true, Ordering::SeqCst);
+    }
+}
+
+fn watcher_thread(
+    trigger: Arc<Mutex<Trigger>>,
+    inbox: Sender<Msg>,
+    held: Arc<AtomicBool>,
+    locked: Arc<AtomicBool>,
+    unlock: Arc<AtomicBool>,
+) {
     crate::qos::apply(crate::qos::Class::Keystroke);
+    // Every exit here drops the lock as well as the key state. The decoder that
+    // knew about the lock died with the tap, so nothing is left that could hear
+    // the gesture ending it.
+    let clear = || {
+        held.store(false, Ordering::SeqCst);
+        locked.store(false, Ordering::SeqCst);
+    };
     loop {
         if !current_trigger(&trigger).uses_tap() {
-            held.store(false, Ordering::SeqCst);
+            clear();
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
-        match run_tap(trigger.clone(), inbox.clone(), held.clone()) {
+        match run_tap(
+            trigger.clone(),
+            inbox.clone(),
+            held.clone(),
+            locked.clone(),
+            unlock.clone(),
+        ) {
             TapExit::PermissionDenied => {
-                held.store(false, Ordering::SeqCst);
+                clear();
                 std::thread::sleep(Duration::from_secs(5));
             }
             TapExit::Rebuild => {
-                held.store(false, Ordering::SeqCst);
+                clear();
                 std::thread::sleep(Duration::from_millis(750));
             }
         }
@@ -325,7 +572,13 @@ enum TapExit {
     Rebuild,
 }
 
-fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<AtomicBool>) -> TapExit {
+fn run_tap(
+    trigger: Arc<Mutex<Trigger>>,
+    inbox: Sender<Msg>,
+    held: Arc<AtomicBool>,
+    locked: Arc<AtomicBool>,
+    unlock: Arc<AtomicBool>,
+) -> TapExit {
     use core_foundation::runloop::{
         kCFRunLoopCommonModes, kCFRunLoopDefaultMode, CFRunLoop, CFRunLoopRunResult,
     };
@@ -340,6 +593,7 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<AtomicBoo
     let callback_trigger = trigger.clone();
     let callback_inbox = inbox.clone();
     let callback_held = held.clone();
+    let callback_locked = locked.clone();
     let callback_reenable = needs_reenable.clone();
     let tap = match CGEventTap::new(
         CGEventTapLocation::HID,
@@ -350,6 +604,7 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<AtomicBoo
             match event_type {
                 CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
                     callback_held.store(false, Ordering::SeqCst);
+                    callback_locked.store(false, Ordering::SeqCst);
                     callback_reenable.store(true, Ordering::SeqCst);
                     CFRunLoop::get_current().stop();
                 }
@@ -363,6 +618,7 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<AtomicBoo
                     let message = with_decoder(&callback_decoder, selected, |decoder| {
                         decoder.step(Input::Flags(flags), Instant::now())
                     });
+                    publish_lock(&callback_decoder, &callback_locked);
                     send_message(&callback_inbox, message);
                 }
                 CGEventType::KeyDown => {
@@ -370,6 +626,7 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<AtomicBoo
                     let message = with_decoder(&callback_decoder, selected, |decoder| {
                         decoder.step(Input::KeyDown, Instant::now())
                     });
+                    publish_lock(&callback_decoder, &callback_locked);
                     send_message(&callback_inbox, message);
                 }
                 _ => {}
@@ -393,6 +650,7 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<AtomicBoo
         let selected = current_trigger(&trigger);
         if !selected.uses_tap() {
             held.store(false, Ordering::SeqCst);
+            locked.store(false, Ordering::SeqCst);
             return TapExit::Rebuild;
         }
         // The event stream crosses the arm threshold and reports release; the
@@ -401,9 +659,16 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<AtomicBoo
         // the poll instead would depend on cross-process HID state the poll
         // cannot always see.
         held.store(physical_modifier_held(selected), Ordering::SeqCst);
+        if unlock.swap(false, Ordering::SeqCst) {
+            with_decoder(&decoder, selected, |decoder| {
+                decoder.unlock();
+                Vec::new()
+            });
+        }
         let message = with_decoder(&decoder, selected, |decoder| {
             decoder.step(Input::Tick, Instant::now())
         });
+        publish_lock(&decoder, &locked);
         send_message(&inbox, message);
 
         if needs_reenable.swap(false, Ordering::SeqCst) || !event_tap_is_enabled(&tap) {
@@ -430,6 +695,16 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, held: Arc<AtomicBoo
             return TapExit::Rebuild;
         }
     }
+}
+
+/// Mirrors the decoder's lock into the flag the controller polls. Called after
+/// every step, so the watchdog never reads a lock the decoder has let go of.
+fn publish_lock(decoder: &Mutex<Decoder>, locked: &AtomicBool) {
+    let held = match decoder.lock() {
+        Ok(decoder) => decoder.locked(),
+        Err(poisoned) => poisoned.into_inner().locked(),
+    };
+    locked.store(held, Ordering::SeqCst);
 }
 
 fn with_decoder(
@@ -901,5 +1176,318 @@ mod tests {
             out(&decoder.step(Input::Flags(SHIFTED | COMMAND), after(start, 2_000))),
             ["ClipEnded", "CaptureEnded", "MainReleased"]
         );
+    }
+
+    /// A double tap of the trigger, and the clock it locked on.
+    fn locked() -> (Decoder, Instant) {
+        let start = Instant::now();
+        let mut decoder = Decoder::new(Trigger::LeftOption);
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), start)).is_empty());
+        assert!(out(&decoder.step(Input::Flags(0), after(start, 90))).is_empty());
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), after(start, 200))).is_empty());
+        assert_eq!(
+            out(&decoder.step(Input::Flags(0), after(start, 290))),
+            ["MainPressed", "TakeLocked"]
+        );
+        assert!(decoder.dictating());
+        assert!(decoder.locked());
+        (decoder, start)
+    }
+
+    #[test]
+    fn a_double_tap_locks_a_take_open() {
+        let (mut decoder, start) = locked();
+        // Nothing on the trigger, and the take runs on regardless.
+        for millis in [400, 1_000, 30_000, 600_000] {
+            assert!(out(&decoder.step(Input::Tick, after(start, millis))).is_empty());
+        }
+        assert!(decoder.dictating());
+        assert!(decoder.locked());
+    }
+
+    #[test]
+    fn a_tap_ends_a_locked_take_and_pastes() {
+        let (mut decoder, start) = locked();
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), after(start, 5_000))).is_empty());
+        assert!(out(&decoder.step(Input::Tick, after(start, 5_050))).is_empty());
+        assert_eq!(
+            out(&decoder.step(Input::Flags(0), after(start, 5_100))),
+            ["MainReleased"],
+            "the same ending a held take gets when the finger comes up"
+        );
+        assert!(!decoder.dictating());
+        assert!(!decoder.locked());
+    }
+
+    #[test]
+    fn the_tap_that_ends_a_locked_take_does_not_start_another() {
+        let (mut decoder, start) = locked();
+        decoder.step(Input::Flags(LEFT_OPTION), after(start, 5_000));
+        assert_eq!(
+            out(&decoder.step(Input::Flags(0), after(start, 5_100))),
+            ["MainReleased"]
+        );
+        // One more tap inside the window would be a double tap if the ending
+        // tap counted as its first half. It does not.
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), after(start, 5_200))).is_empty());
+        assert!(out(&decoder.step(Input::Flags(0), after(start, 5_280))).is_empty());
+        assert!(!decoder.locked());
+        assert!(!decoder.dictating());
+    }
+
+    #[test]
+    fn a_tap_then_a_hold_is_an_ordinary_take() {
+        let start = Instant::now();
+        let mut decoder = Decoder::new(Trigger::LeftOption);
+        decoder.step(Input::Flags(LEFT_OPTION), start);
+        assert!(out(&decoder.step(Input::Flags(0), after(start, 90))).is_empty());
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), after(start, 200))).is_empty());
+        // Held past the threshold, so the second half was never a tap.
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 400))),
+            ["MainPressed"]
+        );
+        assert!(!decoder.locked());
+        assert_eq!(
+            out(&decoder.step(Input::Flags(0), after(start, 3_000))),
+            ["MainReleased"]
+        );
+    }
+
+    #[test]
+    fn two_taps_too_far_apart_lock_nothing() {
+        let start = Instant::now();
+        let mut decoder = Decoder::new(Trigger::LeftOption);
+        decoder.step(Input::Flags(LEFT_OPTION), start);
+        assert!(out(&decoder.step(Input::Flags(0), after(start, 90))).is_empty());
+        // 300 ms after the first tap came up is one millisecond too late.
+        decoder.step(Input::Flags(LEFT_OPTION), after(start, 390));
+        assert!(out(&decoder.step(Input::Flags(0), after(start, 450))).is_empty());
+        assert!(!decoder.locked());
+        assert!(!decoder.dictating());
+    }
+
+    #[test]
+    fn the_release_of_a_held_take_is_not_half_of_a_double_tap() {
+        let (mut decoder, start) = dictating();
+        assert_eq!(
+            out(&decoder.step(Input::Flags(0), after(start, 3_000))),
+            ["MainReleased"]
+        );
+        // A tap right behind a real take must not lock the next thing.
+        decoder.step(Input::Flags(LEFT_OPTION), after(start, 3_080));
+        assert!(out(&decoder.step(Input::Flags(0), after(start, 3_150))).is_empty());
+        assert!(!decoder.locked());
+    }
+
+    #[test]
+    fn shift_during_a_locked_take_is_ordinary_typing() {
+        let (mut decoder, start) = locked();
+        // Capital letters, shift-clicks, a long shift-drag. None of it is a
+        // capture, because the trigger is not down.
+        assert!(out(&decoder.step(Input::Flags(LEFT_SHIFT), after(start, 1_000))).is_empty());
+        assert!(out(&decoder.step(Input::Flags(0), after(start, 1_050))).is_empty());
+        assert!(out(&decoder.step(Input::Flags(LEFT_SHIFT), after(start, 2_000))).is_empty());
+        assert!(out(&decoder.step(Input::Tick, after(start, 2_400))).is_empty());
+        assert!(out(&decoder.step(Input::Flags(0), after(start, 4_000))).is_empty());
+        assert!(out(&decoder.step(Input::Tick, after(start, 4_400))).is_empty());
+        assert!(decoder.dictating());
+        assert!(decoder.locked());
+    }
+
+    #[test]
+    fn holding_the_trigger_reopens_the_camera_inside_a_locked_take() {
+        let (mut decoder, start) = locked();
+        decoder.step(Input::Flags(LEFT_OPTION), after(start, 1_000));
+        assert!(out(&decoder.step(Input::Tick, after(start, 1_200))).is_empty());
+        // Past the threshold the trigger is a camera again, not a stop.
+        assert_eq!(
+            out(&decoder.step(Input::Flags(SHIFTED), after(start, 1_300))),
+            ["CaptureStarted"]
+        );
+        let taken = decoder.step(Input::Flags(LEFT_OPTION), after(start, 1_400));
+        assert_eq!(out(&taken), ["ShotTaken", "CaptureEnded"]);
+        assert_eq!(at(&taken, 0), after(start, 1_300));
+        // Letting go leaves the take exactly where it was.
+        assert!(out(&decoder.step(Input::Flags(0), after(start, 1_500))).is_empty());
+        assert!(decoder.dictating());
+        assert!(decoder.locked());
+    }
+
+    #[test]
+    fn a_clip_records_inside_a_locked_take() {
+        let (mut decoder, start) = locked();
+        decoder.step(Input::Flags(SHIFTED), after(start, 1_000));
+        // Shift was already down when the camera opened, so the clip counts
+        // from the moment the camera opened, not from the stray Shift.
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 1_200))),
+            ["CaptureStarted"]
+        );
+        let started = decoder.step(Input::Tick, after(start, 1_500));
+        assert_eq!(out(&started), ["ClipStarted"]);
+        assert_eq!(at(&started, 0), after(start, 1_200));
+        // Dropping the trigger closes the clip and leaves the take running.
+        let ended = decoder.step(Input::Flags(0), after(start, 6_000));
+        assert_eq!(out(&ended), ["ClipEnded", "CaptureEnded"]);
+        assert!(decoder.dictating());
+        assert!(decoder.locked());
+    }
+
+    #[test]
+    fn the_trigger_as_a_shortcut_modifier_does_not_end_a_locked_take() {
+        let (mut decoder, start) = locked();
+        decoder.step(Input::Flags(LEFT_OPTION), after(start, 1_000));
+        // Option+E, not a stop and not a camera.
+        assert!(out(&decoder.step(Input::KeyDown, after(start, 1_040))).is_empty());
+        assert!(out(&decoder.step(Input::Flags(0), after(start, 1_090))).is_empty());
+        assert!(decoder.dictating());
+        assert!(decoder.locked());
+    }
+
+    #[test]
+    fn blocking_modifiers_do_not_end_a_locked_take() {
+        let (mut decoder, start) = locked();
+        // Cmd+Tab, Cmd+C and friends all land during a hands-free take.
+        for (millis, flags) in [
+            (1_000, COMMAND),
+            (1_100, 0),
+            (2_000, CONTROL),
+            (2_100, 0),
+            (3_000, LEFT_OPTION | COMMAND),
+            (3_100, 0),
+        ] {
+            assert!(out(&decoder.step(Input::Flags(flags), after(start, millis))).is_empty());
+        }
+        assert!(decoder.dictating());
+        assert!(decoder.locked());
+    }
+
+    #[test]
+    fn a_locked_camera_gives_way_to_a_blocking_modifier_but_keeps_the_take() {
+        let (mut decoder, start) = locked();
+        decoder.step(Input::Flags(LEFT_OPTION), after(start, 1_000));
+        decoder.step(Input::Tick, after(start, 1_200));
+        decoder.step(Input::Flags(SHIFTED), after(start, 1_300));
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 1_600))),
+            ["ClipStarted"]
+        );
+        assert_eq!(
+            out(&decoder.step(Input::Flags(SHIFTED | COMMAND), after(start, 2_000))),
+            ["ClipEnded", "CaptureEnded"],
+            "the clip closes, the take does not"
+        );
+        assert!(decoder.dictating());
+        assert!(decoder.locked());
+    }
+
+    #[test]
+    fn every_tap_trigger_can_be_double_tapped() {
+        for (trigger, flag) in [
+            (Trigger::LeftOption, LEFT_OPTION),
+            (Trigger::RightOption, RIGHT_OPTION),
+            (Trigger::Fn, FN),
+        ] {
+            let start = Instant::now();
+            let mut decoder = Decoder::new(trigger);
+            decoder.step(Input::Flags(flag), start);
+            decoder.step(Input::Flags(0), after(start, 90));
+            decoder.step(Input::Flags(flag), after(start, 200));
+            assert_eq!(
+                out(&decoder.step(Input::Flags(0), after(start, 290))),
+                ["MainPressed", "TakeLocked"],
+                "{trigger:?} must lock like any other"
+            );
+            assert!(decoder.locked());
+        }
+    }
+
+    #[test]
+    fn the_legacy_chord_trigger_never_locks() {
+        let start = Instant::now();
+        let mut decoder = Decoder::new(Trigger::Chord);
+        for (millis, flags) in [(0, LEFT_OPTION), (90, 0), (200, LEFT_OPTION), (290, 0)] {
+            assert!(out(&decoder.step(Input::Flags(flags), after(start, millis))).is_empty());
+        }
+        assert!(!decoder.locked());
+        assert!(!decoder.dictating());
+    }
+
+    #[test]
+    fn a_slow_tick_still_opens_the_camera_inside_a_locked_take() {
+        let (mut decoder, start) = locked();
+        // Trigger and Shift go down together and no tick lands for 400 ms. The
+        // press was a hold either way, so the camera opens on this edge rather
+        // than being lost, and the Shift under it is a capture and not typing.
+        decoder.step(Input::Flags(SHIFTED), after(start, 1_000));
+        let late = decoder.step(Input::Flags(LEFT_OPTION), after(start, 1_400));
+        assert_eq!(out(&late), ["CaptureStarted", "ShotTaken", "CaptureEnded"]);
+        assert_eq!(
+            at(&late, 1),
+            after(start, 1_400),
+            "a capture cannot start before the camera it was taken through"
+        );
+        assert!(decoder.dictating());
+        assert!(decoder.locked());
+    }
+
+    #[test]
+    fn a_shift_already_down_when_the_camera_opens_starts_there_not_earlier() {
+        let (mut decoder, start) = locked();
+        // Shift has been holding a text selection for a minute. Pressing the
+        // trigger opens the camera now; it does not backdate a clip to it.
+        decoder.step(Input::Flags(LEFT_SHIFT), after(start, 1_000));
+        assert!(out(&decoder.step(Input::Tick, after(start, 40_000))).is_empty());
+        decoder.step(Input::Flags(SHIFTED), after(start, 60_000));
+        assert_eq!(
+            out(&decoder.step(Input::Tick, after(start, 60_200))),
+            ["CaptureStarted"]
+        );
+        let started = decoder.step(Input::Tick, after(start, 60_500));
+        assert_eq!(out(&started), ["ClipStarted"]);
+        assert_eq!(at(&started, 0), after(start, 60_200));
+    }
+
+    #[test]
+    fn unlocking_drops_a_locked_take_but_leaves_a_held_one() {
+        // Esc cancelled the take under the decoder, so the lock has to go with
+        // it or it would stand over whatever take comes next.
+        let (mut decoder, start) = locked();
+        decoder.unlock();
+        assert!(!decoder.locked());
+        assert!(!decoder.dictating());
+        assert!(out(&decoder.step(Input::Tick, after(start, 5_000))).is_empty());
+        // A held take keeps its own key-up and the watchdog behind it.
+        let (mut held, start) = dictating();
+        held.unlock();
+        assert!(held.dictating());
+        assert_eq!(
+            out(&held.step(Input::Flags(0), after(start, 3_000))),
+            ["MainReleased"]
+        );
+    }
+
+    #[test]
+    fn a_take_locks_again_after_one_was_cancelled() {
+        let (mut decoder, start) = locked();
+        decoder.unlock();
+        for (millis, flags) in [(1_000, LEFT_OPTION), (1_090, 0), (1_200, LEFT_OPTION)] {
+            assert!(out(&decoder.step(Input::Flags(flags), after(start, millis))).is_empty());
+        }
+        assert_eq!(
+            out(&decoder.step(Input::Flags(0), after(start, 1_290))),
+            ["MainPressed", "TakeLocked"]
+        );
+        assert!(decoder.locked());
+    }
+
+    #[test]
+    fn changing_the_trigger_drops_a_lock() {
+        let (mut decoder, start) = locked();
+        decoder.set_trigger(Trigger::Fn);
+        assert!(!decoder.locked());
+        assert!(!decoder.dictating());
+        assert!(out(&decoder.step(Input::Tick, after(start, 5_000))).is_empty());
     }
 }

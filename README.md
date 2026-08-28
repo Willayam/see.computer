@@ -2,14 +2,15 @@
 
 Ultra-fast, local-first dictation and instant video links for the Mac. Free and open source (MIT).
 
-Two gestures. That is the whole interface.
+Three gestures. That is the whole interface.
 
 | Gesture | What happens |
 |---|---|
 | Hold **Left Option**, speak, release | The spoken text is pasted at your cursor, in any app. Audio never leaves the machine. |
+| Double tap **Left Option**, speak, tap to finish | The same take, held open with nothing on the trigger. Made for long narration, where holding a key for two minutes is the thing that gets in the way. One tap of the trigger finishes it and pastes, Esc throws it away. To take a shot or a clip inside a locked take, hold the trigger again and use Shift as usual; Shift on its own is left alone, so you can still type a capital letter. |
 | Hold **Left Option+Shift**, release to stop | Records the screen and microphone while held. On release, the recording is packaged into an agent-readable take folder. The paste contains the narration in quotes, a blank line, then a tail naming the captures and the path to `take.md`. Releasing before about 0.6 seconds discards the recording. |
 
-Choose Left Option, Right Option, Fn (Globe), or the legacy Option+Space trigger from the tray. Right Option is AltGr on the Swedish keyboard layout. The recording gesture always follows the trigger: whatever key you pick, hold it with Shift to record and release to stop. The legacy Option+Space and Command+Shift+Option+Space chords are active only when the Option+Space trigger is selected.
+Choose Left Option, Right Option, Fn (Globe), or the legacy Option+Space trigger from the tray. Right Option is AltGr on the Swedish keyboard layout. The recording gesture always follows the trigger: whatever key you pick, hold it with Shift to record and release to stop, and double tap it to lock a take open. Both halves of the double tap have to be taps, so an ordinary hold is never mistaken for one and hold-to-talk starts exactly as fast as it always did. A locked take wears a lit ring around the pill, because a live microphone nobody is touching should never look like an idle one. The lock lives in the event tap that decodes the gesture: if the tap dies, the lock goes with it and the take finishes normally rather than leaving a microphone open that nothing can close. The legacy Option+Space and Command+Shift+Option+Space chords are active only when the Option+Space trigger is selected.
 
 Dictation runs NVIDIA Parakeet TDT 0.6b v3 (INT8, ONNX) on the CPU. On an M3 Max a six-second Swedish sentence comes back in about 155 ms. The model is 670 MB and downloads on first launch into `~/Library/Application Support/see.computer/models/`.
 
