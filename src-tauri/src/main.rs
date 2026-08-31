@@ -11,31 +11,30 @@ mod hotkeys;
 mod menu;
 mod mic;
 mod paste;
+mod paths;
 mod pill;
 mod qos;
+mod recents;
 mod recorder;
 mod rivals;
 mod session;
-mod share;
+mod text;
 mod tray;
 mod trigger;
 
 fn acquire_single_instance() -> std::fs::File {
     use std::os::fd::AsRawFd;
 
-    let data = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let app_dir = data.join("see.computer");
-    if let Err(error) = std::fs::create_dir_all(&app_dir) {
+    if let Err(error) = std::fs::create_dir_all(paths::app_support()) {
         eprintln!("could not create app data directory: {error}");
         std::process::exit(1);
     }
-    let path = app_dir.join("instance.lock");
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(path)
+        .open(paths::instance_lock())
         .unwrap_or_else(|error| {
             eprintln!("could not open instance lock: {error}");
             std::process::exit(1);
@@ -67,6 +66,7 @@ fn main() {
     let tray_pill_tx = pill_tx.clone();
     let config = config::Config::load();
     let trigger = std::sync::Arc::new(std::sync::Mutex::new(config.trigger));
+    let gesture = std::sync::Arc::new(trigger::Gesture::default());
     let history = history::History::start(config.history);
     let status = std::sync::Arc::new(std::sync::Mutex::new(session::EngineStatus::Loading {
         phase: engine::Phase::Downloading,
@@ -78,13 +78,13 @@ fn main() {
         session::Wiring {
             mic,
             engine: engine::Loader::Models(engine::Models::default_root()),
-            recorder: recorder::Recorder::screencapture(recorder::default_dir()),
-            share: share::Share::LocalFile,
+            recorder: recorder::Recorder::screencapture(paths::documents()),
             paste: paste::Paste::system(),
             pill: pill_tx,
             trail: session::Trail::from_env(),
             history: history.clone(),
             status: status.clone(),
+            gesture: gesture.clone(),
         },
         (tx.clone(), rx),
     );
@@ -92,6 +92,7 @@ fn main() {
     let setup_tx = tx.clone();
     let setup_watcher_tx = tx.clone();
     let setup_trigger = trigger.clone();
+    let setup_gesture = gesture;
     let setup_history = history;
     let setup_status = status;
     let setup_rivals = rivals;
@@ -103,7 +104,12 @@ fn main() {
         ))
         .setup(move |app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            pill::attach(app.handle(), pill_rx);
+            let cancel_app = app.handle().clone();
+            pill::attach(app.handle(), pill_rx, move |armed| {
+                let app = cancel_app.clone();
+                let _ =
+                    cancel_app.run_on_main_thread(move || hotkeys::set_cancel_armed(&app, armed));
+            });
             tray::install(
                 app.handle(),
                 setup_tx,
@@ -113,14 +119,8 @@ fn main() {
                 setup_status,
                 setup_rivals,
             )?;
-            let selected = *setup_trigger
-                .lock()
-                .expect("trigger mutex poisoned at startup");
-            if let Err(error) = hotkeys::set_chords_registered(app.handle(), !selected.uses_tap()) {
-                eprintln!("hotkey unavailable at startup: {error}");
-            }
             paste::accessibility_trusted(true);
-            trigger::spawn_watcher(setup_trigger, setup_watcher_tx);
+            trigger::spawn_watcher(setup_trigger, setup_watcher_tx, setup_gesture);
             Ok(())
         })
         .build(tauri::generate_context!())

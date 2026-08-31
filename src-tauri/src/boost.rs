@@ -149,16 +149,12 @@ impl Lexicon {
             return PathBuf::from(path);
         }
         const NAME: &str = "vocabulary.md";
-        let documents = dirs::document_dir()
-            .or_else(dirs::home_dir)
-            .map(|dir| dir.join("see.computer").join(NAME));
-        let support =
-            dirs::data_dir().map(|dir| dir.join("see.computer").join("history").join(NAME));
-        match (documents, support) {
-            (Some(documents), Some(support)) if !documents.exists() && support.exists() => support,
-            (Some(documents), _) => documents,
-            (None, Some(support)) => support,
-            (None, None) => PathBuf::from(NAME),
+        let documents = crate::paths::documents().join(NAME);
+        let support = crate::paths::history_fallback().join(NAME);
+        if !documents.exists() && support.exists() {
+            support
+        } else {
+            documents
         }
     }
 

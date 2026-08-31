@@ -1,10 +1,14 @@
-//! Bare-modifier gesture decoding and the macOS event-tap watcher.
+//! Bare-modifier gesture decoding, and the handle the event tap shares with
+//! the controller.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc::Sender, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::session::Msg;
+
+mod tap;
+
+pub use tap::{listen_access_granted, spawn_watcher};
 
 pub const LEFT_OPTION: u64 = 0x0000_0020;
 pub const RIGHT_OPTION: u64 = 0x0000_0040;
@@ -38,7 +42,6 @@ pub enum Trigger {
     LeftOption,
     RightOption,
     Fn,
-    Chord,
 }
 
 impl Trigger {
@@ -47,7 +50,6 @@ impl Trigger {
             Self::LeftOption => "Left Option",
             Self::RightOption => "Right Option",
             Self::Fn => "Fn (Globe)",
-            Self::Chord => "Option + Space",
         }
     }
 
@@ -62,20 +64,13 @@ impl Trigger {
                     .to_owned()
             }
             Self::Fn => "Hold Fn to talk · double tap to lock · hold Fn+Shift to record".to_owned(),
-            Self::Chord => {
-                "Hold Option+Space to talk · hold Cmd+Shift+Option+Space to record".to_owned()
-            }
         }
-    }
-
-    pub fn uses_tap(&self) -> bool {
-        !matches!(self, Self::Chord)
     }
 
     /// Whether this trigger's modifier is held. Keeps left/right apart when the
     /// device bits are present, and falls back to the generic Option flag so an
     /// event that carries only `ANY_OPTION` still matches the chosen side.
-    fn held_in(self, flags: u64) -> bool {
+    pub(super) fn held_in(self, flags: u64) -> bool {
         match self {
             Self::LeftOption => {
                 flags & LEFT_OPTION != 0 || (flags & ANY_OPTION != 0 && flags & RIGHT_OPTION == 0)
@@ -84,7 +79,6 @@ impl Trigger {
                 flags & RIGHT_OPTION != 0 || (flags & ANY_OPTION != 0 && flags & LEFT_OPTION == 0)
             }
             Self::Fn => flags & FN != 0,
-            Self::Chord => false,
         }
     }
 }
@@ -182,9 +176,6 @@ impl Decoder {
     /// One input event can resolve two things at once, because the finger that
     /// ends a clip is usually the same finger that ends the session.
     pub fn step(&mut self, input: Input, now: Instant) -> Vec<Msg> {
-        if !self.trigger.uses_tap() {
-            return Vec::new();
-        }
         match input {
             Input::KeyDown => {
                 if !self.dictating() {
@@ -476,303 +467,54 @@ impl Decoder {
     }
 }
 
-static DICT_PHYSICALLY_HELD: OnceLock<Arc<AtomicBool>> = OnceLock::new();
-static TAKE_LOCKED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
-static UNLOCK_REQUESTED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
-
-/// The watcher runs on a detached thread for the life of the process; its
-/// physical-key state lives in [`DICT_PHYSICALLY_HELD`] for the release
-/// watchdog to read.
-pub fn spawn_watcher(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>) {
-    let dict_physically_held = Arc::new(AtomicBool::new(false));
-    let locked = Arc::new(AtomicBool::new(false));
-    let unlock = Arc::new(AtomicBool::new(false));
-    let _ = DICT_PHYSICALLY_HELD.set(dict_physically_held.clone());
-    let _ = TAKE_LOCKED.set(locked.clone());
-    let _ = UNLOCK_REQUESTED.set(unlock.clone());
-    if let Err(error) = std::thread::Builder::new()
-        .name("see-trigger-tap".to_owned())
-        .spawn(move || watcher_thread(trigger, inbox, dict_physically_held, locked, unlock))
-    {
-        eprintln!("could not start modifier watcher: {error}");
-    }
-}
-
-pub fn dictation_gesture_held() -> bool {
-    crate::hotkeys::main_key_held()
-        || DICT_PHYSICALLY_HELD
-            .get()
-            .is_some_and(|held| held.load(Ordering::SeqCst))
-}
-
-/// Whether a take is locked open with nothing on the trigger. The controller's
-/// release watchdog reads this, because a locked take has no key left to poll.
+/// What the event tap knows about the physical trigger, shared with the
+/// controller's release watchdog.
 ///
-/// Only the live tap sets it, and every path out of the tap clears it. A lock
-/// is worth exactly as much as the event tap that can still hear the tap that
-/// ends it, so losing the tap drops the lock and lets the watchdog finish the
-/// take rather than leaving a mic open that nothing can close.
-pub fn take_is_locked() -> bool {
-    TAKE_LOCKED
-        .get()
-        .is_some_and(|locked| locked.load(Ordering::SeqCst))
+/// Only the live tap sets the lock, and every path out of the tap clears it. A
+/// lock is worth exactly as much as the event tap that can still hear the tap
+/// that ends it, so losing the tap drops the lock and lets the watchdog finish
+/// the take rather than leaving a mic open that nothing can close.
+#[derive(Default)]
+pub struct Gesture {
+    held: AtomicBool,
+    locked: AtomicBool,
+    unlock: AtomicBool,
 }
 
-/// Tell the decoder to let go of any lock. The controller calls this when a
-/// take dies by a route the decoder never saw, Esc above all, so a cancelled
-/// take cannot leave a lock standing over the take after it.
-pub fn request_unlock() {
-    if let Some(unlock) = UNLOCK_REQUESTED.get() {
-        unlock.store(true, Ordering::SeqCst);
-    }
-}
-
-fn watcher_thread(
-    trigger: Arc<Mutex<Trigger>>,
-    inbox: Sender<Msg>,
-    held: Arc<AtomicBool>,
-    locked: Arc<AtomicBool>,
-    unlock: Arc<AtomicBool>,
-) {
-    crate::qos::apply(crate::qos::Class::Keystroke);
-    // Every exit here drops the lock as well as the key state. The decoder that
-    // knew about the lock died with the tap, so nothing is left that could hear
-    // the gesture ending it.
-    let clear = || {
-        held.store(false, Ordering::SeqCst);
-        locked.store(false, Ordering::SeqCst);
-    };
-    loop {
-        if !current_trigger(&trigger).uses_tap() {
-            clear();
-            std::thread::sleep(Duration::from_millis(100));
-            continue;
-        }
-        match run_tap(
-            trigger.clone(),
-            inbox.clone(),
-            held.clone(),
-            locked.clone(),
-            unlock.clone(),
-        ) {
-            TapExit::PermissionDenied => {
-                clear();
-                std::thread::sleep(Duration::from_secs(5));
-            }
-            TapExit::Rebuild => {
-                clear();
-                std::thread::sleep(Duration::from_millis(750));
-            }
-        }
-    }
-}
-
-enum TapExit {
-    PermissionDenied,
-    Rebuild,
-}
-
-fn run_tap(
-    trigger: Arc<Mutex<Trigger>>,
-    inbox: Sender<Msg>,
-    held: Arc<AtomicBool>,
-    locked: Arc<AtomicBool>,
-    unlock: Arc<AtomicBool>,
-) -> TapExit {
-    use core_foundation::runloop::{
-        kCFRunLoopCommonModes, kCFRunLoopDefaultMode, CFRunLoop, CFRunLoopRunResult,
-    };
-    use core_graphics::event::{
-        CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
-        CallbackResult,
-    };
-
-    let decoder = Arc::new(Mutex::new(Decoder::new(current_trigger(&trigger))));
-    let needs_reenable = Arc::new(AtomicBool::new(false));
-    let callback_decoder = decoder.clone();
-    let callback_trigger = trigger.clone();
-    let callback_inbox = inbox.clone();
-    let callback_held = held.clone();
-    let callback_locked = locked.clone();
-    let callback_reenable = needs_reenable.clone();
-    let tap = match CGEventTap::new(
-        CGEventTapLocation::HID,
-        CGEventTapPlacement::HeadInsertEventTap,
-        CGEventTapOptions::ListenOnly,
-        vec![CGEventType::FlagsChanged, CGEventType::KeyDown],
-        move |_proxy, event_type, event| {
-            match event_type {
-                CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
-                    callback_held.store(false, Ordering::SeqCst);
-                    callback_locked.store(false, Ordering::SeqCst);
-                    callback_reenable.store(true, Ordering::SeqCst);
-                    CFRunLoop::get_current().stop();
-                }
-                CGEventType::FlagsChanged => {
-                    let selected = current_trigger(&callback_trigger);
-                    let flags = event.get_flags().bits();
-                    callback_held.store(
-                        selected.uses_tap() && selected.held_in(flags),
-                        Ordering::SeqCst,
-                    );
-                    let message = with_decoder(&callback_decoder, selected, |decoder| {
-                        decoder.step(Input::Flags(flags), Instant::now())
-                    });
-                    publish_lock(&callback_decoder, &callback_locked);
-                    send_message(&callback_inbox, message);
-                }
-                CGEventType::KeyDown => {
-                    let selected = current_trigger(&callback_trigger);
-                    let message = with_decoder(&callback_decoder, selected, |decoder| {
-                        decoder.step(Input::KeyDown, Instant::now())
-                    });
-                    publish_lock(&callback_decoder, &callback_locked);
-                    send_message(&callback_inbox, message);
-                }
-                _ => {}
-            }
-            CallbackResult::Keep
-        },
-    ) {
-        Ok(tap) => tap,
-        Err(()) => return TapExit::PermissionDenied,
-    };
-    let source = match tap.mach_port().create_runloop_source(0) {
-        Ok(source) => source,
-        Err(()) => return TapExit::Rebuild,
-    };
-    let runloop = CFRunLoop::get_current();
-    runloop.add_source(&source, unsafe { kCFRunLoopCommonModes });
-    tap.enable();
-
-    let mut reenable_failures = 0_u8;
-    loop {
-        let selected = current_trigger(&trigger);
-        if !selected.uses_tap() {
-            held.store(false, Ordering::SeqCst);
-            locked.store(false, Ordering::SeqCst);
-            return TapExit::Rebuild;
-        }
-        // The event stream crosses the arm threshold and reports release; the
-        // physical poll only feeds the session's release watchdog, which ends a
-        // dictation whose release edge the tap missed. Gating the threshold on
-        // the poll instead would depend on cross-process HID state the poll
-        // cannot always see.
-        held.store(physical_modifier_held(selected), Ordering::SeqCst);
-        if unlock.swap(false, Ordering::SeqCst) {
-            with_decoder(&decoder, selected, |decoder| {
-                decoder.unlock();
-                Vec::new()
-            });
-        }
-        let message = with_decoder(&decoder, selected, |decoder| {
-            decoder.step(Input::Tick, Instant::now())
-        });
-        publish_lock(&decoder, &locked);
-        send_message(&inbox, message);
-
-        if needs_reenable.swap(false, Ordering::SeqCst) || !event_tap_is_enabled(&tap) {
-            tap.enable();
-            std::thread::sleep(Duration::from_millis(20));
-            if event_tap_is_enabled(&tap) {
-                reenable_failures = 0;
-            } else {
-                reenable_failures = reenable_failures.saturating_add(1);
-                if reenable_failures >= 2 {
-                    return TapExit::Rebuild;
-                }
-            }
-        }
-
-        if matches!(
-            CFRunLoop::run_in_mode(
-                unsafe { kCFRunLoopDefaultMode },
-                Duration::from_millis(50),
-                true,
-            ),
-            CFRunLoopRunResult::Finished
-        ) {
-            return TapExit::Rebuild;
-        }
-    }
-}
-
-/// Mirrors the decoder's lock into the flag the controller polls. Called after
-/// every step, so the watchdog never reads a lock the decoder has let go of.
-fn publish_lock(decoder: &Mutex<Decoder>, locked: &AtomicBool) {
-    let held = match decoder.lock() {
-        Ok(decoder) => decoder.locked(),
-        Err(poisoned) => poisoned.into_inner().locked(),
-    };
-    locked.store(held, Ordering::SeqCst);
-}
-
-fn with_decoder(
-    decoder: &Mutex<Decoder>,
-    trigger: Trigger,
-    step: impl FnOnce(&mut Decoder) -> Vec<Msg>,
-) -> Vec<Msg> {
-    let mut decoder = match decoder.lock() {
-        Ok(decoder) => decoder,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if decoder.trigger != trigger {
-        decoder.set_trigger(trigger);
-    }
-    step(&mut decoder)
-}
-
-fn current_trigger(trigger: &Mutex<Trigger>) -> Trigger {
-    match trigger.lock() {
-        Ok(trigger) => *trigger,
-        Err(poisoned) => *poisoned.into_inner(),
-    }
-}
-
-fn send_message(inbox: &Sender<Msg>, messages: Vec<Msg>) {
-    for message in messages {
-        let _ = inbox.send(message);
-    }
-}
-
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGPreflightListenEventAccess() -> bool;
-    fn CGEventSourceFlagsState(
-        state: core_graphics::event_source::CGEventSourceStateID,
-    ) -> core_graphics::event::CGEventFlags;
-}
-
-/// Whether macOS will let the event tap start. The tap is the only way a
-/// bare-modifier trigger sees key state, so `false` here is hold-to-talk
-/// being silently dead.
-pub fn listen_access_granted() -> bool {
-    unsafe { CGPreflightListenEventAccess() }
-}
-
-fn physical_modifier_held(trigger: Trigger) -> bool {
-    use core_graphics::event_source::CGEventSourceStateID;
-
-    let flags = unsafe { CGEventSourceFlagsState(CGEventSourceStateID::HIDSystemState) }.bits();
-    // The source state canonicalizes left/right Option to one device bit, so it
-    // cannot confirm a specific side. The event stream already enforces the
-    // side; here we only need to know the modifier family is still physically
-    // down, so a genuine release cancels a pending arm.
-    match trigger {
-        Trigger::LeftOption | Trigger::RightOption => flags & ANY_OPTION != 0,
-        Trigger::Fn => flags & FN != 0,
-        Trigger::Chord => false,
-    }
-}
-
-fn event_tap_is_enabled(tap: &core_graphics::event::CGEventTap<'static>) -> bool {
-    use core_foundation::base::TCFType;
-
-    extern "C" {
-        fn CGEventTapIsEnabled(tap: core_foundation::mach_port::CFMachPortRef) -> bool;
+impl Gesture {
+    /// The trigger's modifier is physically down, per the tap's poll.
+    pub fn held(&self) -> bool {
+        self.held.load(Ordering::SeqCst)
     }
 
-    unsafe { CGEventTapIsEnabled(tap.mach_port().as_concrete_TypeRef()) }
+    /// A take is locked open with nothing on the trigger.
+    pub fn locked(&self) -> bool {
+        self.locked.load(Ordering::SeqCst)
+    }
+
+    /// Tell the decoder to let go of any lock. The controller calls this when a
+    /// take dies by a route the decoder never saw, Esc above all, so a cancelled
+    /// take cannot leave a lock standing over the take after it.
+    pub fn request_unlock(&self) {
+        self.unlock.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn set_held(&self, held: bool) {
+        self.held.store(held, Ordering::SeqCst);
+    }
+
+    pub(super) fn set_locked(&self, locked: bool) {
+        self.locked.store(locked, Ordering::SeqCst);
+    }
+
+    pub(super) fn take_unlock(&self) -> bool {
+        self.unlock.swap(false, Ordering::SeqCst)
+    }
+
+    pub(super) fn clear(&self) {
+        self.set_held(false);
+        self.set_locked(false);
+    }
 }
 
 #[cfg(test)]
@@ -799,14 +541,9 @@ mod tests {
 
     #[test]
     fn gestures_name_the_trigger_and_recording_pairing() {
-        for trigger in [
-            Trigger::LeftOption,
-            Trigger::RightOption,
-            Trigger::Fn,
-            Trigger::Chord,
-        ] {
+        for trigger in [Trigger::LeftOption, Trigger::RightOption, Trigger::Fn] {
             let gestures = trigger.gestures();
-            let label_key = trigger.label().replace(" (Globe)", "").replace(" + ", "+");
+            let label_key = trigger.label().replace(" (Globe)", "");
             assert!(gestures.contains("hold"));
             assert!(gestures.contains("to record"));
             assert!(gestures.contains(&label_key));
@@ -922,14 +659,6 @@ mod tests {
             out(&right.step(Input::Tick, after(start, 180))),
             ["MainPressed"]
         );
-    }
-
-    #[test]
-    fn chord_never_emits_from_decoder() {
-        let start = Instant::now();
-        let mut decoder = Decoder::new(Trigger::Chord);
-        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), start)).is_empty());
-        assert!(out(&decoder.step(Input::Tick, after(start, 500))).is_empty());
     }
 
     #[test]
@@ -1401,17 +1130,6 @@ mod tests {
             );
             assert!(decoder.locked());
         }
-    }
-
-    #[test]
-    fn the_legacy_chord_trigger_never_locks() {
-        let start = Instant::now();
-        let mut decoder = Decoder::new(Trigger::Chord);
-        for (millis, flags) in [(0, LEFT_OPTION), (90, 0), (200, LEFT_OPTION), (290, 0)] {
-            assert!(out(&decoder.step(Input::Flags(flags), after(start, millis))).is_empty());
-        }
-        assert!(!decoder.locked());
-        assert!(!decoder.dictating());
     }
 
     #[test]
