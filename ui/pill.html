@@ -70,7 +70,7 @@ function morphColor(u) {
 }
 
 /* ---------- state from the backend ---------- */
-let st = 'hidden';           // hidden | listen | transcribe | record | save
+let st = 'hidden';           // hidden | listen | lock | transcribe | record | save
 let notice = null;           // text mode: {cls, msg} replaces the chip
 let activity = null;         // last Show payload, to restore after a flash
 let hideTimer;
@@ -78,7 +78,10 @@ const N = 24;
 const bandT = new Float32Array(N);
 let avgT = 0, lastLevels = 0, silentFor = 0, lastT = 0;
 const fx = { flash: 0, shutter: 0 };
-const ACT_MAP = { listening: 'listen', transcribing: 'transcribe', recording: 'record', finalizing: 'save' };
+const ACT_MAP = { listening: 'listen', locked: 'lock', transcribing: 'transcribe', recording: 'record', finalizing: 'save' };
+/* A take is a take whether a finger is on the trigger or not: 'lock' sizes and
+   draws like 'listen', and only the ring tells them apart. */
+const taking = s => s === 'listen' || s === 'record' || s === 'lock';
 const preparing = { downloading: 'Downloading model', loading: 'Loading model', warming: 'Warming up' };
 const pillEl = document.getElementById('pill'), textEl = document.getElementById('text');
 function showText(cls, msg) { pillEl.className = 'on ' + cls; textEl.textContent = msg; }
@@ -154,7 +157,7 @@ const store = { pres: 0, sw: makeSpring(K_BOUNCY, C_BOUNCY, DIMS.armed.w),
                 sc: makeSpring(K_BOUNCY, C_BOUNCY, 0), morph: makeSpring(1, 1, 0) };
 function geom(dt) {
   const talking = avgT > TUNE.thresh;
-  const listening = st === 'listen' || st === 'record';
+  const listening = taking(st);
   const loading = st === 'transcribe' || st === 'save';
   store.pres += ((listening && talking ? 1 : 0) - store.pres) * Math.min(1, dt * (talking ? 7 : TUNE.wilt));
   const resp = TUNE.resp * (loading ? 0.72 : 1);
@@ -176,7 +179,7 @@ const cv = document.getElementById('cv');
 const dpr = window.devicePixelRatio || 2;
 cv.width = 260 * dpr; cv.height = 48 * dpr;
 const ctx = cv.getContext('2d');
-function bodyShell(cx, cy, w, h, r) {
+function bodyShell(cx, cy, w, h, r, ring) {
   ctx.save();
   ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 3;
   ctx.fillStyle = 'rgba(13,14,18,0.97)';
@@ -184,6 +187,17 @@ function bodyShell(cx, cy, w, h, r) {
   ctx.restore();
   ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2, w, h, r); ctx.stroke();
+  /* A locked take wears a lit ring for as long as it runs. The bars say the mic
+     is live; this says nothing is holding it but the lock. */
+  if (!ring) return;
+  ctx.save();
+  ctx.strokeStyle = css(ring, 0.95); ctx.lineWidth = 1.5;
+  ctx.shadowColor = css(ring, 0.7); ctx.shadowBlur = 6;
+  const o = 2.5;
+  ctx.beginPath();
+  ctx.roundRect(cx - w / 2 - o, cy - h / 2 - o, w + o * 2, h + o * 2, r + o);
+  ctx.stroke();
+  ctx.restore();
 }
 function fillGlow(x, y, w, h, r, a, col) {
   ctx.save();
@@ -196,7 +210,7 @@ let last = performance.now();
 function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
   const t = now / 1000;
-  const active = st === 'listen' || st === 'record';
+  const active = taking(st);
   if (!active) silentFor = 0;
   else if (avgT < 0.045) silentFor += dt;
   else silentFor = 0;
@@ -221,12 +235,12 @@ function frame(now) {
 }
 function draw(t, W, H, morph, pinch) {
   const cx = 130, cy = 25;
-  const wilted = (st === 'listen' || st === 'record') && silentFor > 1.2;
+  const wilted = taking(st) && silentFor > 1.2;
   // A shot whitens the sound itself rather than the chip behind it, so the
   // thing that flashes is the thing that was listening.
   const lift = SHOT_FEEDBACK === 'bars' && fx.flash > 0 ? Math.pow(fx.flash, 0.55) : 0;
   const accent = mix(wilted ? AMBER : morphColor(morph), WHITE, lift);
-  bodyShell(cx, cy, W, H, Math.min(W, H) / 2);
+  bodyShell(cx, cy, W, H, Math.min(W, H) / 2, st === 'lock' ? accent : null);
   const pad = Math.min(10, Math.max(4, W * 0.1)), innerW = Math.max(6, W - pad * 2);
   const maxBarH = H - 10, x0 = cx - innerW / 2, lineTh = 2.5;
   if (st === 'transcribe' || st === 'save') {

@@ -1,9 +1,7 @@
 //! Persistent user preferences.
 
-use std::io;
-use std::path::PathBuf;
-
 use crate::trigger::Trigger;
+use std::io;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Config {
@@ -27,27 +25,20 @@ impl Default for Config {
 
 impl Config {
     pub fn load() -> Self {
-        std::fs::read(config_path())
+        std::fs::read(crate::paths::config())
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default()
     }
 
     pub fn save(&self) -> io::Result<()> {
-        let path = config_path();
+        let path = crate::paths::config();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let bytes = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
         std::fs::write(path, bytes)
     }
-}
-
-pub fn config_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("see.computer")
-        .join("config.json")
 }
 
 #[cfg(test)]

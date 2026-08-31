@@ -20,14 +20,8 @@ pub struct Entry {
 
 impl History {
     pub fn start(enabled: bool) -> History {
-        let preferred = dirs::document_dir()
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(std::env::temp_dir)
-            .join("see.computer");
-        let fallback = dirs::data_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("see.computer")
-            .join("history");
+        let preferred = crate::paths::documents();
+        let fallback = crate::paths::history_fallback();
         let seam = std::env::var_os("SEE_COMPUTER_HISTORY_DIR").map(PathBuf::from);
         let initial = seam.clone().unwrap_or_else(|| preferred.clone());
         let root = Arc::new(Mutex::new(initial));
@@ -236,17 +230,15 @@ fn touch_today(root: &Path) -> io::Result<()> {
 }
 
 fn locked_root(root: &Mutex<PathBuf>) -> PathBuf {
-    match root.lock() {
-        Ok(root) => root.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    }
+    root.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 fn set_root(root: &Mutex<PathBuf>, path: PathBuf) {
-    match root.lock() {
-        Ok(mut root) => *root = path,
-        Err(poisoned) => *poisoned.into_inner() = path,
-    }
+    *root
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = path;
 }
 
 #[cfg(test)]

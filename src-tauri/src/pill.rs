@@ -17,6 +17,9 @@ pub enum PillEvent {
 #[serde(tag = "activity", rename_all = "kebab-case")]
 pub enum Activity {
     Listening,
+    /// Listening with nothing on the trigger. Its own state because a live mic
+    /// the user is not touching must never look like an idle one.
+    Locked,
     Transcribing,
     Recording,
     Finalizing,
@@ -30,7 +33,6 @@ pub enum Activity {
 pub enum Notice {
     NothingHeard,
     StillTranscribing,
-    RecordingInProgress,
     Cancelled,
     Loading(Option<u8>),
     TriggerChanged(String),
@@ -57,7 +59,6 @@ impl Notice {
         match self {
             Notice::NothingHeard
             | Notice::StillTranscribing
-            | Notice::RecordingInProgress
             | Notice::Cancelled
             | Notice::Loading(_)
             | Notice::TriggerChanged(_)
@@ -77,7 +78,6 @@ impl Notice {
         match self {
             Notice::NothingHeard => "Nothing heard".to_owned(),
             Notice::StillTranscribing => "Still transcribing".to_owned(),
-            Notice::RecordingInProgress => "Screen recording in progress".to_owned(),
             Notice::Cancelled => "Cancelled".to_owned(),
             Notice::Loading(Some(percent)) => format!("Model loading {percent}%"),
             Notice::Loading(None) => "Model loading".to_owned(),
@@ -112,7 +112,7 @@ enum Wire {
     Hide,
 }
 
-pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
+pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) + Send + 'static) {
     let Some(window) = app.get_webview_window("pill") else {
         return;
     };
@@ -151,27 +151,27 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>) {
                 let _ = dispatcher.run_on_main_thread(move || move_to_cursor_monitor(&window));
             }
             levels_on.store(
-                matches!(current, Some(Activity::Listening | Activity::Recording)),
+                matches!(
+                    current,
+                    Some(Activity::Listening | Activity::Locked | Activity::Recording)
+                ),
                 std::sync::atomic::Ordering::Relaxed,
             );
             let armed = matches!(
                 current,
                 Some(
                     Activity::Listening
+                        | Activity::Locked
                         | Activity::Transcribing
                         | Activity::Recording
                         | Activity::Finalizing
                 )
             );
-            let dispatcher = app.clone();
-            let main_app = app.clone();
             let armed_changed = armed != cancel_armed;
             cancel_armed = armed;
-            let _ = dispatcher.run_on_main_thread(move || {
-                if armed_changed {
-                    crate::hotkeys::set_cancel_armed(&main_app, armed);
-                }
-            });
+            if armed_changed {
+                on_armed(armed);
+            }
             let _ = app.emit_to("pill", "pill", wire);
         }
     });

@@ -58,10 +58,9 @@ pub fn spawn(pill: Sender<PillEvent>, current: Arc<Mutex<Vec<&'static str>>>) {
         let mut previous = HashSet::new();
         loop {
             let detected = detect(&running_process_paths());
-            match current.lock() {
-                Ok(mut current) => *current = detected.clone(),
-                Err(poisoned) => *poisoned.into_inner() = detected.clone(),
-            }
+            *current
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = detected.clone();
             for name in detected
                 .iter()
                 .copied()

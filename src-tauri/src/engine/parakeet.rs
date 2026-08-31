@@ -17,7 +17,7 @@ use crate::boost::{Boost, Lexicon, Pieces};
 
 use super::{Engine, EngineError, ModelFiles, Segment, Transcription};
 use crate::mic::Audio16k;
-use crate::paste::Text;
+use crate::text::Text;
 
 const ENCODER: &str = "encoder-model.int8.onnx";
 const ENCODER_DATA: &str = "encoder-model.int8.onnx.data";
@@ -90,7 +90,7 @@ fn open(dir: &Path) -> Result<Parakeet, EngineError> {
 /// Rewrite the encoder with its weights in an external file next to the graph,
 /// and copy the small decoder and vocab alongside. Idempotent: reruns overwrite.
 fn prepare(original: &Path) -> Result<PathBuf, EngineError> {
-    let prepared = original.with_file_name(super::PREPARED_DIR);
+    let prepared = original.with_file_name(super::models::PREPARED_DIR);
     fs::create_dir_all(&prepared).map_err(|error| EngineError::Load(error.to_string()))?;
     write_external(original, &prepared).map_err(|error| EngineError::Load(error.to_string()))?;
     for name in [DECODER, VOCAB] {

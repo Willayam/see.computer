@@ -9,17 +9,15 @@ use std::time::{Duration, Instant};
 /// no moov atom, leaving an unplayable file.
 const SIGNAL_DELAY: Duration = Duration::from_millis(400);
 
-pub enum Recorder {
-    ScreenCapture {
-        program: PathBuf,
-        dir: PathBuf,
-        preflight: bool,
-    },
+pub struct Recorder {
+    program: PathBuf,
+    dir: PathBuf,
+    preflight: bool,
 }
 
 impl Recorder {
     pub fn screencapture(dir: PathBuf) -> Recorder {
-        Recorder::ScreenCapture {
+        Recorder {
             program: PathBuf::from("/usr/sbin/screencapture"),
             dir,
             preflight: true,
@@ -28,7 +26,7 @@ impl Recorder {
 
     #[cfg(test)]
     pub fn with_program(program: PathBuf, dir: PathBuf) -> Recorder {
-        Recorder::ScreenCapture {
+        Recorder {
             program,
             dir,
             preflight: false,
@@ -36,24 +34,19 @@ impl Recorder {
     }
 
     pub fn start(&self) -> Result<Active, Error> {
-        let Recorder::ScreenCapture {
-            program,
-            dir,
-            preflight,
-        } = self;
-        ensure_access(*preflight)?;
-        std::fs::create_dir_all(dir).map_err(|source| Error::Spawn {
-            program: program.clone(),
+        ensure_access(self.preflight)?;
+        std::fs::create_dir_all(&self.dir).map_err(|source| Error::Spawn {
+            program: self.program.clone(),
             source,
         })?;
         let stamp = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
-        let mut path = dir.join(format!("{stamp}.mov"));
+        let mut path = self.dir.join(format!("{stamp}.mov"));
         let mut suffix = 2;
         while path.exists() || path.with_extension("").exists() {
-            path = dir.join(format!("{stamp}-{suffix}.mov"));
+            path = self.dir.join(format!("{stamp}-{suffix}.mov"));
             suffix += 1;
         }
-        let child = std::process::Command::new(program)
+        let child = std::process::Command::new(&self.program)
             .args(["-v", "-g", "-x"])
             .arg(&path)
             .stdin(Stdio::null())
@@ -61,20 +54,18 @@ impl Recorder {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|source| Error::Spawn {
-                program: program.clone(),
+                program: self.program.clone(),
                 source,
             })?;
         Ok(Active {
             child,
             path,
             started: Instant::now(),
-            exited: None,
         })
     }
 
     pub fn session_dir(&self) -> std::io::Result<PathBuf> {
-        let Recorder::ScreenCapture { dir, .. } = self;
-        std::fs::create_dir_all(dir)?;
+        std::fs::create_dir_all(&self.dir)?;
         let stamp = Local::now().format("%Y-%m-%d-%H-%M-%S").to_string();
         let mut suffix = 1;
         loop {
@@ -84,7 +75,7 @@ impl Recorder {
                 format!("{stamp}-{suffix}")
             };
             suffix += 1;
-            let path = dir.join(name);
+            let path = self.dir.join(name);
             if path.with_extension("mov").exists() {
                 continue;
             }
@@ -97,17 +88,14 @@ impl Recorder {
     }
 
     pub fn screenshot(&self, path: &Path) -> Result<PendingShot, Error> {
-        let Recorder::ScreenCapture {
-            program, preflight, ..
-        } = self;
-        ensure_access(*preflight)?;
+        ensure_access(self.preflight)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| Error::Spawn {
-                program: program.clone(),
+                program: self.program.clone(),
                 source,
             })?;
         }
-        let child = std::process::Command::new(program)
+        let child = std::process::Command::new(&self.program)
             .arg("-x")
             .arg(path)
             .stdin(Stdio::null())
@@ -115,7 +103,7 @@ impl Recorder {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|source| Error::Spawn {
-                program: program.clone(),
+                program: self.program.clone(),
                 source,
             })?;
         Ok(PendingShot {
@@ -174,19 +162,11 @@ pub struct Active {
     child: Child,
     path: PathBuf,
     started: Instant,
-    exited: Option<ExitStatus>,
 }
 
 impl Active {
     pub fn path(&self) -> &std::path::Path {
         &self.path
-    }
-
-    pub fn try_wait(&mut self) -> Option<ExitStatus> {
-        if self.exited.is_none() {
-            self.exited = self.child.try_wait().ok().flatten();
-        }
-        self.exited
     }
 
     pub fn stop(self, reply: impl FnOnce(Finished) + Send + 'static) {
@@ -195,23 +175,16 @@ impl Active {
         });
     }
 
-    pub fn stop_blocking(self) -> Finished {
-        stop_inner(self)
-    }
-
     pub fn abort(self) {
         crate::qos::spawn("see-recorder-abort", crate::qos::Class::Upkeep, move || {
             let Active {
                 mut child,
                 path,
                 started,
-                exited,
             } = self;
-            if exited.is_none() {
-                wait_to_signal(started);
-                unsafe {
-                    libc::kill(child.id() as libc::pid_t, libc::SIGINT);
-                }
+            wait_to_signal(started);
+            unsafe {
+                libc::kill(child.id() as libc::pid_t, libc::SIGINT);
             }
             let _ = child.wait();
             let _ = std::fs::remove_file(path);
@@ -224,25 +197,19 @@ fn stop_inner(active: Active) -> Finished {
         mut child,
         path,
         started,
-        exited,
     } = active;
-    let status = match exited {
+    wait_to_signal(started);
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+    }
+    let status = match wait_bounded(&mut child, Duration::from_secs(5)) {
         Some(status) => Ok(status),
         None => {
-            wait_to_signal(started);
             unsafe {
-                libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+                libc::kill(child.id() as libc::pid_t, libc::SIGKILL);
             }
-            match wait_bounded(&mut child, Duration::from_secs(5)) {
-                Some(status) => Ok(status),
-                None => {
-                    unsafe {
-                        libc::kill(child.id() as libc::pid_t, libc::SIGKILL);
-                    }
-                    let _ = child.wait();
-                    Err(Error::NoFile)
-                }
-            }
+            let _ = child.wait();
+            Err(Error::NoFile)
         }
     };
     let result = status
@@ -256,7 +223,7 @@ fn stop_inner(active: Active) -> Finished {
         .and_then(|()| {
             let valid = path.metadata().map(|meta| meta.len() > 0).unwrap_or(false);
             if valid {
-                Ok(Recording { path })
+                Ok(())
             } else {
                 Err(Error::NoFile)
             }
@@ -264,8 +231,7 @@ fn stop_inner(active: Active) -> Finished {
     Finished(result)
 }
 
-/// Reap the child after SIGINT without hanging the caller forever if
-/// `screencapture` wedges. On quit this runs on the controller thread.
+/// Reap the child after SIGINT without hanging forever if `screencapture` wedges.
 fn wait_bounded(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
     let deadline = Instant::now() + limit;
     loop {
@@ -283,18 +249,7 @@ fn wait_to_signal(started: Instant) {
     }
 }
 
-pub fn default_dir() -> PathBuf {
-    dirs::document_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("see.computer")
-}
-
-pub struct Recording {
-    pub path: PathBuf,
-}
-
-pub struct Finished(pub Result<Recording, Error>);
+pub struct Finished(pub Result<(), Error>);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

@@ -47,64 +47,23 @@ fn transcribe_live(path: PathBuf) -> i32 {
         .saturating_sub(15 * crate::mic::RATE as usize);
     let head = audio.samples()[..split].to_vec();
     let tail = crate::mic::Audio16k::from_samples(audio.samples()[split..].to_vec());
-    let models = crate::engine::Models::default_root();
-    let files = match models.ensure(&mut |progress| {
-        if let Some(percent) = progress.percent() {
-            eprintln!("model: {percent}%");
-        }
-    }) {
-        Ok(files) => files,
-        Err(error) => {
-            eprintln!("{error}");
-            return 1;
-        }
-    };
-    eprintln!("model: loading and warming");
-    let loaded = crate::qos::spawn("see-engine", crate::qos::Class::Engine, move || {
-        let mut engine = crate::engine::load(files).map_err(|error| error.to_string())?;
+    let (result, inference) = match on_engine_thread(move |engine| {
         let mut utterance = crate::engine::Utterance::default();
         for block in head.chunks(crate::mic::RATE as usize / 5) {
-            utterance.feed(
-                engine.as_mut(),
-                &crate::mic::Audio16k::from_samples(block.to_vec()),
-            );
+            utterance.feed(engine, &crate::mic::Audio16k::from_samples(block.to_vec()));
         }
         let inference_start = Instant::now();
-        let result = utterance.finish(engine.as_mut(), &tail);
-        Ok::<_, String>((result, inference_start.elapsed()))
-    })
-    .join();
-    let result = match loaded {
-        Ok(Ok((result, inference))) => {
-            eprintln!(
-                "tail transcription: {:.3} ms",
-                inference.as_secs_f64() * 1_000.0
-            );
-            result
-        }
-        Ok(Err(error)) => {
-            eprintln!("{error}");
-            return 1;
-        }
-        Err(_) => {
-            eprintln!("transcription thread panicked");
-            return 1;
-        }
+        let result = utterance.finish(engine, &tail);
+        (result, inference_start.elapsed())
+    }) {
+        Ok(result) => result,
+        Err(code) => return code,
     };
-    match result.map(|transcription| transcription.text) {
-        Ok(Some(text)) => {
-            println!("{}", text.as_str());
-            0
-        }
-        Ok(None) => {
-            eprintln!("nothing heard");
-            2
-        }
-        Err(error) => {
-            eprintln!("{error}");
-            1
-        }
-    }
+    eprintln!(
+        "tail transcription: {:.3} ms",
+        inference.as_secs_f64() * 1_000.0
+    );
+    print_text(result)
 }
 
 fn transcribe(path: PathBuf) -> i32 {
@@ -117,28 +76,20 @@ fn transcribe(path: PathBuf) -> i32 {
         }
     };
     eprintln!("audio: {:.3}s", audio.seconds());
-    let result = match transcribe_on_engine_thread(audio) {
+    let (result, inference) = match on_engine_thread(move |engine| {
+        let inference_start = Instant::now();
+        let result = engine.transcribe(&audio);
+        (result, inference_start.elapsed())
+    }) {
         Ok(result) => result,
         Err(code) => return code,
     };
+    eprintln!("transcription: {:.3} ms", inference.as_secs_f64() * 1_000.0);
     eprintln!(
         "wall: {:.3} ms",
         total_start.elapsed().as_secs_f64() * 1_000.0
     );
-    match result.map(|transcription| transcription.text) {
-        Ok(Some(text)) => {
-            println!("{}", text.as_str());
-            0
-        }
-        Ok(None) => {
-            eprintln!("nothing heard");
-            2
-        }
-        Err(error) => {
-            eprintln!("{error}");
-            1
-        }
-    }
+    print_text(result)
 }
 
 /// Rebuild the agent-readable folder for a finished recording and print the
@@ -156,20 +107,38 @@ fn clip(mov: PathBuf) -> i32 {
         }
         Some(audio) => {
             eprintln!("audio: {:.3}s", audio.seconds());
-            match transcribe_on_engine_thread(audio) {
+            let (result, inference) = match on_engine_thread(move |engine| {
+                let inference_start = Instant::now();
+                let result = engine.transcribe(&audio);
+                (result, inference_start.elapsed())
+            }) {
                 Err(code) => return code,
-                Ok(Err(error)) => {
+                Ok(result) => result,
+            };
+            eprintln!("transcription: {:.3} ms", inference.as_secs_f64() * 1_000.0);
+            match result {
+                Err(error) => {
                     eprintln!("{error}");
                     return 1;
                 }
-                Ok(Ok(transcription)) => {
+                Ok(transcription) => {
                     eprintln!("segments: {}", transcription.segments.len());
                     transcription
                 }
             }
         }
     };
-    match crate::clip::package(&mov, &transcription) {
+    let duration_ms = crate::clip::movie_duration_ms(&mov, &transcription.segments);
+    match crate::clip::package_single_clip(
+        duration_ms,
+        &transcription,
+        crate::clip::SessionClip {
+            start_ms: 0,
+            end_ms: duration_ms,
+            recording_start_ms: 0,
+            path: mov,
+        },
+    ) {
         Ok(packaged) => {
             eprintln!(
                 "wall: {:.3} ms",
@@ -185,12 +154,12 @@ fn clip(mov: PathBuf) -> i32 {
     }
 }
 
-/// Download and load the model, then transcribe on a thread with the same
+/// Download and load the model, then run `work` on a thread with the same
 /// class the app's engine worker runs at, so the numbers this prints are the
 /// numbers a dictation gets, contention included.
-fn transcribe_on_engine_thread(
-    audio: crate::mic::Audio16k,
-) -> Result<Result<Transcription, EngineError>, i32> {
+fn on_engine_thread<T: Send + 'static>(
+    work: impl FnOnce(&mut dyn crate::engine::Engine) -> T + Send + 'static,
+) -> Result<T, i32> {
     let models = crate::engine::Models::default_root();
     let files = match models.ensure(&mut |progress| {
         if let Some(percent) = progress.percent() {
@@ -206,16 +175,11 @@ fn transcribe_on_engine_thread(
     eprintln!("model: loading and warming");
     let loaded = crate::qos::spawn("see-engine", crate::qos::Class::Engine, move || {
         let mut engine = crate::engine::load(files).map_err(|error| error.to_string())?;
-        let inference_start = Instant::now();
-        let result = engine.transcribe(&audio);
-        Ok::<_, String>((result, inference_start.elapsed()))
+        Ok::<_, String>(work(engine.as_mut()))
     })
     .join();
     match loaded {
-        Ok(Ok((result, inference))) => {
-            eprintln!("transcription: {:.3} ms", inference.as_secs_f64() * 1_000.0);
-            Ok(result)
-        }
+        Ok(Ok(result)) => Ok(result),
         Ok(Err(error)) => {
             eprintln!("{error}");
             Err(1)
@@ -223,6 +187,23 @@ fn transcribe_on_engine_thread(
         Err(_) => {
             eprintln!("transcription thread panicked");
             Err(1)
+        }
+    }
+}
+
+fn print_text(result: Result<Transcription, EngineError>) -> i32 {
+    match result.map(|transcription| transcription.text) {
+        Ok(Some(text)) => {
+            println!("{}", text.as_str());
+            0
+        }
+        Ok(None) => {
+            eprintln!("nothing heard");
+            2
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            1
         }
     }
 }

@@ -1,15 +1,14 @@
 //! Speech to text through one worker-owned Parakeet engine.
 
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
-use std::path::PathBuf;
 use std::sync::mpsc::Sender;
-use std::time::{Duration, Instant};
 
 use crate::mic::Audio16k;
-use crate::paste::Text;
+use crate::text::Text;
 
+pub mod models;
 pub mod parakeet;
+
+pub use models::{ModelFiles, Models};
 
 pub trait Engine: Send {
     fn transcribe(&mut self, audio: &Audio16k) -> Result<Transcription, EngineError>;
@@ -155,165 +154,6 @@ fn chunk_cut(pending: &[f32]) -> Option<usize> {
         }
     }
     (pending.len() >= CHUNK_MAX).then_some(lowest_start + CUT_WINDOW / 2)
-}
-
-pub struct ModelFile {
-    pub name: &'static str,
-    pub url: &'static str,
-    pub bytes: u64,
-}
-
-pub const CATALOG: &[ModelFile] = &[
-    ModelFile {
-        name: "encoder-model.int8.onnx",
-        url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/encoder-model.int8.onnx",
-        bytes: 652_183_999,
-    },
-    ModelFile {
-        name: "decoder_joint-model.int8.onnx",
-        url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/decoder_joint-model.int8.onnx",
-        bytes: 18_202_004,
-    },
-    ModelFile {
-        name: "vocab.txt",
-        url: "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/vocab.txt",
-        bytes: 93_939,
-    },
-];
-
-/// Sibling of the download dir holding the derived copy of the model whose
-/// weights live in an external file that ONNX Runtime memory-maps, so they
-/// stay clean, evictable pages instead of dirty heap. Built once by
-/// `parakeet::prepare`; valid once its `ready` marker exists.
-pub const PREPARED_DIR: &str = "int8-prepared";
-
-#[derive(Clone)]
-pub struct Models {
-    root: PathBuf,
-}
-
-impl Models {
-    pub fn default_root() -> Models {
-        let data = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-        Models {
-            root: data
-                .join("see.computer")
-                .join("models")
-                .join("parakeet-tdt-0.6b-v3-onnx")
-                .join("int8"),
-        }
-    }
-
-    pub fn ensure(&self, on: &mut dyn FnMut(Progress)) -> Result<ModelFiles, EngineError> {
-        let prepared = self.root.with_file_name(PREPARED_DIR);
-        if prepared.join("ready").exists() {
-            return Ok(ModelFiles {
-                dir: prepared,
-                prepared: true,
-            });
-        }
-        fs::create_dir_all(&self.root).map_err(download_error)?;
-        let total = CATALOG.iter().map(|file| file.bytes).sum();
-        let mut done = 0_u64;
-        let mut last_percent = None;
-        let mut last_report = Instant::now();
-        let mut report = |done: u64, force: bool| {
-            let progress = Progress {
-                phase: Phase::Downloading,
-                done,
-                total: Some(total),
-            };
-            let percent = progress.percent();
-            if force
-                || percent != last_percent
-                || last_report.elapsed() >= Duration::from_millis(250)
-            {
-                last_percent = percent;
-                last_report = Instant::now();
-                on(progress);
-            }
-        };
-
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_connect(Some(Duration::from_secs(10)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .build()
-            .into();
-
-        for model in CATALOG {
-            let target = self.root.join(model.name);
-            if target.metadata().map(|meta| meta.len()).unwrap_or(0) == model.bytes {
-                done += model.bytes;
-                report(done, true);
-                continue;
-            }
-
-            let part = self.root.join(format!("{}.part", model.name));
-            let mut offset = part.metadata().map(|meta| meta.len()).unwrap_or(0);
-            if offset == model.bytes {
-                fs::rename(&part, &target).map_err(download_error)?;
-                done += model.bytes;
-                report(done, true);
-                continue;
-            }
-            if offset > model.bytes {
-                fs::remove_file(&part).map_err(download_error)?;
-                offset = 0;
-            }
-            let mut request = agent.get(model.url);
-            if offset > 0 {
-                request = request.header("Range", &format!("bytes={offset}-"));
-            }
-            let mut response = request
-                .call()
-                .map_err(|error| EngineError::Download(format!("{}: {error}", model.name)))?;
-            if offset > 0 && response.status().as_u16() != 206 {
-                offset = 0;
-            }
-            let mut output = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .append(offset > 0)
-                .truncate(offset == 0)
-                .open(&part)
-                .map_err(download_error)?;
-            let mut reader = response.body_mut().as_reader();
-            let mut buffer = [0_u8; 64 * 1024];
-            let mut written = offset;
-            loop {
-                let count = reader.read(&mut buffer).map_err(download_error)?;
-                if count == 0 {
-                    break;
-                }
-                output.write_all(&buffer[..count]).map_err(download_error)?;
-                written += count as u64;
-                report(done + written, false);
-            }
-            output.flush().map_err(download_error)?;
-            if written != model.bytes {
-                return Err(EngineError::Download(format!(
-                    "{}: expected {} bytes, got {written}",
-                    model.name, model.bytes
-                )));
-            }
-            fs::rename(&part, &target).map_err(download_error)?;
-            done += model.bytes;
-            report(done, true);
-        }
-        Ok(ModelFiles {
-            dir: self.root.clone(),
-            prepared: false,
-        })
-    }
-}
-
-fn download_error(error: std::io::Error) -> EngineError {
-    EngineError::Download(error.to_string())
-}
-
-pub struct ModelFiles {
-    pub dir: PathBuf,
-    pub prepared: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -490,6 +330,7 @@ impl Engine for Canned {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn warm_does_not_disturb_the_job_queue() {
