@@ -73,7 +73,7 @@ fn main() {
         pct: None,
     }));
     let rivals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    rivals::spawn(pill_tx.clone(), rivals.clone());
+    rivals::spawn(rivals.clone());
     let controller = session::spawn(
         session::Wiring {
             mic,
@@ -95,7 +95,6 @@ fn main() {
     let setup_gesture = gesture;
     let setup_history = history;
     let setup_status = status;
-    let setup_rivals = rivals;
     let app = tauri::Builder::default()
         .plugin(hotkeys::plugin(tx.clone()))
         .plugin(tauri_plugin_autostart::init(
@@ -117,7 +116,6 @@ fn main() {
                 tray_pill_tx,
                 setup_history,
                 setup_status,
-                setup_rivals,
             )?;
             paste::accessibility_trusted(true);
             trigger::spawn_watcher(setup_trigger, setup_watcher_tx, setup_gesture);

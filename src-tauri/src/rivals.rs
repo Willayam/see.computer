@@ -1,9 +1,5 @@
-use std::collections::HashSet;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-use crate::pill::{Notice, PillEvent};
 
 const RIVALS: &[(&str, &str)] = &[
     ("Hex.app", "Hex"),
@@ -53,30 +49,15 @@ fn running_process_paths() -> Vec<String> {
         .collect()
 }
 
-pub fn spawn(pill: Sender<PillEvent>, current: Arc<Mutex<Vec<&'static str>>>) {
-    crate::qos::spawn("see-rivals", crate::qos::Class::Upkeep, move || {
-        let mut previous = HashSet::new();
-        loop {
-            let detected = detect(&running_process_paths());
-            *current
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = detected.clone();
-            for name in detected
-                .iter()
-                .copied()
-                .filter(|name| !previous.contains(name))
-            {
-                if pill
-                    .send(PillEvent::Flash(Notice::RivalDictation(name.to_owned())))
-                    .is_err()
-                {
-                    return;
-                }
-                eprintln!("rival dictation app running: {name}");
-            }
-            previous = detected.into_iter().collect();
-            std::thread::sleep(Duration::from_secs(10));
-        }
+/// Keep the running-app signal available for evidence-based conflict detection.
+/// Merely finding another dictation app is not enough reason to warn the user.
+pub fn spawn(current: Arc<Mutex<Vec<&'static str>>>) {
+    crate::qos::spawn("see-rivals", crate::qos::Class::Upkeep, move || loop {
+        let detected = detect(&running_process_paths());
+        *current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = detected;
+        std::thread::sleep(Duration::from_secs(10));
     });
 }
 

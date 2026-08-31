@@ -44,7 +44,6 @@ pub enum Notice {
     TranscriptionFailed(String),
     PasteFailed(String),
     TimedOut(&'static str),
-    RivalDictation(String),
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -69,8 +68,7 @@ impl Notice {
             | Notice::ScreenRecordingFailed(_)
             | Notice::TranscriptionFailed(_)
             | Notice::PasteFailed(_)
-            | Notice::TimedOut(_)
-            | Notice::RivalDictation(_) => Tone::Error,
+            | Notice::TimedOut(_) => Tone::Error,
         }
     }
 
@@ -92,9 +90,6 @@ impl Notice {
             Notice::TranscriptionFailed(error) => format!("Transcription failed: {error}"),
             Notice::PasteFailed(error) => format!("Paste failed: {error}"),
             Notice::TimedOut(activity) => format!("{activity} timed out"),
-            Notice::RivalDictation(name) => {
-                format!("{name} is also dictating — quit it or change see.computer's trigger")
-            }
         }
     }
 }

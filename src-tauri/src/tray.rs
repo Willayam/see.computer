@@ -55,7 +55,7 @@ struct Panel {
     pill: Sender<PillEvent>,
     history: History,
     status: Arc<Mutex<EngineStatus>>,
-    rivals: Arc<Mutex<Vec<&'static str>>>,
+    settings_expanded: Arc<Mutex<bool>>,
     payloads: Arc<Mutex<Vec<Payload>>>,
 }
 
@@ -66,7 +66,6 @@ pub fn install(
     pill: Sender<PillEvent>,
     history: History,
     status: Arc<Mutex<EngineStatus>>,
-    rivals: Arc<Mutex<Vec<&'static str>>>,
 ) -> tauri::Result<()> {
     let panel = Panel {
         app: app.clone(),
@@ -75,7 +74,7 @@ pub fn install(
         pill,
         history,
         status,
-        rivals,
+        settings_expanded: Arc::new(Mutex::new(false)),
         payloads: Arc::new(Mutex::new(Vec::new())),
     };
     let picked = panel.clone();
@@ -122,13 +121,21 @@ impl Panel {
         *self.payloads.lock().unwrap_or_else(PoisonError::into_inner) = payloads;
 
         rows.push(Row::Separator);
-        rows.push(item("settings", "Settings", false, None));
+        let settings_expanded = *self
+            .settings_expanded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        rows.push(disclosure("settings", "Settings", settings_expanded));
+        if settings_expanded {
+            rows.extend(self.settings_rows());
+        }
+        rows.push(Row::Separator);
         rows.push(item("quit", "Quit see.computer", false, None));
         rows
     }
 
     /// One row, highest priority wins: the permission that breaks the trigger,
-    /// then a broken model, then a rival dictation app, then model loading.
+    /// then a broken model, then model loading.
     /// Missing Accessibility deliberately has no row; history keeps the text.
     fn problem_row(&self) -> Option<Row> {
         if let Some((id, label)) = alert() {
@@ -147,20 +154,6 @@ impl Panel {
                 Some(WARNING),
             ));
         }
-        if let Some(name) = self
-            .rivals
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .first()
-            .copied()
-        {
-            return Some(item(
-                "",
-                &format!("{name} is also dictating"),
-                false,
-                Some(WARNING),
-            ));
-        }
         if let EngineStatus::Loading { phase, pct } = status {
             let label = match (phase, pct) {
                 (crate::engine::Phase::Downloading, Some(pct)) => {
@@ -174,18 +167,15 @@ impl Panel {
     }
 
     fn settings_rows(&self) -> Vec<Row> {
-        let selected = current_trigger(&self.trigger);
-        let mut rows = vec![item("back", "‹ Back", false, None)];
-        rows.push(Row::Section("Trigger".to_owned()));
-        rows.extend(
-            TRIGGERS.map(|(id, option)| item(id, option.label(), option == selected, None)),
-        );
-        rows.push(Row::Hint(
-            "Hold to talk · hold with Shift to record".to_owned(),
-        ));
+        let mut rows = vec![submenu("trigger-settings", "Trigger")];
+        rows.push(submenu("permission-settings", "Permissions"));
         rows.push(Row::Separator);
-        rows.push(item("recordings", "Open Recordings Folder", false, None));
-        rows.push(item("history-folder", "Open History Folder", false, None));
+        rows.push(item(
+            "see-computer-folder",
+            "Open see.computer Folder",
+            false,
+            None,
+        ));
         rows.push(item(
             "history-toggle",
             "Save Dictation History",
@@ -198,8 +188,20 @@ impl Panel {
             open_at_login(&self.app),
             None,
         ));
-        rows.push(item("retry", "Retry Model Download", false, None));
-        rows.push(Row::Section("Permissions".to_owned()));
+        rows
+    }
+
+    fn trigger_rows(&self) -> Vec<Row> {
+        let selected = current_trigger(&self.trigger);
+        let mut rows = Vec::new();
+        rows.extend(
+            TRIGGERS.map(|(id, option)| item(id, option.label(), option == selected, None)),
+        );
+        rows
+    }
+
+    fn permission_rows(&self) -> Vec<Row> {
+        let mut rows = Vec::new();
         rows.extend(PANES.map(|(id, label, _)| item(id, &format!("{label}…"), false, None)));
         rows
     }
@@ -219,27 +221,32 @@ impl Panel {
             let _ = self.pill.send(PillEvent::Flash(Notice::TriggerChanged(
                 selected.gestures(),
             )));
-            return Some(self.settings_rows());
+            return Some(self.trigger_rows());
         }
         match id {
-            "settings" => Some(self.settings_rows()),
-            "back" => Some(self.main_rows()),
+            "settings" => {
+                let mut expanded = self
+                    .settings_expanded
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                *expanded = !*expanded;
+                drop(expanded);
+                Some(self.main_rows())
+            }
+            "trigger-settings" => Some(self.trigger_rows()),
+            "permission-settings" => Some(self.permission_rows()),
             "retry" => {
                 let _ = self.inbox.send(Msg::RetryEngine);
                 None
             }
-            "recordings" => {
+            "see-computer-folder" => {
                 open_path(crate::paths::documents());
-                None
-            }
-            "history-folder" => {
-                open_path(self.history.root());
                 None
             }
             "history-toggle" => {
                 self.history.set_enabled(!self.history.enabled());
                 self.save_config();
-                Some(self.settings_rows())
+                Some(self.main_rows())
             }
             "open-at-login" => {
                 let manager = self.app.autolaunch();
@@ -251,7 +258,7 @@ impl Panel {
                 if let Err(error) = result {
                     eprintln!("could not update open-at-login status: {error}");
                 }
-                Some(self.settings_rows())
+                Some(self.main_rows())
             }
             "quit" => {
                 self.app.exit(0);
@@ -298,6 +305,21 @@ fn item(id: &'static str, label: &str, checked: bool, symbol: Option<&'static st
         label: label.to_owned(),
         checked,
         symbol,
+    }
+}
+
+fn submenu(id: &'static str, label: &str) -> Row {
+    Row::Submenu {
+        id,
+        label: label.to_owned(),
+    }
+}
+
+fn disclosure(id: &'static str, label: &str, expanded: bool) -> Row {
+    Row::Disclosure {
+        id,
+        label: label.to_owned(),
+        expanded,
     }
 }
 

@@ -22,7 +22,7 @@ Recordings land in `~/Documents/see.computer/`, next to the dictation history. E
 
 Transcripts are written to disk as plain text by default, with one markdown file per day in `~/Documents/see.computer/`. If macOS denies Documents access, they go to `~/Library/Application Support/see.computer/history/` instead.
 
-Turn history off with **Save Dictation History** in the tray's **Settings**. There is no auto-pruning; these are plain files you can open or delete.
+Turn history off with **Save Dictation History** in the tray's **Settings**. Open **see.computer Folder** there to inspect or delete the plain files. There is no auto-pruning.
 
 The audio-never-leaves-the-machine promise does not extend to transcript files in Documents when iCloud Desktop & Documents syncing is on.
 
@@ -65,7 +65,7 @@ Set `APPLE_SIGNING_IDENTITY` to a signing identity before building so macOS keep
 
 macOS asks for these the first time each feature runs. The tray menu has a shortcut to each pane under **System Settings > Privacy & Security**.
 
-Another dictation app listening on the same key doubles every input. see.computer warns when a known one (Hex, Wispr Flow, Superwhisper, …) is running; quit it or change the trigger.
+Another dictation app listening on the same key doubles every input. Quit the other app or give it a different trigger.
 
 - **Accessibility**: needed to press Command+V in the app you are dictating into. Without it the text is still on your clipboard and the pill says so.
 - **Input Monitoring**: needed for bare-modifier hold-to-talk and modifier+Shift recording.
@@ -93,7 +93,7 @@ cd src-tauri && cargo test
 
 Tauri v2 with a Rust backend. The only web content is `ui/pill.html`, the small overlay at the bottom of the screen; there is no bundler and no Node toolchain.
 
-The menu behind the tray icon is a non-activating `NSPanel` filled with `NSGlassEffectView`, built in `native/menu.m` from a row list `tray.rs` rebuilds on every open. Its main view centers recent dictations and recordings; trigger, folder, startup, model, and permission controls live in an in-place Settings view. It never becomes key, so the app being dictated into keeps its focus. An `NSMenu` would have run a modal tracking loop on the main thread and could not have carried the material.
+The menu behind the tray icon is a non-activating `NSPanel` filled with `NSGlassEffectView`, built in `native/menu.m` from a row list `tray.rs` rebuilds on every open. Its main view centers recent dictations and recordings. Settings expands inline with folder, startup, and history controls, while trigger and permission choices open beside it. Model recovery appears only when the model is unavailable. The panel never becomes key, so the app being dictated into keeps its focus. An `NSMenu` would have run a modal tracking loop on the main thread and could not have carried the material.
 
 One controller thread owns the app's state, an enum with one variant per thing the app can be doing (`Idle`, `Dictating`, `Transcribing`, `Packaging`, `Pasting`). Everything else sends it a message: the global-shortcut handler, the engine worker that owns the Parakeet model, the thread that waits for `screencapture` to finish, and the paste thread that owns the clipboard. Nothing slow runs on the hotkey thread, and dictating while recording cannot be expressed. Every thread names its scheduling class in `qos.rs` rather than taking the default, which the macOS scheduler ranks below anything the user is looking at: the event tap, the controller and the paste run user-interactive, the engine runs user-initiated, and upkeep runs utility. The pill window is created non-focusable and ordered in once with `orderFrontRegardless`, so it can never take the keystroke that pastes.
 

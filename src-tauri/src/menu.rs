@@ -8,9 +8,6 @@ use std::ffi::{c_char, c_int, CString};
 use std::sync::OnceLock;
 
 pub enum Row {
-    /// Heading that opens a group. The space above it is what separates its
-    /// group from the one before, so no separator precedes a section.
-    Section(String),
     /// A footnote belonging to the group above it. No space of its own.
     Hint(String),
     /// An empty `id` is passed to AppKit as null, making the row inert. A
@@ -21,7 +18,16 @@ pub enum Row {
         checked: bool,
         symbol: Option<&'static str>,
     },
-    /// A hairline. Only where a group starts without a `Section`.
+    /// An item whose choices open in an adjacent panel. AppKit supplies the
+    /// trailing disclosure symbol so it matches the system menu treatment.
+    Submenu { id: &'static str, label: String },
+    /// A row that reveals more rows in the current panel.
+    Disclosure {
+        id: &'static str,
+        label: String,
+        expanded: bool,
+    },
+    /// A hairline between logical groups.
     Separator,
 }
 
@@ -37,6 +43,8 @@ extern "C" {
     fn see_menu_toggle(rows: *const NativeRow, count: c_int);
     fn see_menu_hide();
     fn see_menu_update(rows: *const NativeRow, count: c_int);
+    fn see_menu_show_submenu(rows: *const NativeRow, count: c_int, source_id: *const c_char);
+    fn see_menu_update_submenu(rows: *const NativeRow, count: c_int);
     fn see_menu_set_callback(pick: extern "C" fn(*const c_char));
 }
 
@@ -52,6 +60,17 @@ extern "C" fn picked(id: *const c_char) {
         return;
     };
     match handler(id) {
+        Some(rows) if matches!(id, "trigger-settings" | "permission-settings") => {
+            let source = CString::new(id).unwrap_or_default();
+            native(&rows, |ptr, count| unsafe {
+                see_menu_show_submenu(ptr, count, source.as_ptr())
+            });
+        }
+        Some(rows) if id.starts_with("trigger-") => {
+            native(&rows, |ptr, count| unsafe {
+                see_menu_update_submenu(ptr, count)
+            });
+        }
         Some(rows) => native(&rows, |ptr, count| unsafe { see_menu_update(ptr, count) }),
         None => unsafe { see_menu_hide() },
     }
@@ -81,12 +100,6 @@ fn native<T>(rows: &[Row], call: impl FnOnce(*const NativeRow, c_int) -> T) -> T
                 pointer
             };
             match row {
-                Row::Section(label) => NativeRow {
-                    id: std::ptr::null(),
-                    label: keep(label),
-                    kind: 1,
-                    symbol: std::ptr::null(),
-                },
                 Row::Hint(label) => NativeRow {
                     id: std::ptr::null(),
                     label: keep(label),
@@ -111,6 +124,26 @@ fn native<T>(rows: &[Row], call: impl FnOnce(*const NativeRow, c_int) -> T) -> T
                         symbol: symbol.map_or(std::ptr::null(), &mut keep),
                     }
                 }
+                Row::Submenu { id, label } => NativeRow {
+                    id: keep(id),
+                    label: keep(label),
+                    kind: 4,
+                    symbol: std::ptr::null(),
+                },
+                Row::Disclosure {
+                    id,
+                    label,
+                    expanded,
+                } => NativeRow {
+                    id: keep(id),
+                    label: keep(label),
+                    kind: 5,
+                    symbol: keep(if *expanded {
+                        "chevron.down"
+                    } else {
+                        "chevron.right"
+                    }),
+                },
                 Row::Separator => NativeRow {
                     id: std::ptr::null(),
                     label: keep(""),
