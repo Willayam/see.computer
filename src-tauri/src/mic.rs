@@ -3,9 +3,9 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const RATE: u32 = 16_000;
 /// Always-live ring copied to the head of every capture, so the syllable spoken
@@ -84,12 +84,14 @@ enum Inner {
         shared: Arc<Shared>,
         device_rate: u32,
         channels: u16,
+        liveness_timeout_ms: u64,
     },
     Replay(Audio16k),
 }
 
 struct Shared {
     armed: AtomicBool,
+    last_callback_ms: AtomicU64,
     buf: Mutex<Vec<f32>>,
     preroll: Mutex<VecDeque<f32>>,
 }
@@ -104,81 +106,39 @@ impl Mic {
                 resampler: None,
             }),
             Source::Default => {
-                let host = cpal::default_host();
-                let device = host.default_input_device().ok_or(MicError::NoInputDevice)?;
-                let config = device
-                    .default_input_config()
-                    .map_err(|error| MicError::Stream(error.to_string()))?;
-                let device_rate = config.sample_rate();
-                let channels = config.channels();
-                let shared = Arc::new(Shared {
-                    armed: AtomicBool::new(false),
-                    buf: Mutex::new(Vec::new()),
-                    preroll: Mutex::new(VecDeque::new()),
-                });
-                let stream_config: cpal::StreamConfig = config.into();
-                let err = |error| eprintln!("audio stream error: {error}");
-                let stream = match config.sample_format() {
-                    cpal::SampleFormat::F32 => {
-                        let state = Arc::clone(&shared);
-                        device.build_input_stream(
-                            stream_config,
-                            move |data: &[f32], _| {
-                                append_input(&state, data, device_rate, channels)
-                            },
-                            err,
-                            None,
-                        )
-                    }
-                    cpal::SampleFormat::I16 => {
-                        let state = Arc::clone(&shared);
-                        device.build_input_stream(
-                            stream_config,
-                            move |data: &[i16], _| {
-                                let samples: Vec<f32> = data
-                                    .iter()
-                                    .map(|sample| *sample as f32 / i16::MAX as f32)
-                                    .collect();
-                                append_input(&state, &samples, device_rate, channels);
-                            },
-                            err,
-                            None,
-                        )
-                    }
-                    cpal::SampleFormat::U16 => {
-                        let state = Arc::clone(&shared);
-                        device.build_input_stream(
-                            stream_config,
-                            move |data: &[u16], _| {
-                                let samples: Vec<f32> = data
-                                    .iter()
-                                    .map(|sample| (*sample as f32 - 32_768.0) / 32_768.0)
-                                    .collect();
-                                append_input(&state, &samples, device_rate, channels);
-                            },
-                            err,
-                            None,
-                        )
-                    }
-                    format => {
-                        return Err(MicError::Stream(format!(
-                            "unsupported input sample format: {format:?}"
-                        )));
-                    }
-                }
-                .map_err(|error| MicError::Stream(error.to_string()))?;
-                stream
-                    .play()
-                    .map_err(|error| MicError::Stream(error.to_string()))?;
+                let (inner, resampler) = open_live()?;
                 Ok(Mic {
-                    inner: Inner::Live {
-                        _stream: stream,
-                        shared,
-                        device_rate,
-                        channels,
-                    },
-                    resampler: Some(StreamingResampler::new(device_rate, RATE)),
+                    inner,
+                    resampler: Some(resampler),
                 })
+            }
+        }
+    }
+
+    pub fn ensure_live(&mut self) -> Result<(), MicError> {
+        if self.is_live() {
+            return Ok(());
+        }
+        let (inner, resampler) = open_live()?;
+        self.inner = inner;
+        self.resampler = Some(resampler);
+        Ok(())
+    }
+
+    pub fn is_live(&self) -> bool {
+        match &self.inner {
+            Inner::Replay(_) => true,
+            Inner::Live {
+                shared,
+                liveness_timeout_ms,
+                ..
+            } => {
+                let now_ms = monotonic_millis();
+                heartbeat_is_fresh(
+                    shared.last_callback_ms.load(Ordering::Relaxed),
+                    now_ms,
+                    *liveness_timeout_ms,
+                )
             }
         }
     }
@@ -247,6 +207,112 @@ impl Mic {
     }
 }
 
+fn open_live() -> Result<(Inner, StreamingResampler), MicError> {
+    let host = cpal::default_host();
+    let device = host.default_input_device().ok_or(MicError::NoInputDevice)?;
+    let config = device
+        .default_input_config()
+        .map_err(|error| MicError::Stream(error.to_string()))?;
+    let device_rate = config.sample_rate();
+    let channels = config.channels();
+    let shared = Arc::new(Shared {
+        armed: AtomicBool::new(false),
+        last_callback_ms: AtomicU64::new(monotonic_millis()),
+        buf: Mutex::new(Vec::new()),
+        preroll: Mutex::new(VecDeque::new()),
+    });
+    let stream_config: cpal::StreamConfig = config.into();
+    let err = |error| eprintln!("audio stream error: {error}");
+    let stream = match config.sample_format() {
+        cpal::SampleFormat::F32 => {
+            let state = Arc::clone(&shared);
+            device.build_input_stream(
+                stream_config,
+                move |data: &[f32], _| append_input(&state, data, device_rate, channels),
+                err,
+                None,
+            )
+        }
+        cpal::SampleFormat::I16 => {
+            let state = Arc::clone(&shared);
+            device.build_input_stream(
+                stream_config,
+                move |data: &[i16], _| {
+                    let samples: Vec<f32> = data
+                        .iter()
+                        .map(|sample| *sample as f32 / i16::MAX as f32)
+                        .collect();
+                    append_input(&state, &samples, device_rate, channels);
+                },
+                err,
+                None,
+            )
+        }
+        cpal::SampleFormat::U16 => {
+            let state = Arc::clone(&shared);
+            device.build_input_stream(
+                stream_config,
+                move |data: &[u16], _| {
+                    let samples: Vec<f32> = data
+                        .iter()
+                        .map(|sample| (*sample as f32 - 32_768.0) / 32_768.0)
+                        .collect();
+                    append_input(&state, &samples, device_rate, channels);
+                },
+                err,
+                None,
+            )
+        }
+        format => {
+            return Err(MicError::Stream(format!(
+                "unsupported input sample format: {format:?}"
+            )));
+        }
+    }
+    .map_err(|error| MicError::Stream(error.to_string()))?;
+    let liveness_timeout_ms = liveness_timeout_ms(stream.buffer_size().ok(), device_rate);
+    stream
+        .play()
+        .map_err(|error| MicError::Stream(error.to_string()))?;
+    shared
+        .last_callback_ms
+        .store(monotonic_millis(), Ordering::Relaxed);
+    Ok((
+        Inner::Live {
+            _stream: stream,
+            shared,
+            device_rate,
+            channels,
+            liveness_timeout_ms,
+        },
+        StreamingResampler::new(device_rate, RATE),
+    ))
+}
+
+fn monotonic_millis() -> u64 {
+    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let millis = ORIGIN.get_or_init(Instant::now).elapsed().as_millis();
+    u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+fn liveness_timeout_ms(buffer_frames: Option<u32>, rate: u32) -> u64 {
+    const TARGET_MS: u64 = 1_500;
+    let Some(buffer_frames) = buffer_frames else {
+        return TARGET_MS;
+    };
+    let callback_ms = (u64::from(buffer_frames) * 1_000)
+        .div_ceil(u64::from(rate))
+        .max(1);
+    // A healthy CoreAudio stream calls back once per hardware buffer. Waiting
+    // for enough whole buffer periods to cover 1.5 seconds tolerates scheduler
+    // stalls without hiding device changes, sleep, or stream invalidation.
+    TARGET_MS.div_ceil(callback_ms) * callback_ms
+}
+
+fn heartbeat_is_fresh(last_callback_ms: u64, now_ms: u64, timeout_ms: u64) -> bool {
+    now_ms.saturating_sub(last_callback_ms) < timeout_ms
+}
+
 struct StreamingResampler {
     from: u32,
     to: u32,
@@ -308,6 +374,9 @@ impl StreamingResampler {
 }
 
 fn append_input(shared: &Shared, data: &[f32], rate: u32, channels: u16) {
+    shared
+        .last_callback_ms
+        .store(monotonic_millis(), Ordering::Relaxed);
     let capacity = rate as usize * channels as usize * PREROLL.as_millis() as usize / 1_000;
     if let Ok(mut preroll) = shared.preroll.lock() {
         preroll.extend(data.iter().copied());
@@ -426,6 +495,14 @@ mod tests {
         let output = resample(&input, 48_000, 16_000);
         assert_eq!(output.len(), 160);
         assert!((output[1] - output[0] - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn heartbeat_expires_after_whole_callback_periods_cover_target() {
+        let timeout = liveness_timeout_ms(Some(512), 48_000);
+        assert_eq!(timeout, 1_507);
+        assert!(heartbeat_is_fresh(10_000, 10_000 + timeout - 1, timeout));
+        assert!(!heartbeat_is_fresh(10_000, 10_000 + timeout, timeout));
     }
 
     #[test]

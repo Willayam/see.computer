@@ -355,6 +355,10 @@ impl Controller {
                     }
                     match self.mic.as_mut() {
                         Some(mic) => {
+                            if let Err(error) = mic.ensure_live() {
+                                self.finish(Notice::MicUnavailable(error.to_string()));
+                                return;
+                            }
                             let armed = mic.arm();
                             self.engine.warm();
                             self.show(Activity::Listening);
@@ -400,11 +404,13 @@ impl Controller {
                     let _ = std::fs::remove_dir_all(dir);
                 }
                 let audio = self.mic.as_mut().map(|mic| mic.disarm(armed));
-                if audio.as_ref().is_some_and(|audio| {
-                    utterance_seconds(fed, audio) < (mic::PREROLL + MIN_DICTATION).as_secs_f32()
-                }) {
+                let mic_live = self.mic.as_ref().is_some_and(Mic::is_live);
+                if let Some(notice) = audio
+                    .as_ref()
+                    .and_then(|audio| incomplete_dictation_notice(fed, audio, mic_live))
+                {
                     self.engine.discard();
-                    self.finish(Notice::NothingHeard);
+                    self.finish(notice);
                     Session::Idle
                 } else if let Some(audio) = audio {
                     match self.engine.submit(audio) {
@@ -1149,6 +1155,16 @@ fn utterance_seconds(fed: usize, tail: &mic::Audio16k) -> f32 {
     (fed + tail.samples().len()) as f32 / mic::RATE as f32
 }
 
+fn incomplete_dictation_notice(fed: usize, tail: &mic::Audio16k, mic_live: bool) -> Option<Notice> {
+    if fed == 0 && tail.samples().is_empty() && !mic_live {
+        Some(Notice::MicUnavailable("audio stream stopped".to_owned()))
+    } else if utterance_seconds(fed, tail) < (mic::PREROLL + MIN_DICTATION).as_secs_f32() {
+        Some(Notice::NothingHeard)
+    } else {
+        None
+    }
+}
+
 fn capture_end_ms(capture: &Capture) -> u64 {
     match capture {
         Capture::Shot { at_ms, .. } => *at_ms,
@@ -1813,6 +1829,16 @@ mod tests {
         assert!(pill
             .try_iter()
             .any(|event| event == PillEvent::Finish(Notice::NothingHeard)));
+    }
+
+    #[test]
+    fn stale_stream_with_empty_audio_reports_mic_unavailable() {
+        let notice =
+            incomplete_dictation_notice(0, &mic::Audio16k::from_samples(Vec::new()), false);
+        assert_eq!(
+            notice,
+            Some(Notice::MicUnavailable("audio stream stopped".to_owned()))
+        );
     }
 
     #[test]
