@@ -248,7 +248,6 @@ fn mixed_session_keeps_one_plain_paste_and_interleaves_captures() {
             end_ms: 7_000,
             recording_start_ms: 5_250,
             path: mov.clone(),
-            shots_ms: Vec::new(),
         }),
     ];
 
@@ -273,67 +272,6 @@ fn mixed_session_keeps_one_plain_paste_and_interleaves_captures() {
 }
 
 #[test]
-fn blip_shot_lands_in_shots_without_breaking_numbering() {
-    let root = std::env::temp_dir().join(format!(
-        "see-computer-blip-shot-test-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    let dir = root.join("take");
-    std::fs::create_dir_all(dir.join("shots")).unwrap();
-    let first = dir.join("shots/001.png");
-    let third = dir.join("shots/003.png");
-    std::fs::write(&first, b"first screenshot").unwrap();
-    std::fs::write(&third, b"third screenshot").unwrap();
-    let mov = root.join("recording.mov");
-    std::fs::write(&mov, b"movie").unwrap();
-    let captures = [
-        SessionCapture::Shot(Shot {
-            at_ms: 500,
-            path: first,
-        }),
-        SessionCapture::Clip(SessionClip {
-            start_ms: 1_000,
-            end_ms: 3_000,
-            recording_start_ms: 1_250,
-            path: mov,
-            shots_ms: vec![1_800],
-        }),
-        SessionCapture::Shot(Shot {
-            at_ms: 3_500,
-            path: third,
-        }),
-    ];
-
-    let packaged = package_session_with(
-        &dir,
-        4_000,
-        &Transcription::empty(),
-        &captures,
-        |_mov, _at_ms, _tolerance_ms, out| std::fs::write(out, b"jpeg frame").is_ok(),
-    )
-    .unwrap();
-
-    let mut names = std::fs::read_dir(dir.join("shots"))
-        .unwrap()
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    names.sort();
-    assert_eq!(names, ["001.png", "002.jpg", "003.png"]);
-    assert_eq!(
-        packaged.paste,
-        format!(
-            "No narration.\n\n3 screenshots, 1 clip (0:02): {}",
-            dir.join("take.md").display()
-        )
-    );
-    let transcript = std::fs::read_to_string(dir.join("transcript.json")).unwrap();
-    assert!(transcript.contains(r#""file": "shots/002.jpg""#));
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn clips_are_nested_in_recording_order() {
     let root = std::env::temp_dir().join(format!(
         "see-computer-ordered-clips-test-{}",
@@ -352,14 +290,12 @@ fn clips_are_nested_in_recording_order() {
             end_ms: 2_000,
             recording_start_ms: 1_250,
             path: first,
-            shots_ms: Vec::new(),
         }),
         SessionCapture::Clip(SessionClip {
             start_ms: 3_000,
             end_ms: 4_000,
             recording_start_ms: 3_250,
             path: second,
-            shots_ms: Vec::new(),
         }),
     ];
 
@@ -406,7 +342,6 @@ fn one_clip_without_shots_uses_the_nested_layout() {
             end_ms: 1_000,
             recording_start_ms: 250,
             path: mov.clone(),
-            shots_ms: Vec::new(),
         },
     )
     .unwrap();

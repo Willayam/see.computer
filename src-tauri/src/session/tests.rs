@@ -154,49 +154,6 @@ fn clip_messages_stay_inert_until_step_three() {
 }
 
 #[test]
-fn a_blip_inside_a_clip_is_retroactive_and_does_not_spawn_a_screenshot() {
-    let (mut controller, pill, dir) = test_controller();
-    controller.step(Msg::MainPressed);
-    let since = match &controller.session {
-        Session::Dictating { since, .. } => *since,
-        _ => panic!("expected dictation"),
-    };
-    controller.step(Msg::ClipStarted(since));
-    controller.step(Msg::ShotTaken(since + Duration::from_millis(500)));
-
-    let Session::Dictating {
-        capture_dir,
-        captures,
-        active_clip: Some(clip),
-        ..
-    } = &controller.session
-    else {
-        panic!("the clip must stay inside dictation");
-    };
-    assert!(capture_dir.is_some());
-    assert!(captures.is_empty());
-    assert_eq!(
-        clip.shots_ms,
-        [capture_offset_ms(since, since + Duration::from_millis(500))]
-    );
-    assert!(pill.try_iter().any(|event| event == PillEvent::Shot));
-    assert!(!std::fs::read_dir(&dir)
-        .unwrap()
-        .flatten()
-        .any(|entry| entry.path().extension().is_some_and(|ext| ext == "png")));
-
-    controller.step(Msg::ClipEnded(since + Duration::from_millis(700)));
-    let Session::Dictating { captures, .. } = &controller.session else {
-        panic!("ending the clip stopped narration");
-    };
-    assert!(matches!(
-        captures.as_slice(),
-        [Capture::Clip { shots_ms, .. }] if shots_ms.len() == 1
-    ));
-    controller.step(Msg::Cancel);
-}
-
-#[test]
 fn a_grammar_clip_shorter_than_the_pipeline_minimum_degrades_to_a_shot() {
     let (mut controller, pill, _) = test_controller();
     controller.step(Msg::MainPressed);
@@ -446,6 +403,15 @@ fn tap_guard_finishes_nothing_heard() {
     assert!(pill
         .try_iter()
         .any(|event| event == PillEvent::Finish(Notice::NothingHeard)));
+}
+
+#[test]
+fn stale_stream_with_empty_audio_reports_mic_unavailable() {
+    let notice = incomplete_dictation_notice(0, &mic::Audio16k::from_samples(Vec::new()), false);
+    assert_eq!(
+        notice,
+        Some(Notice::MicUnavailable("audio stream stopped".to_owned()))
+    );
 }
 
 #[test]

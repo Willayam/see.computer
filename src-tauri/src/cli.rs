@@ -137,7 +137,6 @@ fn clip(mov: PathBuf) -> i32 {
             end_ms: duration_ms,
             recording_start_ms: 0,
             path: mov,
-            shots_ms: Vec::new(),
         },
     ) {
         Ok(packaged) => {

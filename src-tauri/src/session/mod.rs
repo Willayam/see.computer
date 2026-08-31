@@ -66,7 +66,6 @@ pub enum Capture {
         end_ms: u64,
         recording_start_ms: u64,
         path: PathBuf,
-        shots_ms: Vec<u64>,
         finished: Receiver<recorder::Finished>,
     },
 }
@@ -75,7 +74,6 @@ pub struct ActiveClip {
     active: recorder::Active,
     started: Instant,
     recording_start_ms: u64,
-    shots_ms: Vec<u64>,
 }
 
 pub struct Take {
@@ -337,6 +335,10 @@ impl Controller {
                     }
                     match self.mic.as_mut() {
                         Some(mic) => {
+                            if let Err(error) = mic.ensure_live() {
+                                self.finish(Notice::MicUnavailable(error.to_string()));
+                                return;
+                            }
                             let armed = mic.arm();
                             self.engine.warm();
                             self.show(Activity::Listening);
@@ -368,11 +370,13 @@ impl Controller {
                     let _ = std::fs::remove_dir_all(dir);
                 }
                 let audio = self.mic.as_mut().map(|mic| mic.disarm(armed));
-                if audio.as_ref().is_some_and(|audio| {
-                    utterance_seconds(fed, audio) < (mic::PREROLL + MIN_DICTATION).as_secs_f32()
-                }) {
+                let mic_live = self.mic.as_ref().is_some_and(Mic::is_live);
+                if let Some(notice) = audio
+                    .as_ref()
+                    .and_then(|audio| incomplete_dictation_notice(fed, audio, mic_live))
+                {
                     self.engine.discard();
-                    self.finish(Notice::NothingHeard);
+                    self.finish(notice);
                     Session::Idle
                 } else if let Some(audio) = audio {
                     match self.engine.submit(audio) {
@@ -462,17 +466,14 @@ impl Controller {
                     fed,
                     mut capture_dir,
                     mut captures,
-                    mut active_clip,
+                    active_clip,
                 },
                 Msg::ShotTaken(at),
             ) => {
+                // Shift is one statement now, so a clip and a shot can never be
+                // live at the same instant and this is always a real capture.
                 let at_ms = capture_offset_ms(since, at);
-                if let Some(clip) = active_clip.as_mut() {
-                    clip.shots_ms.push(at_ms);
-                    self.shot();
-                } else {
-                    self.take_screenshot(&mut capture_dir, &mut captures, at_ms);
-                }
+                self.take_screenshot(&mut capture_dir, &mut captures, at_ms);
                 Session::Dictating {
                     armed,
                     since,
@@ -501,7 +502,6 @@ impl Controller {
                             active,
                             started: at,
                             recording_start_ms: capture_offset_ms(since, Instant::now()),
-                            shots_ms: Vec::new(),
                         }),
                         Err(error) => {
                             self.flash(Notice::ScreenRecordingFailed(error.to_string()));
@@ -708,7 +708,6 @@ impl Controller {
                     end_ms,
                     recording_start_ms: clip.recording_start_ms,
                     path,
-                    shots_ms: clip.shots_ms,
                     finished,
                 });
             }
@@ -808,7 +807,6 @@ impl Controller {
                         end_ms,
                         recording_start_ms,
                         path,
-                        shots_ms,
                         finished,
                     } => {
                         if matches!(finished.recv(), Ok(recorder::Finished(Ok(_)))) {
@@ -817,7 +815,6 @@ impl Controller {
                                 end_ms,
                                 recording_start_ms,
                                 path,
-                                shots_ms,
                             }));
                         }
                     }
@@ -913,6 +910,16 @@ fn utterance_seconds(fed: usize, tail: &mic::Audio16k) -> f32 {
     (fed + tail.samples().len()) as f32 / mic::RATE as f32
 }
 
+fn incomplete_dictation_notice(fed: usize, tail: &mic::Audio16k, mic_live: bool) -> Option<Notice> {
+    if fed == 0 && tail.samples().is_empty() && !mic_live {
+        Some(Notice::MicUnavailable("audio stream stopped".to_owned()))
+    } else if utterance_seconds(fed, tail) < (mic::PREROLL + MIN_DICTATION).as_secs_f32() {
+        Some(Notice::NothingHeard)
+    } else {
+        None
+    }
+}
+
 fn capture_end_ms(capture: &Capture) -> u64 {
     match capture {
         Capture::Shot { at_ms, .. } => *at_ms,
@@ -923,11 +930,8 @@ fn capture_end_ms(capture: &Capture) -> u64 {
 fn capture_screenshot_count(captures: &[Capture]) -> usize {
     captures
         .iter()
-        .map(|capture| match capture {
-            Capture::Shot { .. } => 1,
-            Capture::Clip { shots_ms, .. } => shots_ms.len(),
-        })
-        .sum()
+        .filter(|capture| matches!(capture, Capture::Shot { .. }))
+        .count()
 }
 
 fn discard_captures(dir: Option<PathBuf>, captures: Vec<Capture>) {

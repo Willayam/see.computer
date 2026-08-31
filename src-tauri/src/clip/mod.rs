@@ -207,7 +207,6 @@ pub struct SessionClip {
     /// clip starts at the finger-down instant.
     pub recording_start_ms: u64,
     pub path: PathBuf,
-    pub shots_ms: Vec<u64>,
 }
 
 pub enum SessionCapture {
@@ -354,24 +353,6 @@ fn package_session_with(
                         }));
                     }
                 }
-
-                let mut shots = Vec::new();
-                for at_ms in &clip.shots_ms {
-                    let file = shots_dir.join(format!("{:03}.jpg", shot_number + 1));
-                    let local_at = at_ms.saturating_sub(clip.recording_start_ms);
-                    if extract(&clip.path, local_at, 0, &file) {
-                        shot_number += 1;
-                        let relative = path_from(dir, &file);
-                        artifacts.push(Artifact::image(*at_ms, relative.clone()));
-                        shots.push(serde_json::json!({
-                            "atMs": at_ms,
-                            "timestamp": position_timestamp(*at_ms),
-                            "file": relative,
-                        }));
-                    } else {
-                        let _ = std::fs::remove_file(file);
-                    }
-                }
                 json_captures.push(serde_json::json!({
                     "type": "clip",
                     "startMs": clip.start_ms,
@@ -379,7 +360,6 @@ fn package_session_with(
                     "durationMs": clip.end_ms.saturating_sub(clip.start_ms),
                     "video": video,
                     "frames": frames,
-                    "shots": shots,
                 }));
                 movies.push((&clip.path, nested_mov));
             }
