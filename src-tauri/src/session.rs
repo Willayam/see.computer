@@ -79,7 +79,6 @@ pub enum Capture {
         end_ms: u64,
         recording_start_ms: u64,
         path: PathBuf,
-        shots_ms: Vec<u64>,
         finished: Receiver<recorder::Finished>,
     },
 }
@@ -88,7 +87,6 @@ pub struct ActiveClip {
     active: recorder::Active,
     started: Instant,
     recording_start_ms: u64,
-    shots_ms: Vec<u64>,
 }
 
 pub struct ShotSession {
@@ -492,17 +490,14 @@ impl Controller {
                     fed,
                     mut capture_dir,
                     mut captures,
-                    mut active_clip,
+                    active_clip,
                 },
                 Msg::ShotTaken(at),
             ) => {
+                // Shift is one statement now, so a clip and a shot can never be
+                // live at the same instant and this is always a real capture.
                 let at_ms = capture_offset_ms(since, at);
-                if let Some(clip) = active_clip.as_mut() {
-                    clip.shots_ms.push(at_ms);
-                    self.shot();
-                } else {
-                    self.take_screenshot(&mut capture_dir, &mut captures, at_ms);
-                }
+                self.take_screenshot(&mut capture_dir, &mut captures, at_ms);
                 Session::Dictating {
                     armed,
                     since,
@@ -531,7 +526,6 @@ impl Controller {
                             active,
                             started: at,
                             recording_start_ms: capture_offset_ms(since, Instant::now()),
-                            shots_ms: Vec::new(),
                         }),
                         Err(error) => {
                             self.flash(Notice::ScreenRecordingFailed(error.to_string()));
@@ -855,7 +849,6 @@ impl Controller {
                     end_ms,
                     recording_start_ms: clip.recording_start_ms,
                     path,
-                    shots_ms: clip.shots_ms,
                     finished,
                 });
             }
@@ -1025,7 +1018,6 @@ impl Controller {
                         end_ms,
                         recording_start_ms,
                         path,
-                        shots_ms,
                         finished,
                     } => {
                         if matches!(finished.recv(), Ok(recorder::Finished(Ok(_)))) {
@@ -1034,8 +1026,7 @@ impl Controller {
                                 end_ms,
                                 recording_start_ms,
                                 path,
-                                shots_ms,
-                            }));
+                                    }));
                         }
                     }
                 }
@@ -1174,11 +1165,8 @@ fn captures_only_shots(captures: &[Capture]) -> bool {
 fn capture_screenshot_count(captures: &[Capture]) -> usize {
     captures
         .iter()
-        .map(|capture| match capture {
-            Capture::Shot { .. } => 1,
-            Capture::Clip { shots_ms, .. } => shots_ms.len(),
-        })
-        .sum()
+        .filter(|capture| matches!(capture, Capture::Shot { .. }))
+        .count()
 }
 
 fn discard_captures(dir: Option<PathBuf>, captures: Vec<Capture>) {
@@ -1432,48 +1420,6 @@ mod tests {
         controller.step(Msg::Cancel);
     }
 
-    #[test]
-    fn a_blip_inside_a_clip_is_retroactive_and_does_not_spawn_a_screenshot() {
-        let (mut controller, pill, dir) = test_controller();
-        controller.step(Msg::MainPressed);
-        let since = match &controller.session {
-            Session::Dictating { since, .. } => *since,
-            _ => panic!("expected dictation"),
-        };
-        controller.step(Msg::ClipStarted(since));
-        controller.step(Msg::ShotTaken(since + Duration::from_millis(500)));
-
-        let Session::Dictating {
-            capture_dir,
-            captures,
-            active_clip: Some(clip),
-            ..
-        } = &controller.session
-        else {
-            panic!("the clip must stay inside dictation");
-        };
-        assert!(capture_dir.is_some());
-        assert!(captures.is_empty());
-        assert_eq!(
-            clip.shots_ms,
-            [capture_offset_ms(since, since + Duration::from_millis(500))]
-        );
-        assert!(pill.try_iter().any(|event| event == PillEvent::Shot));
-        assert!(!std::fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .any(|entry| entry.path().extension().is_some_and(|ext| ext == "png")));
-
-        controller.step(Msg::ClipEnded(since + Duration::from_millis(700)));
-        let Session::Dictating { captures, .. } = &controller.session else {
-            panic!("ending the clip stopped narration");
-        };
-        assert!(matches!(
-            captures.as_slice(),
-            [Capture::Clip { shots_ms, .. }] if shots_ms.len() == 1
-        ));
-        controller.step(Msg::Cancel);
-    }
 
     #[test]
     fn a_grammar_clip_shorter_than_the_pipeline_minimum_degrades_to_a_shot() {

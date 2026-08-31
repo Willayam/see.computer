@@ -207,7 +207,6 @@ pub struct SessionClip {
     /// clip starts at the finger-down instant.
     pub recording_start_ms: u64,
     pub path: PathBuf,
-    pub shots_ms: Vec<u64>,
 }
 
 pub enum SessionCapture {
@@ -444,23 +443,6 @@ fn package_session_with(
                     }
                 }
 
-                let mut shots = Vec::new();
-                for at_ms in &clip.shots_ms {
-                    let file = shots_dir.join(format!("{:03}.jpg", shot_number + 1));
-                    let local_at = at_ms.saturating_sub(clip.recording_start_ms);
-                    if extract(&clip.path, local_at, 0, &file) {
-                        shot_number += 1;
-                        let relative = path_from(dir, &file);
-                        artifacts.push(Artifact::image(*at_ms, relative.clone()));
-                        shots.push(serde_json::json!({
-                            "atMs": at_ms,
-                            "timestamp": position_timestamp(*at_ms),
-                            "file": relative,
-                        }));
-                    } else {
-                        let _ = std::fs::remove_file(file);
-                    }
-                }
                 json_captures.push(serde_json::json!({
                     "type": "clip",
                     "startMs": clip.start_ms,
@@ -468,7 +450,6 @@ fn package_session_with(
                     "durationMs": clip.end_ms.saturating_sub(clip.start_ms),
                     "video": video,
                     "frames": frames,
-                    "shots": shots,
                 }));
                 movies.push((&clip.path, nested_mov));
             }
@@ -1259,7 +1240,6 @@ mod tests {
                 end_ms: 7_000,
                 recording_start_ms: 5_250,
                 path: mov.clone(),
-                shots_ms: Vec::new(),
             }),
         ];
 
@@ -1283,66 +1263,6 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[test]
-    fn blip_shot_lands_in_shots_without_breaking_numbering() {
-        let root = std::env::temp_dir().join(format!(
-            "see-computer-blip-shot-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let dir = root.join("take");
-        std::fs::create_dir_all(dir.join("shots")).unwrap();
-        let first = dir.join("shots/001.png");
-        let third = dir.join("shots/003.png");
-        std::fs::write(&first, b"first screenshot").unwrap();
-        std::fs::write(&third, b"third screenshot").unwrap();
-        let mov = root.join("recording.mov");
-        std::fs::write(&mov, b"movie").unwrap();
-        let captures = [
-            SessionCapture::Shot(Shot {
-                at_ms: 500,
-                path: first,
-            }),
-            SessionCapture::Clip(SessionClip {
-                start_ms: 1_000,
-                end_ms: 3_000,
-                recording_start_ms: 1_250,
-                path: mov,
-                shots_ms: vec![1_800],
-            }),
-            SessionCapture::Shot(Shot {
-                at_ms: 3_500,
-                path: third,
-            }),
-        ];
-
-        let packaged = package_session_with(
-            &dir,
-            4_000,
-            &Transcription::empty(),
-            &captures,
-            |_mov, _at_ms, _tolerance_ms, out| std::fs::write(out, b"jpeg frame").is_ok(),
-        )
-        .unwrap();
-
-        let mut names = std::fs::read_dir(dir.join("shots"))
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        names.sort();
-        assert_eq!(names, ["001.png", "002.jpg", "003.png"]);
-        assert_eq!(
-            packaged.paste,
-            format!(
-                "No narration.\n\n3 screenshots, 1 clip (0:02): {}",
-                dir.join("take.md").display()
-            )
-        );
-        let transcript = std::fs::read_to_string(dir.join("transcript.json")).unwrap();
-        assert!(transcript.contains(r#""file": "shots/002.jpg""#));
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn clips_are_nested_in_recording_order() {
@@ -1363,14 +1283,12 @@ mod tests {
                 end_ms: 2_000,
                 recording_start_ms: 1_250,
                 path: first,
-                shots_ms: Vec::new(),
             }),
             SessionCapture::Clip(SessionClip {
                 start_ms: 3_000,
                 end_ms: 4_000,
                 recording_start_ms: 3_250,
                 path: second,
-                shots_ms: Vec::new(),
             }),
         ];
 
@@ -1417,7 +1335,6 @@ mod tests {
                 end_ms: 1_000,
                 recording_start_ms: 250,
                 path: mov.clone(),
-                shots_ms: Vec::new(),
             },
         )
         .unwrap();
