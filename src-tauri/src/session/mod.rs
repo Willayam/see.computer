@@ -383,10 +383,13 @@ impl Controller {
                 }
                 let audio = self.mic.as_mut().map(|mic| mic.disarm(armed));
                 let mic_live = self.mic.as_ref().is_some_and(Mic::is_live);
-                if let Some(notice) = audio
-                    .as_ref()
-                    .and_then(|audio| incomplete_dictation_notice(fed, audio, mic_live))
-                {
+                let mic_heard = self.mic.as_ref().is_some_and(Mic::heard);
+                if let Some(notice) = audio.as_ref().and_then(|audio| {
+                    incomplete_dictation_notice(fed, audio, mic_live, mic_heard)
+                }) {
+                    if notice == Notice::MicSilent {
+                        self.mic = None;
+                    }
                     self.engine.discard();
                     self.finish(notice);
                     Session::Idle
@@ -960,11 +963,18 @@ fn utterance_seconds(fed: usize, tail: &mic::Audio16k) -> f32 {
     (fed + tail.samples().len()) as f32 / mic::RATE as f32
 }
 
-fn incomplete_dictation_notice(fed: usize, tail: &mic::Audio16k, mic_live: bool) -> Option<Notice> {
+fn incomplete_dictation_notice(
+    fed: usize,
+    tail: &mic::Audio16k,
+    mic_live: bool,
+    mic_heard: bool,
+) -> Option<Notice> {
     if fed == 0 && tail.samples().is_empty() && !mic_live {
         Some(Notice::MicUnavailable("audio stream stopped".to_owned()))
     } else if utterance_seconds(fed, tail) < (mic::PREROLL + MIN_DICTATION).as_secs_f32() {
         Some(Notice::NothingHeard)
+    } else if !mic_heard {
+        Some(Notice::MicSilent)
     } else {
         None
     }

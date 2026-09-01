@@ -56,6 +56,7 @@ pub enum Activity {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Notice {
     NothingHeard,
+    MicSilent,
     StillTranscribing,
     Cancelled,
     Loading(Option<u8>),
@@ -87,7 +88,8 @@ impl Notice {
             | Notice::TriggerChanged(_)
             | Notice::Copied
             | Notice::CopiedNoPaste => Tone::Info,
-            Notice::Unavailable(_)
+            Notice::MicSilent
+            | Notice::Unavailable(_)
             | Notice::MicUnavailable(_)
             | Notice::ScreenRecordingFailed(_)
             | Notice::TranscriptionFailed(_)
@@ -99,6 +101,7 @@ impl Notice {
     pub fn text(&self) -> String {
         match self {
             Notice::NothingHeard => "Nothing heard".to_owned(),
+            Notice::MicSilent => "No sound from the microphone, try again".to_owned(),
             Notice::StillTranscribing => "Still transcribing".to_owned(),
             Notice::Cancelled => "Cancelled".to_owned(),
             Notice::Loading(Some(percent)) => format!("Model loading {percent}%"),
