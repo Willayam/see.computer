@@ -1,6 +1,14 @@
 //! The transparent, click-through, never-key activity overlay.
 
 use serde::Serialize;
+
+#[link(name = "objc", kind = "dylib")]
+extern "C" {
+    fn object_setClass(
+        object: *mut objc2::runtime::AnyObject,
+        class: *const objc2::runtime::AnyClass,
+    ) -> *const objc2::runtime::AnyClass;
+}
 use std::sync::mpsc::Receiver;
 use tauri::{AppHandle, Emitter, Listener, Manager, PhysicalPosition, WebviewWindow};
 
@@ -219,11 +227,12 @@ fn configure_hud(window: &WebviewWindow) {
     const NS_STATUS_WINDOW_LEVEL: i64 = 25;
     const CAN_JOIN_ALL_SPACES: usize = 1 << 0;
     const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
+    const NONACTIVATING_PANEL: usize = 1 << 7;
     const SHARING_NONE: usize = 0;
 
     unsafe {
         use objc2::msg_send;
-        use objc2::runtime::AnyObject;
+        use objc2::runtime::{AnyClass, AnyObject};
         let Ok(pointer) = window.ns_window() else {
             return;
         };
@@ -231,14 +240,24 @@ fn configure_hud(window: &WebviewWindow) {
         if window.is_null() {
             return;
         }
+        // The card's buttons are clicked while another app is frontmost. An
+        // ordinary NSWindow spends that first click activating see.computer,
+        // so Copy needs two clicks, and worse, we become frontmost: the next
+        // dictation then classifies our own pill as not editable and holds
+        // again. A nonactivating panel delivers the click and never takes
+        // frontmost. NSPanel adds no instance variables, so re-classing a
+        // live NSWindow is safe.
+        if let Some(panel) = AnyClass::get(c"NSPanel") {
+            object_setClass(window, panel);
+            let mask: usize = msg_send![window, styleMask];
+            let _: () = msg_send![window, setStyleMask: mask | NONACTIVATING_PANEL];
+            let _: () = msg_send![window, setBecomesKeyOnlyIfNeeded: true];
+        }
         let _: () = msg_send![window, setLevel: NS_STATUS_WINDOW_LEVEL];
         let current: usize = msg_send![window, collectionBehavior];
         let behavior = current | CAN_JOIN_ALL_SPACES | FULL_SCREEN_AUXILIARY;
         let _: () = msg_send![window, setCollectionBehavior: behavior];
         let _: () = msg_send![window, setIgnoresMouseEvents: true];
-        // The first click must reach the card rather than being eaten to
-        // activate see.computer, since the user is aiming at Copy, not at us.
-        let _: () = msg_send![window, setAcceptsMouseMovedEvents: true];
         let _: () = msg_send![window, setHidesOnDeactivate: false];
         // Kept out of screenshots and recordings, except when a verification
         // run needs to see it (the seam mirrors the ones read in main.rs).
@@ -266,10 +285,14 @@ fn attach_card_listeners(
 
     let sizing = app.clone();
     let sizing_window = window.clone();
+    let sizing_card = card.clone();
     app.listen_any("pill-size", move |event| {
         let Ok(size) = serde_json::from_str::<Size>(event.payload()) else {
             return;
         };
+        if sizing_card.lock().map(|slot| slot.is_none()).unwrap_or(true) {
+            return;                     // the card went away while we were asked to grow
+        }
         let window = sizing_window.clone();
         let _ = sizing.run_on_main_thread(move || {
             resize_and_centre(&window, (size.width, size.height));
@@ -401,14 +424,17 @@ fn goertzel(samples: &[f32], rate: f32, freq: f32) -> f32 {
 /// immediately after `set_size`.
 fn resize_and_centre(window: &WebviewWindow, logical: (f64, f64)) {
     let _ = window.set_size(tauri::LogicalSize::new(logical.0, logical.1));
-    move_to_cursor_monitor_sized(window, Some(logical));
+    place(window, logical);
 }
 
 fn move_to_cursor_monitor(window: &WebviewWindow) {
-    move_to_cursor_monitor_sized(window, None);
+    place(window, (IDLE_SIZE.0 as f64, IDLE_SIZE.1 as f64));
 }
 
-fn move_to_cursor_monitor_sized(window: &WebviewWindow, logical: Option<(f64, f64)>) {
+/// Centres on the monitor under the cursor, sized by the caller. The size is
+/// passed rather than read back, because `outer_size` still reports the old one
+/// immediately after `set_size`.
+fn place(window: &WebviewWindow, logical: (f64, f64)) {
     let cursor = match window.cursor_position() {
         Ok(position) => position,
         Err(_) => return,
@@ -428,17 +454,10 @@ fn move_to_cursor_monitor_sized(window: &WebviewWindow, logical: Option<(f64, f6
         return;
     };
     let scale = monitor.scale_factor();
-    let size = match logical {
-        // The size we are about to have, not the one we still report.
-        Some((width, height)) => tauri::PhysicalSize::new(
-            (width * scale).round() as u32,
-            (height * scale).round() as u32,
-        ),
-        None => match window.outer_size() {
-            Ok(size) => size,
-            Err(_) => return,
-        },
-    };
+    let size = tauri::PhysicalSize::new(
+        (logical.0 * scale).round() as u32,
+        (logical.1 * scale).round() as u32,
+    );
     let origin = monitor.position();
     let screen = monitor.size();
     let x = origin.x + (screen.width.saturating_sub(size.width) / 2) as i32;

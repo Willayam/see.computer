@@ -19,7 +19,7 @@
     /* No universal reset in this file, so the width set from JS must include
        the padding or the card outgrows the window that was sized for it. */
     box-sizing: border-box;
-    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%) scale(.94);
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
     display: inline-flex; align-items: center; height: 40px; padding: 0 10px 0 13px;
     border-radius: 20px; white-space: nowrap; opacity: 0; pointer-events: none;
     background: rgba(22,22,25,.95); color: #fff;
@@ -29,8 +29,9 @@
                 0 14px 38px rgba(0,0,0,.44), 0 2px 8px rgba(0,0,0,.28);
     overflow: hidden;
     transition: width .34s cubic-bezier(.2,.9,.3,1), opacity .14s ease-out;
+    /* no transform transition: the width is what animates, the scale would fight it */
   }
-  #card.on { opacity: 1; transform: translate(-50%, -50%); pointer-events: auto; }
+  #card.on { opacity: 1; pointer-events: auto; }
   #card.measuring { opacity: 0; transition: none; transform: translate(-50%, -50%); }
   /* Held at the width they will end at, so the stretch reveals them rather
      than reflowing them line by line. */
@@ -164,13 +165,18 @@ function applyActivity(p) {
    in. Growing after would clip it; guessing a width would waste screen. */
 const ICON_VIDEO = '<svg viewBox="0 0 18 14" fill="currentColor"><path d="M2.4 1.2h6.4a2.2 2.2 0 0 1 2.2 2.2v7.2a2.2 2.2 0 0 1-2.2 2.2H2.4A2.2 2.2 0 0 1 .2 10.6V3.4A2.2 2.2 0 0 1 2.4 1.2Z"/><path d="M12.3 5.3l4.3-2.9a.62.62 0 0 1 .97.51v8.18a.62.62 0 0 1-.97.51L12.3 8.7Z"/></svg>';
 /* Room for the drop shadow on both sides, or the window clips it. */
-const CARD_MIN = 240, CARD_MAX = 640, CARD_H = 40, CARD_MARGIN = 48;
+const CARD_MIN = 240, CARD_MAX = 640, CARD_H = 40, CARD_MARGIN = 48, CARD_MARGIN_Y = 72;
 const cardEl = document.getElementById('card');
 const glyphEl = document.getElementById('cglyph'), noteEl = document.getElementById('cnote');
 const saidEl = document.getElementById('csaid'), copyEl = document.getElementById('ccopy');
-let carded = false, cardWidth = 0;
+let carded = false, cardWidth = 0, collapseTimer = 0, dismissTimer = 0, fittedTimer = 0;
 
 function showCard(payload) {
+  /* A card left over from the last one must not collapse this one, and its
+     pending dismiss must not clear the Rust side under a card that is up. */
+  clearTimeout(collapseTimer);
+  clearTimeout(dismissTimer);
+  clearTimeout(fittedTimer);
   carded = true;
   clearText();
   st = 'hidden';
@@ -186,7 +192,6 @@ function showCard(payload) {
   copyEl.style.width = '';
   copyEl.textContent = 'Copied';
   /* measure at natural width, then clamp */
-  saidEl.style.maxWidth = '';
   saidEl.style.width = '';
   cardEl.style.width = 'auto';
   cardEl.className = 'measuring';
@@ -204,13 +209,19 @@ function showCard(payload) {
   cardWidth = width;
   window.__TAURI__.event.emit('pill-size', {
     width: Math.ceil(cardEl.getBoundingClientRect().width) + CARD_MARGIN,
-    height: CARD_H + CARD_MARGIN,
+    height: CARD_H + CARD_MARGIN_Y,
   });
+  /* Show it anyway if the reply never comes. Without this the card sits at
+     zero opacity inside an enlarged window that has already stopped being
+     click-through, which is the shape of the capability bug. */
+  fittedTimer = setTimeout(openCard, 400);
 }
 /* The chip's own resting width, so the card looks like that chip stretching. */
 const CHIP_W = 46;
-window.__TAURI__.event.listen('pill-fitted', () => {
-  if (!carded) return;
+window.__TAURI__.event.listen('pill-fitted', openCard);
+function openCard() {
+  if (!carded || cardEl.classList.contains('on')) return;
+  clearTimeout(fittedTimer);
   /* The start width is written while `.measuring` still suppresses
      transitions, so it lands instantly instead of animating backwards from
      the measured width. Two frames later the class flips and it opens. */
@@ -221,22 +232,23 @@ window.__TAURI__.event.listen('pill-fitted', () => {
     cardEl.className = 'on';
     cardEl.style.width = cardWidth + 'px';
   }));
-});
+}
 function hideCard() {
   if (!carded) return;
   carded = false;
   cardEl.style.width = CHIP_W + 'px';
   cardEl.className = '';
   document.body.classList.remove('carded');
-  /* Told after the collapse, so the window shrinks once the card is gone. */
-  setTimeout(() => window.__TAURI__.event.emit('pill-action', 'dismiss'), 260);
+  /* Told after the collapse finishes, so the window shrinks once the card is
+     gone rather than mid-animation. Matches the 340ms width transition. */
+  dismissTimer = setTimeout(() => window.__TAURI__.event.emit('pill-action', 'dismiss'), 340);
 }
 copyEl.addEventListener('click', () => {
   if (!carded || copyEl.classList.contains('done')) return;
   window.__TAURI__.event.emit('pill-action', 'copy');
   copyEl.textContent = 'Copied';
   copyEl.classList.add('done');
-  setTimeout(hideCard, 850);
+  collapseTimer = setTimeout(hideCard, 850);
 });
 document.getElementById('cx').addEventListener('click', hideCard);
 
