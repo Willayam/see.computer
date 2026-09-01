@@ -12,6 +12,29 @@ fn segment(start_ms: u64, end_ms: u64, text: &str) -> Segment {
 }
 
 #[test]
+fn describe_is_the_inverse_of_paste() {
+    let md = Path::new("/tmp/demo/take.md");
+    let pasted = super::paste(Some("Look at the misaligned button."), 0, 1, 24_000, md);
+    let held = super::describe(&pasted);
+    assert_eq!(held.text, "Look at the misaligned button.");
+    assert_eq!(held.note.as_deref(), Some("1 clip (0:24)"));
+
+    let mixed = super::paste(Some("Two things."), 2, 1, 24_000, md);
+    assert_eq!(
+        super::describe(&mixed).note.as_deref(),
+        Some("2 screenshots, 1 clip (0:24)")
+    );
+
+    let silent = super::paste(None, 0, 1, 5_000, md);
+    assert_eq!(super::describe(&silent).text, "No narration.");
+
+    // A dictation has no note, so the pill shows a waveform not a camera.
+    let dictation = super::describe("Move the sidebar toggle to the top right.");
+    assert_eq!(dictation.text, "Move the sidebar toggle to the top right.");
+    assert_eq!(dictation.note, None);
+}
+
+#[test]
 fn frame_times_follow_sentences_with_a_minimum_gap() {
     let segments = [
         segment(400, 3_900, "a"),

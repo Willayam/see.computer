@@ -168,6 +168,9 @@ struct Controller {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     next_turn: u64,
+    /// What the in-flight paste is carrying, so the pill can show it when
+    /// nothing turned out to be able to receive it.
+    held: Option<crate::pill::Held>,
 }
 
 impl Controller {
@@ -177,6 +180,7 @@ impl Controller {
         let engine_loader = wiring.engine.clone();
         let engine = engine::Worker::spawn(wiring.engine, inbox.0.clone());
         Controller {
+            held: None,
             session: Session::Idle,
             readiness: Readiness::Loading(Progress {
                 phase: engine::Phase::Downloading,
@@ -628,8 +632,19 @@ impl Controller {
             },
             (state @ Session::Pasting { turn, .. }, Msg::Paste(done, _)) if turn != done => state,
             (Session::Pasting { .. }, Msg::Paste(_, paste::Outcome(result))) => match result {
-                Ok(()) => {
+                Ok(paste::Landing::Pasted) => {
                     let _ = self.pill.send(PillEvent::Hide);
+                    Session::Idle
+                }
+                Ok(paste::Landing::Held) => {
+                    match self.held.take() {
+                        Some(held) => {
+                            let _ = self.pill.send(PillEvent::Held(held));
+                        }
+                        None => {
+                            let _ = self.pill.send(PillEvent::Hide);
+                        }
+                    }
                     Session::Idle
                 }
                 Err(paste::Error::AccessibilityDenied) => {
@@ -833,6 +848,7 @@ impl Controller {
     }
 
     fn begin_paste(&mut self, text: Text, clipboard: paste::Clipboard) -> Session {
+        self.held = Some(crate::clip::describe(text.as_str()));
         let turn = self.mint_turn();
         let tx = self.tx.clone();
         self.paste.paste(text, clipboard, move |outcome| {
@@ -986,7 +1002,8 @@ pub fn msg_label(message: &Msg) -> &'static str {
         Msg::Engine(engine::Event::Done(_, _)) => "EngineDone",
         Msg::Packaged(_, Ok(_)) => "PackagedOk",
         Msg::Packaged(_, Err(_)) => "PackagedErr",
-        Msg::Paste(_, paste::Outcome(Ok(()))) => "PasteOk",
+        Msg::Paste(_, paste::Outcome(Ok(paste::Landing::Pasted))) => "PasteOk",
+        Msg::Paste(_, paste::Outcome(Ok(paste::Landing::Held))) => "PasteHeld",
         Msg::Paste(_, paste::Outcome(Err(_))) => "PasteErr",
     }
 }

@@ -81,7 +81,7 @@ impl Paste {
                 if let Ok(mut last_text) = last.lock() {
                     *last_text = Some(text.as_str().to_owned());
                 }
-                done(Outcome(Ok(())));
+                done(Outcome(Ok(Landing::Pasted)));
             }
         }
     }
@@ -146,7 +146,7 @@ fn paste_loop(rx: Receiver<Job>) {
         }
         let now = Instant::now();
         if is_duplicate(&last, job.text.as_str(), now) {
-            (job.done)(Outcome(Ok(())));
+            (job.done)(Outcome(Ok(Landing::Pasted)));
             continue;
         }
         let carried_prior = pending.take().and_then(|restore| {
@@ -162,10 +162,24 @@ fn paste_loop(rx: Receiver<Job>) {
             continue;
         }
         let change_count = pasteboard_change_count();
+        // Asked here rather than earlier because the frontmost app can change
+        // between transcription finishing and the keystroke going out. The
+        // query is skipped entirely when the caller never wants to hold.
+        let observation = crate::target::observe();
+        let hold = observation.focus.holds_instead_of_pasting();
+        crate::target::log(&observation, hold);
+        if hold {
+            // No Cmd+V, and the prior clipboard is not restored, so the words
+            // survive for the user to place. This is the whole fix: today a
+            // dictation with nothing focused is overwritten 1.2s later.
+            last = None;
+            (job.done)(Outcome(Ok(Landing::Held)));
+            continue;
+        }
         match post_cmd_v() {
             Ok(()) => {
                 last = Some((job.text.as_str().to_owned(), Instant::now()));
-                (job.done)(Outcome(Ok(())));
+                (job.done)(Outcome(Ok(Landing::Pasted)));
                 if job.clipboard == Clipboard::RestorePrior {
                     pending = Some(PendingRestore {
                         prior,
@@ -185,7 +199,16 @@ fn is_duplicate(last: &Option<(String, Instant)>, text: &str, now: Instant) -> b
     })
 }
 
-pub struct Outcome(pub Result<(), Error>);
+pub struct Outcome(pub Result<Landing, Error>);
+
+/// Where a job's text ended up. `Held` means no synthetic Cmd+V was posted
+/// because nothing could receive it, and the clipboard was deliberately not
+/// given back, so the words are still there for the user to place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Landing {
+    Pasted,
+    Held,
+}
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum Error {

@@ -98,6 +98,28 @@ impl Summary {
     }
 }
 
+/// Splits a pasted string back into what the pill shows: the words that were
+/// said, and the short note about what was captured. The inverse of `paste`, so
+/// the two must change together; the test below holds them to that.
+pub fn describe(pasted: &str) -> crate::pill::Held {
+    match pasted.split_once("\n\n") {
+        Some((spoken, tail)) => crate::pill::Held {
+            text: spoken.trim().trim_matches('"').to_owned(),
+            note: tail
+                .rsplit_once(": ")
+                .map(|(kinds, _)| kinds.trim().to_owned())
+                .filter(|kinds| !kinds.is_empty()),
+            clipboard: pasted.to_owned(),
+        },
+        // A plain dictation is only ever the words.
+        None => crate::pill::Held {
+            text: pasted.trim().to_owned(),
+            note: None,
+            clipboard: pasted.to_owned(),
+        },
+    }
+}
+
 /// Reads a nested take directory or a legacy movie with its sibling folder.
 /// `None` when packaging never finished.
 pub fn summary(path: &Path) -> Option<Summary> {

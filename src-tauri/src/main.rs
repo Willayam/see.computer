@@ -18,6 +18,7 @@ mod recents;
 mod recorder;
 mod rivals;
 mod session;
+mod target;
 mod text;
 mod tray;
 mod trigger;

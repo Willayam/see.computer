@@ -89,7 +89,7 @@ fn dictation_table_reaches_paste_and_idle() {
         Session::Pasting { turn, .. } => turn,
         _ => panic!("expected paste"),
     };
-    controller.step(Msg::Paste(turn, paste::Outcome(Ok(()))));
+    controller.step(Msg::Paste(turn, paste::Outcome(Ok(paste::Landing::Pasted))));
     assert!(matches!(controller.session, Session::Idle));
     assert!(pill.try_iter().any(|event| event == PillEvent::Hide));
 }
