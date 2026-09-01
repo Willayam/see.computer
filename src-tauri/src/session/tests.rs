@@ -3,7 +3,7 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
-fn fixture(dir: &std::path::Path, seconds: f32) -> std::path::PathBuf {
+fn fixture(dir: &std::path::Path, seconds: f32, sample: i16) -> std::path::PathBuf {
     let path = dir.join("mic.wav");
     let spec = hound::WavSpec {
         channels: 1,
@@ -12,8 +12,9 @@ fn fixture(dir: &std::path::Path, seconds: f32) -> std::path::PathBuf {
         sample_format: hound::SampleFormat::Int,
     };
     let mut writer = hound::WavWriter::create(&path, spec).unwrap();
-    for _ in 0..(seconds * mic::RATE as f32).round() as usize {
-        writer.write_sample(0_i16).unwrap();
+    for index in 0..(seconds * mic::RATE as f32).round() as usize {
+        let sign = if index % 2 == 0 { 1 } else { -1 };
+        writer.write_sample(sample * sign).unwrap();
     }
     writer.finalize().unwrap();
     path
@@ -45,11 +46,18 @@ fn recorder_script(dir: &std::path::Path) -> std::path::PathBuf {
 fn test_controller_with_audio(
     seconds: f32,
 ) -> (Controller, Receiver<PillEvent>, std::path::PathBuf) {
+    test_controller_with_fixture(seconds, 3_000)
+}
+
+fn test_controller_with_fixture(
+    seconds: f32,
+    sample: i16,
+) -> (Controller, Receiver<PillEvent>, std::path::PathBuf) {
     let dir = temp_dir();
     let script = recorder_script(&dir);
     let (pill_tx, pill_rx) = std::sync::mpsc::channel();
     let mut controller = Controller::for_test(Wiring {
-        mic: mic::Source::Replay(fixture(&dir, seconds)),
+        mic: mic::Source::Replay(fixture(&dir, seconds, sample)),
         engine: engine::Loader::Canned("hello world".to_owned()),
         recorder: Recorder::with_program(script, dir.clone()),
         paste: paste::Paste::dry(),
@@ -432,13 +440,28 @@ fn stale_job_is_ignored_and_cancel_drains_dictation() {
 
 #[test]
 fn tap_guard_finishes_nothing_heard() {
-    let (mut controller, pill, _) = test_controller_with_audio(0.4);
+    let (mut controller, pill, _) = test_controller_with_fixture(0.4, 0);
     controller.step(Msg::MainPressed);
     controller.step(Msg::MainReleased);
     assert!(matches!(controller.session, Session::Idle));
     assert!(pill
         .try_iter()
         .any(|event| event == PillEvent::Finish(Notice::NothingHeard)));
+}
+
+#[test]
+fn silent_capture_finishes_mic_silent_and_drops_the_mic() {
+    let (mut controller, pill, _) = test_controller_with_fixture(1.0, 0);
+    controller.step(Msg::MainPressed);
+    controller.step(Msg::MainReleased);
+    assert!(matches!(controller.session, Session::Idle));
+    assert!(pill
+        .try_iter()
+        .any(|event| event == PillEvent::Finish(Notice::MicSilent)));
+    assert!(
+        controller.mic.is_none(),
+        "a stream that carried nothing is dropped so the next press reopens it"
+    );
 }
 
 #[test]
