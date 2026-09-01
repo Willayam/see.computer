@@ -3,7 +3,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -92,6 +92,8 @@ enum Inner {
 struct Shared {
     armed: AtomicBool,
     last_callback_ms: AtomicU64,
+    /// Loudest armed sample as f32 bits, which order like the floats they encode.
+    peak_bits: AtomicU32,
     buf: Mutex<Vec<f32>>,
     preroll: Mutex<VecDeque<f32>>,
 }
@@ -143,6 +145,16 @@ impl Mic {
         }
     }
 
+    /// Whether the armed capture carried any signal. A live microphone never
+    /// returns exact zeros for a whole capture; a stream whose device stopped
+    /// hearing, or that macOS answers with silence, does.
+    pub fn heard(&self) -> bool {
+        match &self.inner {
+            Inner::Replay(audio) => audio.samples().iter().any(|sample| *sample != 0.0),
+            Inner::Live { shared, .. } => shared.peak_bits.load(Ordering::Relaxed) != 0,
+        }
+    }
+
     pub fn arm(&mut self) -> Armed {
         if let Some(resampler) = self.resampler.as_mut() {
             resampler.reset();
@@ -152,6 +164,7 @@ impl Mic {
                 if let Ok(mut buf) = shared.buf.lock() {
                     buf.clear();
                     buf.extend(preroll.iter().copied());
+                    shared.peak_bits.store(0, Ordering::Relaxed);
                     shared.armed.store(true, Ordering::Release);
                 }
             }
@@ -217,6 +230,7 @@ fn open_live() -> Result<(Inner, StreamingResampler), MicError> {
     let channels = config.channels();
     let shared = Arc::new(Shared {
         armed: AtomicBool::new(false),
+        peak_bits: AtomicU32::new(0),
         last_callback_ms: AtomicU64::new(monotonic_millis()),
         buf: Mutex::new(Vec::new()),
         preroll: Mutex::new(VecDeque::new()),
@@ -388,6 +402,12 @@ fn append_input(shared: &Shared, data: &[f32], rate: u32, channels: u16) {
         if let Ok(mut buf) = shared.buf.lock() {
             buf.extend_from_slice(data);
         }
+        let peak = data
+            .iter()
+            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+        shared
+            .peak_bits
+            .fetch_max(peak.to_bits(), Ordering::Relaxed);
     }
     level_tap().push(data, rate, channels);
 }

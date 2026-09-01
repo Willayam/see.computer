@@ -466,7 +466,8 @@ fn silent_capture_finishes_mic_silent_and_drops_the_mic() {
 
 #[test]
 fn stale_stream_with_empty_audio_reports_mic_unavailable() {
-    let notice = incomplete_dictation_notice(0, &mic::Audio16k::from_samples(Vec::new()), false);
+    let notice =
+        incomplete_dictation_notice(0, &mic::Audio16k::from_samples(Vec::new()), false, false);
     assert_eq!(
         notice,
         Some(Notice::MicUnavailable("audio stream stopped".to_owned()))
