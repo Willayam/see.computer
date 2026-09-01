@@ -29,6 +29,12 @@ pub fn models() -> PathBuf {
     app_support().join("models/parakeet-tdt-0.6b-v3-onnx/int8")
 }
 
+/// One line per dictation recording what Accessibility said about the frontmost
+/// app. Written only while `SEE_COMPUTER_FOCUS_LOG` is set.
+pub fn focus_log() -> PathBuf {
+    app_support().join("focus-log.tsv")
+}
+
 /// Where history goes when macOS denies Documents.
 pub fn history_fallback() -> PathBuf {
     app_support().join("history")

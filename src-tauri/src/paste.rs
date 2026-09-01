@@ -163,23 +163,25 @@ fn paste_loop(rx: Receiver<Job>) {
         }
         let change_count = pasteboard_change_count();
         // Asked here rather than earlier because the frontmost app can change
-        // between transcription finishing and the keystroke going out. The
-        // query is skipped entirely when the caller never wants to hold.
+        // between transcription finishing and the keystroke going out. Two AX
+        // round trips at a 0.25s timeout each, so an unresponsive app can delay
+        // the paste by up to half a second before we give up and paste anyway.
         let observation = crate::target::observe();
         let hold = observation.focus.holds_instead_of_pasting();
-        crate::target::log(&observation, hold);
         if hold {
             // No Cmd+V, and the prior clipboard is not restored, so the words
             // survive for the user to place. This is the whole fix: today a
             // dictation with nothing focused is overwritten 1.2s later.
             last = None;
             (job.done)(Outcome(Ok(Landing::Held)));
+            crate::target::log(&observation, true);
             continue;
         }
         match post_cmd_v() {
             Ok(()) => {
                 last = Some((job.text.as_str().to_owned(), Instant::now()));
                 (job.done)(Outcome(Ok(Landing::Pasted)));
+                crate::target::log(&observation, false);
                 if job.clipboard == Clipboard::RestorePrior {
                     pending = Some(PendingRestore {
                         prior,

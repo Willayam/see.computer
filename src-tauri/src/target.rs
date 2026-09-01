@@ -111,15 +111,25 @@ pub struct Observation {
     pub app: String,
 }
 
-/// Appends one line per dictation to `focus-log.tsv` beside the config. Holds
-/// no transcript, only which app was frontmost and what was decided about it.
+/// Appends one line per dictation recording which app was frontmost and what was
+/// decided about it. No transcript, and off unless `SEE_COMPUTER_FOCUS_LOG` is
+/// set, because an app that sells local privacy should not keep a permanent
+/// record of which apps you dictate into without being asked.
+///
+/// Called after the keystroke, never before: this runs on the `see-paste`
+/// thread, which `qos::Class::Keystroke` marks latency-critical.
 pub fn log(observation: &Observation, held: bool) {
     use std::io::Write;
 
-    let Some(data) = dirs::data_dir() else {
+    if std::env::var_os("SEE_COMPUTER_FOCUS_LOG").is_none() {
         return;
-    };
-    let path = data.join("see.computer").join("focus-log.tsv");
+    }
+    let path = crate::paths::focus_log();
+    if let Some(parent) = path.parent() {
+        // A fresh install may not have written anything here yet, and a log
+        // that silently fails to open collects no evidence at all.
+        let _ = std::fs::create_dir_all(parent);
+    }
     let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
         return;
     };
