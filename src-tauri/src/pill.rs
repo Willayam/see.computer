@@ -369,17 +369,53 @@ struct Levels {
 
 /// ~30 Hz while the pill shows Listening or Recording; silent otherwise.
 fn spawn_level_emitter(app: AppHandle, on: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-    crate::qos::spawn("see-levels", crate::qos::Class::Upkeep, move || loop {
-        std::thread::sleep(std::time::Duration::from_millis(33));
-        if !on.load(std::sync::atomic::Ordering::Relaxed) {
-            continue;
+    crate::qos::spawn("see-levels", crate::qos::Class::Upkeep, move || {
+        let mut gain = Gain::new();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(33));
+            if !on.load(std::sync::atomic::Ordering::Relaxed) {
+                continue;
+            }
+            let (window, rate) = crate::mic::level_tap().window();
+            if window.len() < 256 || rate == 0 {
+                continue;
+            }
+            let mut levels = analyze(&window, rate);
+            gain.apply(&mut levels.b);
+            let _ = app.emit_to("pill", "levels", levels);
         }
-        let (window, rate) = crate::mic::level_tap().window();
-        if window.len() < 256 || rate == 0 {
-            continue;
-        }
-        let _ = app.emit_to("pill", "levels", analyze(&window, rate));
     });
+}
+
+/// Scales the bands to the loudest thing heard lately, so a quiet microphone
+/// fills the pill the way a loud one does. The reference rises at once and
+/// decays over about two seconds of ticks toward a floor that keeps room
+/// noise from filling the bars.
+struct Gain {
+    reference: f32,
+}
+
+impl Gain {
+    const FLOOR: f32 = 0.25;
+    const DECAY: f32 = 0.015;
+
+    fn new() -> Gain {
+        Gain {
+            reference: Gain::FLOOR,
+        }
+    }
+
+    fn apply(&mut self, bands: &mut [f32; 24]) {
+        let loud = bands.iter().copied().fold(0.0, f32::max);
+        self.reference = if loud > self.reference {
+            loud
+        } else {
+            (self.reference - (self.reference - loud) * Gain::DECAY).max(Gain::FLOOR)
+        };
+        for band in bands.iter_mut() {
+            *band = (*band / self.reference).min(1.0);
+        }
+    }
 }
 
 fn analyze(samples: &[f32], rate: u32) -> Levels {
@@ -469,4 +505,45 @@ fn place(window: &WebviewWindow, logical: (f64, f64)) {
     let margin = (44.0 * scale) as u32;
     let y = origin.y + screen.height.saturating_sub(size.height + margin) as i32;
     let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The loudest band per 100 ms window of `fixtures/en.wav`, attenuated
+    /// by `gain_db`, after the running reference has scaled it.
+    fn scaled_peaks(gain_db: f32) -> Vec<f32> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/en.wav");
+        let audio = crate::mic::Audio16k::from_wav(std::path::Path::new(path)).unwrap();
+        let scale = 10.0_f32.powf(gain_db / 20.0);
+        let window = crate::mic::RATE as usize / 10;
+        let mut gain = Gain::new();
+        audio
+            .samples()
+            .chunks_exact(window)
+            .map(|chunk| {
+                let quiet: Vec<f32> = chunk.iter().map(|sample| sample * scale).collect();
+                let mut levels = analyze(&quiet, crate::mic::RATE);
+                gain.apply(&mut levels.b);
+                levels.b.iter().copied().fold(0.0, f32::max)
+            })
+            .collect()
+    }
+
+    fn percentile(values: &[f32], p: f32) -> f32 {
+        let mut sorted = values.to_vec();
+        sorted.sort_by(f32::total_cmp);
+        sorted[((sorted.len() - 1) as f32 * p) as usize]
+    }
+
+    #[test]
+    fn quiet_speech_fills_the_bars_like_loud_speech_and_pauses_stay_flat() {
+        let loud = scaled_peaks(0.0);
+        let quiet = scaled_peaks(-20.0);
+        assert!(percentile(&loud, 0.9) >= 0.95, "loud p90 {}", percentile(&loud, 0.9));
+        assert!(percentile(&quiet, 0.9) >= 0.95, "quiet p90 {}", percentile(&quiet, 0.9));
+        assert!(percentile(&quiet, 0.5) >= 0.6, "quiet p50 {}", percentile(&quiet, 0.5));
+        assert!(percentile(&quiet, 0.1) <= 0.05, "quiet p10 {}", percentile(&quiet, 0.1));
+    }
 }
