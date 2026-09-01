@@ -14,9 +14,70 @@
   .preparing #dot { background: #5ac8fa; animation: pulse .6s infinite; }
   .error { background: rgba(120,30,30,.94); }
   @keyframes pulse { 50% { opacity: .3; } }
+  /* ---- the card the chip stretches into when nothing could take the words ---- */
+  #card {
+    /* No universal reset in this file, so the width set from JS must include
+       the padding or the card outgrows the window that was sized for it. */
+    box-sizing: border-box;
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%) scale(.94);
+    display: inline-flex; align-items: center; height: 40px; padding: 0 10px 0 13px;
+    border-radius: 20px; white-space: nowrap; opacity: 0; pointer-events: none;
+    background: rgba(22,22,25,.95); color: #fff;
+    font: 400 13px/1.35 -apple-system, system-ui, "SF Pro Text", Helvetica, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    box-shadow: 0 0 0 .5px rgba(255,255,255,.16), inset 0 .5px 0 rgba(255,255,255,.10),
+                0 14px 38px rgba(0,0,0,.44), 0 2px 8px rgba(0,0,0,.28);
+    overflow: hidden;
+    transition: width .34s cubic-bezier(.2,.9,.3,1), opacity .14s ease-out;
+  }
+  #card.on { opacity: 1; transform: translate(-50%, -50%); pointer-events: auto; }
+  #card.measuring { opacity: 0; transition: none; transform: translate(-50%, -50%); }
+  /* Held at the width they will end at, so the stretch reveals them rather
+     than reflowing them line by line. */
+  #card .row { display: flex; align-items: center; flex: 0 0 auto; }
+  .cglyph { display: flex; align-items: center; gap: 2px; height: 15px; flex: 0 0 auto; margin-right: 10px;
+            color: #5ac8fa; }
+  .cglyph i { width: 2.5px; border-radius: 2px; background: currentColor;
+              box-shadow: 0 0 5px rgba(90,200,250,.55); }
+  /* Heights live here, not in a style attribute: Tauri's CSP carries a nonce,
+     which makes 'unsafe-inline' inert, so attribute styles never apply. */
+  .cglyph i.b1 { height: 6px; }
+  .cglyph i.b2 { height: 11px; }
+  .cglyph i.b3 { height: 15px; }
+  .cglyph i.b4 { height: 9px; }
+  .cglyph i.b5 { height: 5px; }
+  .cglyph svg { width: 16px; height: 12.5px; display: block;
+                filter: drop-shadow(0 0 5px rgba(90,200,250,.5)); }
+  #cnote { flex: 0 0 auto; margin-right: 9px; padding: 2px 6px; border-radius: 5px;
+           background: rgba(255,255,255,.09); color: rgba(255,255,255,.72);
+           font: 590 10.5px -apple-system, system-ui, Helvetica, sans-serif;
+           font-variant-numeric: tabular-nums; }
+  #cnote:empty { display: none; }
+  #csaid { flex: 0 0 auto; overflow: hidden; text-overflow: ellipsis;
+           letter-spacing: -.003em; color: rgba(255,255,255,.94); }
+  #ccopy { flex: 0 0 auto; margin-left: 12px; height: 26px; padding: 0 11px; border: 0; border-radius: 7px;
+           background: rgba(255,255,255,.10); color: rgba(255,255,255,.95);
+           font: 590 12px -apple-system, system-ui, Helvetica, sans-serif; letter-spacing: -.005em;
+           cursor: pointer; transition: background .12s ease-out; }
+  #ccopy:hover { background: rgba(255,255,255,.17); }
+  #ccopy:active { background: rgba(255,255,255,.24); }
+  #ccopy.done { background: rgba(52,199,89,.22); color: #7ee2a0; }
+  #crule { flex: 0 0 auto; width: 1px; height: 16px; margin: 0 4px 0 8px; background: rgba(255,255,255,.13); }
+  #cx { flex: 0 0 auto; width: 24px; height: 24px; border: 0; background: none; padding: 0;
+        display: flex; align-items: center; justify-content: center; cursor: pointer; border-radius: 6px;
+        color: rgba(255,255,255,.38); transition: color .12s ease-out, background .12s ease-out; }
+  #cx:hover { color: rgba(255,255,255,.92); background: rgba(255,255,255,.10); }
+  #cx svg { width: 9px; height: 9px; }
+  body.carded #cv, body.carded #pill { display: none; }
 </style>
 <canvas id="cv"></canvas>
 <div id="pill"><span id="dot"></span><span id="text"></span></div>
+<div id="card"><div class="row" id="crow">
+  <span class="cglyph" id="cglyph"></span><span id="cnote"></span><span id="csaid"></span>
+  <button id="ccopy">Copy</button><span id="crule"></span>
+  <button id="cx" aria-label="Dismiss"><svg viewBox="0 0 10 10" fill="none" stroke="currentColor"
+    stroke-width="1.6" stroke-linecap="round"><path d="M1.4 1.4l7.2 7.2M8.6 1.4L1.4 8.6"/></svg></button>
+</div></div>
 <script>
 'use strict';
 /* The breathing-bloom indicator (prototype: .context/proto/bloom-4.html,
@@ -96,8 +157,93 @@ function applyActivity(p) {
   clearText();
   st = ACT_MAP[p.activity] || 'hidden';
 }
+
+/* ---------- the card: shown when a dictation had nowhere to land ---------- */
+/* The window is 260x48 until the card asks for room, so the card measures
+   itself first, the window grows to exactly that, and only then does it fade
+   in. Growing after would clip it; guessing a width would waste screen. */
+const ICON_VIDEO = '<svg viewBox="0 0 18 14" fill="currentColor"><path d="M2.4 1.2h6.4a2.2 2.2 0 0 1 2.2 2.2v7.2a2.2 2.2 0 0 1-2.2 2.2H2.4A2.2 2.2 0 0 1 .2 10.6V3.4A2.2 2.2 0 0 1 2.4 1.2Z"/><path d="M12.3 5.3l4.3-2.9a.62.62 0 0 1 .97.51v8.18a.62.62 0 0 1-.97.51L12.3 8.7Z"/></svg>';
+/* Room for the drop shadow on both sides, or the window clips it. */
+const CARD_MIN = 240, CARD_MAX = 640, CARD_H = 40, CARD_MARGIN = 48;
+const cardEl = document.getElementById('card');
+const glyphEl = document.getElementById('cglyph'), noteEl = document.getElementById('cnote');
+const saidEl = document.getElementById('csaid'), copyEl = document.getElementById('ccopy');
+let carded = false, cardWidth = 0;
+
+function showCard(payload) {
+  carded = true;
+  clearText();
+  st = 'hidden';
+  document.body.classList.add('carded');
+  /* A capture gets video.fill, a dictation gets the waveform: the same pair the
+     tray uses in its glyph column (DICTATION and CLIP in tray.rs). */
+  glyphEl.innerHTML = payload.note
+    ? ICON_VIDEO
+    : [1, 2, 3, 4, 5].map((n) => `<i class="b${n}"></i>`).join('');
+  noteEl.textContent = payload.note || '';
+  saidEl.textContent = payload.text || '';
+  copyEl.classList.remove('done');
+  copyEl.style.width = '';
+  copyEl.textContent = 'Copied';
+  /* measure at natural width, then clamp */
+  saidEl.style.maxWidth = '';
+  saidEl.style.width = '';
+  cardEl.style.width = 'auto';
+  cardEl.className = 'measuring';
+  /* Pin the button at its widest label first, so pressing it never reflows the
+     row and shoves the dismiss out of the clipped card. */
+  copyEl.style.width = Math.ceil(copyEl.getBoundingClientRect().width) + 'px';
+  copyEl.textContent = 'Copy';
+  const natural = Math.ceil(cardEl.getBoundingClientRect().width);
+  const width = Math.max(CARD_MIN, Math.min(CARD_MAX, natural));
+  /* A long transcript has to give back the overshoot, and only it can. */
+  if (natural > width) {
+    saidEl.style.width = Math.floor(saidEl.getBoundingClientRect().width - (natural - width)) + 'px';
+  }
+  cardEl.style.width = width + 'px';
+  cardWidth = width;
+  window.__TAURI__.event.emit('pill-size', {
+    width: Math.ceil(cardEl.getBoundingClientRect().width) + CARD_MARGIN,
+    height: CARD_H + CARD_MARGIN,
+  });
+}
+/* The chip's own resting width, so the card looks like that chip stretching. */
+const CHIP_W = 46;
+window.__TAURI__.event.listen('pill-fitted', () => {
+  if (!carded) return;
+  /* The start width is written while `.measuring` still suppresses
+     transitions, so it lands instantly instead of animating backwards from
+     the measured width. Two frames later the class flips and it opens. */
+  cardEl.className = 'measuring';
+  cardEl.style.width = CHIP_W + 'px';
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (!carded) return;
+    cardEl.className = 'on';
+    cardEl.style.width = cardWidth + 'px';
+  }));
+});
+function hideCard() {
+  if (!carded) return;
+  carded = false;
+  cardEl.style.width = CHIP_W + 'px';
+  cardEl.className = '';
+  document.body.classList.remove('carded');
+  /* Told after the collapse, so the window shrinks once the card is gone. */
+  setTimeout(() => window.__TAURI__.event.emit('pill-action', 'dismiss'), 260);
+}
+copyEl.addEventListener('click', () => {
+  if (!carded || copyEl.classList.contains('done')) return;
+  window.__TAURI__.event.emit('pill-action', 'copy');
+  copyEl.textContent = 'Copied';
+  copyEl.classList.add('done');
+  setTimeout(hideCard, 850);
+});
+document.getElementById('cx').addEventListener('click', hideCard);
+
 window.__TAURI__.event.listen('pill', ({ payload: p }) => {
   clearTimeout(hideTimer);
+  if (p.kind === 'held') { showCard(p); return; }
+  if (carded) hideCard();
   if (p.kind === 'hide') { activity = null; st = 'hidden'; clearText(); return; }
   if (p.kind === 'show') { activity = p; applyActivity(p); return; }
   // 'bars' and 'flash' both ride the same decay; only the shutter pinches.

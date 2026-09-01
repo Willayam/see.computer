@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 use std::sync::mpsc::Receiver;
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
+use tauri::{AppHandle, Emitter, Listener, Manager, PhysicalPosition, WebviewWindow};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PillEvent {
@@ -10,7 +10,23 @@ pub enum PillEvent {
     Shot,
     Flash(Notice),
     Finish(Notice),
+    /// Nothing could take the words, so the chip stretches into a card that
+    /// shows them with a Copy button and a dismiss.
+    Held(Held),
     Hide,
+}
+
+/// What the stretched pill shows. `note` mirrors the tray's glyph column: a
+/// dictation has none and gets `waveform`, a capture has one and gets
+/// `video.fill` (`DICTATION` and `CLIP` in `tray.rs`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Held {
+    pub text: String,
+    pub note: Option<String>,
+    /// The whole paste, which for a capture is the narration *and* the path.
+    /// The card shows `text`; Copy writes this. Never sent to the webview.
+    #[serde(skip)]
+    pub clipboard: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -104,6 +120,7 @@ enum Wire {
         text: String,
         ends: bool,
     },
+    Held(Held),
     Hide,
 }
 
@@ -114,6 +131,8 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
     configure_hud(&window);
     let levels_on = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     spawn_level_emitter(app.clone(), levels_on.clone());
+    let card = std::sync::Arc::new(std::sync::Mutex::new(None::<Held>));
+    attach_card_listeners(app, window.clone(), card.clone());
     let app = app.clone();
     crate::qos::spawn("see-pill", crate::qos::Class::Upkeep, move || {
         let mut current = None;
@@ -122,7 +141,7 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
             let starts_activity = matches!(event, PillEvent::Show(_)) && current.is_none();
             match &event {
                 PillEvent::Show(activity) => current = Some(*activity),
-                PillEvent::Finish(_) | PillEvent::Hide => current = None,
+                PillEvent::Finish(_) | PillEvent::Hide | PillEvent::Held(_) => current = None,
                 PillEvent::Shot | PillEvent::Flash(_) => {}
             }
             let wire = match event {
@@ -138,12 +157,32 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                     text: notice.text(),
                     ends: true,
                 },
+                PillEvent::Held(held) => {
+                    if let Ok(mut slot) = card.lock() {
+                        *slot = Some(held.clone());
+                    }
+                    Wire::Held(held)
+                }
                 PillEvent::Hide => Wire::Hide,
             };
             if starts_activity {
                 let dispatcher = app.clone();
                 let window = window.clone();
                 let _ = dispatcher.run_on_main_thread(move || move_to_cursor_monitor(&window));
+            }
+            // Anything that is not the card returns the window to the chip's
+            // size and makes it click-through again.
+            if !matches!(wire, Wire::Held(_)) {
+                if let Ok(mut slot) = card.lock() {
+                    if slot.take().is_some() {
+                        let dispatcher = app.clone();
+                        let window = window.clone();
+                        let _ = dispatcher.run_on_main_thread(move || {
+                            resize_and_centre(&window, (IDLE_SIZE.0 as f64, IDLE_SIZE.1 as f64));
+                            set_click_through(&window, true);
+                        });
+                    }
+                }
             }
             levels_on.store(
                 matches!(
@@ -197,6 +236,9 @@ fn configure_hud(window: &WebviewWindow) {
         let behavior = current | CAN_JOIN_ALL_SPACES | FULL_SCREEN_AUXILIARY;
         let _: () = msg_send![window, setCollectionBehavior: behavior];
         let _: () = msg_send![window, setIgnoresMouseEvents: true];
+        // The first click must reach the card rather than being eaten to
+        // activate see.computer, since the user is aiming at Copy, not at us.
+        let _: () = msg_send![window, setAcceptsMouseMovedEvents: true];
         let _: () = msg_send![window, setHidesOnDeactivate: false];
         // Kept out of screenshots and recordings, except when a verification
         // run needs to see it (the seam mirrors the ones read in main.rs).
@@ -206,6 +248,89 @@ fn configure_hud(window: &WebviewWindow) {
         let _: () = msg_send![window, orderFrontRegardless];
     }
 }
+
+
+/// The card's width depends on the text, which only the webview can measure.
+/// It reports the size it needs, the window grows to exactly that, and only
+/// then does the card animate in, so it is never clipped by a 260px window.
+fn attach_card_listeners(
+    app: &AppHandle,
+    window: WebviewWindow,
+    card: std::sync::Arc<std::sync::Mutex<Option<Held>>>,
+) {
+    #[derive(serde::Deserialize)]
+    struct Size {
+        width: f64,
+        height: f64,
+    }
+
+    let sizing = app.clone();
+    let sizing_window = window.clone();
+    app.listen_any("pill-size", move |event| {
+        let Ok(size) = serde_json::from_str::<Size>(event.payload()) else {
+            return;
+        };
+        let window = sizing_window.clone();
+        let _ = sizing.run_on_main_thread(move || {
+            resize_and_centre(&window, (size.width, size.height));
+            set_click_through(&window, false);
+            let _ = window.emit_to("pill", "pill-fitted", ());
+        });
+    });
+
+    let acting = app.clone();
+    let acting_window = window;
+    app.listen_any("pill-action", move |event| {
+        match event.payload().trim_matches('"') {
+            "copy" => {
+                let held = card.lock().ok().and_then(|slot| slot.clone());
+                if let Some(held) = held {
+                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                        // The words are usually still there, because a held
+                        // paste never restores the prior clipboard. This covers
+                        // the case where something else has copied since.
+                        let _ = clipboard.set_text(held.clipboard);
+                    }
+                }
+            }
+            // Sent once the card has finished collapsing, however it was
+            // dismissed, so the window shrinks after the animation not during.
+            "dismiss" => {
+                if let Ok(mut slot) = card.lock() {
+                    *slot = None;
+                }
+                let window = acting_window.clone();
+                let _ = acting.run_on_main_thread(move || {
+                    resize_and_centre(&window, (IDLE_SIZE.0 as f64, IDLE_SIZE.1 as f64));
+                    set_click_through(&window, true);
+                });
+            }
+            _ => {}
+        }
+    });
+}
+
+/// The window is click-through except while the stretched card is up. It is
+/// never permanently large, so the dead zone is exactly the card and never the
+/// empty band around it, which would otherwise swallow clicks aimed at the
+/// text field the user is heading for.
+fn set_click_through(window: &WebviewWindow, through: bool) {
+    unsafe {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        let Ok(pointer) = window.ns_window() else {
+            return;
+        };
+        let ns_window = pointer.cast::<AnyObject>();
+        if ns_window.is_null() {
+            return;
+        }
+        let _: () = msg_send![ns_window, setIgnoresMouseEvents: through];
+    }
+}
+
+/// The chip's own size, and the ceiling the card may stretch to.
+const IDLE_SIZE: (u32, u32) = (260, 48);
 
 /// Per-frame band energies for the pill's spectrum, on the prototype's scale:
 /// 24 log-spaced bands 85 Hz..8 kHz, each already normalized 0..1.
@@ -271,7 +396,19 @@ fn goertzel(samples: &[f32], rate: f32, freq: f32) -> f32 {
     power.sqrt() * 4.0 / n as f32
 }
 
+/// Resizes and re-centres in one step. Splitting them centres against a size
+/// the window does not have yet, because `outer_size` still reports the old one
+/// immediately after `set_size`.
+fn resize_and_centre(window: &WebviewWindow, logical: (f64, f64)) {
+    let _ = window.set_size(tauri::LogicalSize::new(logical.0, logical.1));
+    move_to_cursor_monitor_sized(window, Some(logical));
+}
+
 fn move_to_cursor_monitor(window: &WebviewWindow) {
+    move_to_cursor_monitor_sized(window, None);
+}
+
+fn move_to_cursor_monitor_sized(window: &WebviewWindow, logical: Option<(f64, f64)>) {
     let cursor = match window.cursor_position() {
         Ok(position) => position,
         Err(_) => return,
@@ -290,15 +427,24 @@ fn move_to_cursor_monitor(window: &WebviewWindow) {
     }) else {
         return;
     };
-    let Ok(size) = window.outer_size() else {
-        return;
+    let scale = monitor.scale_factor();
+    let size = match logical {
+        // The size we are about to have, not the one we still report.
+        Some((width, height)) => tauri::PhysicalSize::new(
+            (width * scale).round() as u32,
+            (height * scale).round() as u32,
+        ),
+        None => match window.outer_size() {
+            Ok(size) => size,
+            Err(_) => return,
+        },
     };
     let origin = monitor.position();
     let screen = monitor.size();
     let x = origin.x + (screen.width.saturating_sub(size.width) / 2) as i32;
     // Bottom-center, hovering where Wispr Flow's bar lives. The window is
     // transparent and click-through, so overlapping the Dock's edge is fine.
-    let margin = (44.0 * monitor.scale_factor()) as u32;
+    let margin = (44.0 * scale) as u32;
     let y = origin.y + screen.height.saturating_sub(size.height + margin) as i32;
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }

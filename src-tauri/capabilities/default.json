@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "pill",
-  "description": "The pill only listens for the `pill` event. No commands, no invoke surface.",
+  "description": "The pill listens for the `pill` event and emits back the size the stretched card needs, plus which of its two buttons was pressed. No commands, no invoke surface.",
   "windows": ["pill"],
-  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "core:event:allow-emit"]
 }
