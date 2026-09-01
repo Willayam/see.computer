@@ -100,7 +100,7 @@ const DIMS = {
   armed: { w: 14, h: 14 }, rest: { w: 46, h: 19 },
   full: { w: 76, h: 24 }, load: { w: 20, h: 20 },
 };
-const RED = [255, 59, 48], CYAN = [80, 200, 245], AMBER = [255, 179, 64];
+const RED = [255, 59, 48], CYAN = [80, 200, 245];
 const WHITE = [255, 255, 255];
 const mix = (a, b, u) => [0, 1, 2].map(i => a[i] + (b[i] - a[i]) * u);
 const SHOT_FEEDBACK = 'bars';
@@ -138,7 +138,7 @@ let activity = null;         // last Show payload, to restore after a flash
 let hideTimer;
 const N = 24;
 const bandT = new Float32Array(N);
-let avgT = 0, lastLevels = 0, silentFor = 0, lastT = 0;
+let avgT = 0, lastLevels = 0;
 const fx = { flash: 0, shutter: 0 };
 const ACT_MAP = { listening: 'listen', locked: 'lock', transcribing: 'transcribe', recording: 'record', finalizing: 'save' };
 /* A take is a take whether a finger is on the trigger or not: 'lock' sizes and
@@ -369,9 +369,6 @@ function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
   const t = now / 1000;
   const active = taking(st);
-  if (!active) silentFor = 0;
-  else if (avgT < 0.045) silentFor += dt;
-  else silentFor = 0;
   tickBands(t, dt, active);
   const g = geom(dt);
   const morphResp = 0.4;
@@ -393,11 +390,10 @@ function frame(now) {
 }
 function draw(t, W, H, morph, pinch) {
   const cx = 130, cy = 25;
-  const wilted = taking(st) && silentFor > 1.2;
   // A shot whitens the sound itself rather than the chip behind it, so the
   // thing that flashes is the thing that was listening.
   const lift = SHOT_FEEDBACK === 'bars' && fx.flash > 0 ? Math.pow(fx.flash, 0.55) : 0;
-  const accent = mix(wilted ? AMBER : morphColor(morph), WHITE, lift);
+  const accent = mix(morphColor(morph), WHITE, lift);
   bodyShell(cx, cy, W, H, Math.min(W, H) / 2, st === 'lock' ? accent : null);
   const pad = Math.min(10, Math.max(4, W * 0.1)), innerW = Math.max(6, W - pad * 2);
   const maxBarH = H - 10, x0 = cx - innerW / 2, lineTh = 2.5;
@@ -418,24 +414,16 @@ function draw(t, W, H, morph, pinch) {
     return;
   }
   /* baseline: silence is just a line */
-  fillGlow(x0, cy - lineTh / 2, innerW, lineTh, lineTh / 2, wilted ? 0.55 : 0.4, accent);
-  if (wilted) {
-    const p = (t * 0.55) % 1, hx = x0 + p * innerW;
-    const grad = ctx.createLinearGradient(hx - 20, 0, hx + 20, 0);
-    grad.addColorStop(0, css(accent, 0)); grad.addColorStop(0.5, css(accent, 1)); grad.addColorStop(1, css(accent, 0));
-    ctx.fillStyle = grad;
-    ctx.beginPath(); ctx.roundRect(x0, cy - lineTh / 2 - 0.5, innerW, lineTh + 1, lineTh / 2); ctx.fill();
-  } else {
-    /* spectrum bars; recording is the same spectrum in red */
-    const n = Math.max(5, Math.min(21, 1 + 2 * Math.floor(innerW / 9)));
-    const gap = 2, bw = Math.max(1.5, (innerW - (n - 1) * gap) / n);
-    const vs = balancedBands(n, 1.5, 1.6, true);
-    for (let i = 0; i < n; i++) {
-      const bh = lineTh + vs[i] * (maxBarH - lineTh);
-      if (bh <= lineTh + 0.4) continue;
-      fillGlow(x0 + i * (bw + gap), cy - bh / 2, bw, bh, Math.min(bw / 2, 2),
-               0.9 * (0.45 + 0.55 * Math.min(1, vs[i] * 1.4)), accent);
-    }
+  fillGlow(x0, cy - lineTh / 2, innerW, lineTh, lineTh / 2, 0.4, accent);
+  /* spectrum bars; recording is the same spectrum in red */
+  const n = Math.max(5, Math.min(21, 1 + 2 * Math.floor(innerW / 9)));
+  const gap = 2, bw = Math.max(1.5, (innerW - (n - 1) * gap) / n);
+  const vs = balancedBands(n, 1.5, 1.6, true);
+  for (let i = 0; i < n; i++) {
+    const bh = lineTh + vs[i] * (maxBarH - lineTh);
+    if (bh <= lineTh + 0.4) continue;
+    fillGlow(x0 + i * (bw + gap), cy - bh / 2, bw, bh, Math.min(bw / 2, 2),
+             0.9 * (0.45 + 0.55 * Math.min(1, vs[i] * 1.4)), accent);
   }
   if (SHOT_FEEDBACK === 'shutter' && pinch > 0.5) {
     ctx.save();
