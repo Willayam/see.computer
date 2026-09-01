@@ -87,7 +87,7 @@ pub struct Summary {
 
 impl Summary {
     /// The same text the take pasted at the cursor.
-    pub fn paste(&self) -> String {
+pub fn paste(&self) -> String {
         paste(
             self.text.as_deref(),
             self.screenshot_count,
@@ -95,28 +95,6 @@ impl Summary {
             self.clip_duration_ms,
             &self.markdown,
         )
-    }
-}
-
-/// Splits a pasted string back into what the pill shows: the words that were
-/// said, and the short note about what was captured. The inverse of `paste`, so
-/// the two must change together; the test below holds them to that.
-pub fn describe(pasted: &str) -> crate::pill::Held {
-    match pasted.split_once("\n\n") {
-        Some((spoken, tail)) => crate::pill::Held {
-            text: spoken.trim().trim_matches('"').to_owned(),
-            note: tail
-                .rsplit_once(": ")
-                .map(|(kinds, _)| kinds.trim().to_owned())
-                .filter(|kinds| !kinds.is_empty()),
-            clipboard: pasted.to_owned(),
-        },
-        // A plain dictation is only ever the words.
-        None => crate::pill::Held {
-            text: pasted.trim().to_owned(),
-            note: None,
-            clipboard: pasted.to_owned(),
-        },
     }
 }
 
@@ -215,6 +193,10 @@ pub struct Packaged {
     /// What lands at the cursor: the spoken words first, so the paste reads as
     /// a message anywhere, then the `take.md` path for agents that can follow it.
     pub paste: String,
+    /// The narration and the capture badge, kept as data so the pill never has
+    /// to parse them back out of `paste`.
+    pub spoken: Option<String>,
+    pub note: Option<String>,
 }
 
 pub struct Shot {
@@ -244,15 +226,9 @@ pub enum PackageError {
     Io(#[from] std::io::Error),
 }
 
-/// The empty line keeps the narration as the message and the take path as a
-/// supporting note, which is the sparse shape that made agents inspect selectively.
-pub fn paste(
-    full_text: Option<&str>,
-    screenshot_count: usize,
-    clip_count: usize,
-    clip_duration_ms: u64,
-    markdown: &Path,
-) -> String {
+/// What was captured, as the pill's badge shows it: "1 clip (0:24)",
+/// "2 screenshots, 1 clip (0:24)". Empty when a take produced nothing.
+pub fn kinds(screenshot_count: usize, clip_count: usize, clip_duration_ms: u64) -> Option<String> {
     let mut kinds = Vec::with_capacity(2);
     match screenshot_count {
         0 => {}
@@ -267,7 +243,19 @@ pub fn paste(
             duration_timestamp(clip_duration_ms)
         )),
     }
-    let tail = kinds.join(", ");
+    (!kinds.is_empty()).then(|| kinds.join(", "))
+}
+
+/// The empty line keeps the narration as the message and the take path as a
+/// supporting note, which is the sparse shape that made agents inspect selectively.
+pub fn paste(
+    full_text: Option<&str>,
+    screenshot_count: usize,
+    clip_count: usize,
+    clip_duration_ms: u64,
+    markdown: &Path,
+) -> String {
+    let tail = kinds(screenshot_count, clip_count, clip_duration_ms).unwrap_or_default();
     match full_text {
         Some(text) if !text.is_empty() => {
             format!("\"{text}\"\n\n{tail}: {}", markdown.display())
@@ -415,7 +403,15 @@ fn package_session_with(
         clip_duration_ms,
         &markdown,
     );
-    Ok(Packaged { markdown, paste })
+    Ok(Packaged {
+        markdown,
+        paste,
+        spoken: transcription
+            .text
+            .as_ref()
+            .map(|text| text.as_str().to_owned()),
+        note: kinds(shot_number, clip_number, clip_duration_ms),
+    })
 }
 
 pub fn package_single_clip(

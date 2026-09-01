@@ -95,6 +95,42 @@ fn dictation_table_reaches_paste_and_idle() {
 }
 
 #[test]
+fn nothing_focused_shows_the_words_instead_of_losing_them() {
+    let (mut controller, pill, _) = test_controller();
+    controller.step(Msg::MainPressed);
+    controller.step(Msg::MainReleased);
+    let job = match controller.session {
+        Session::Transcribing { job, .. } => job,
+        _ => panic!("expected transcription"),
+    };
+    controller.step(Msg::Engine(engine::Event::Done(
+        job,
+        Ok(engine::Transcription {
+            text: Text::parse("hello world"),
+            segments: Vec::new(),
+        }),
+    )));
+    let turn = match controller.session {
+        Session::Pasting { turn, .. } => turn,
+        _ => panic!("expected paste"),
+    };
+    controller.step(Msg::Paste(turn, paste::Outcome(Ok(paste::Landing::Held))));
+    assert!(matches!(controller.session, Session::Idle));
+    // The words reach the pill rather than vanishing with the clipboard, and a
+    // dictation carries no capture note, so the card draws the waveform.
+    let held = pill
+        .try_iter()
+        .find_map(|event| match event {
+            PillEvent::Held(held) => Some(held),
+            _ => None,
+        })
+        .expect("held dictation should reach the pill");
+    assert_eq!(held.text, "hello world");
+    assert_eq!(held.note, None);
+    assert_eq!(held.clipboard, "hello world");
+}
+
+#[test]
 fn shots_accumulate_without_interrupting_dictation() {
     let (mut controller, pill, _) = test_controller();
     controller.step(Msg::MainPressed);
@@ -243,15 +279,15 @@ fn a_silent_shot_session_still_writes_and_pastes_its_folder() {
             continue;
         };
         if let Msg::Packaged(turn, result) = message {
-            let paste = result.unwrap();
+            let packaged = result.unwrap();
             assert_eq!(
-                paste,
+                packaged.paste,
                 format!(
                     "No narration.\n\n1 screenshot: {}",
                     session_dir.join("take.md").display()
                 )
             );
-            controller.step(Msg::Packaged(turn, Ok(paste)));
+            controller.step(Msg::Packaged(turn, Ok(packaged)));
             break;
         }
         controller.step(message);

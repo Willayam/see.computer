@@ -53,6 +53,9 @@ pub enum Session {
     Pasting {
         turn: Turn,
         since: Instant,
+        /// What the pill shows if nothing can receive this. Held here rather
+        /// than on the controller so it dies with the paste it belongs to.
+        held: crate::pill::Held,
     },
 }
 
@@ -93,6 +96,15 @@ pub enum Readiness {
     Broken(EngineError),
 }
 
+/// A finished take, as the controller needs it: the string that goes to the
+/// cursor, and the two pieces the pill shows if nothing can receive it.
+#[derive(Clone, Debug)]
+pub struct Packaged {
+    pub paste: String,
+    pub spoken: Option<String>,
+    pub note: Option<String>,
+}
+
 pub enum Msg {
     MainPressed,
     MainReleased,
@@ -111,7 +123,7 @@ pub enum Msg {
     Quit,
     RetryEngine,
     Engine(engine::Event),
-    Packaged(Turn, Result<String, String>),
+    Packaged(Turn, Result<Packaged, String>),
     Paste(Turn, paste::Outcome),
 }
 
@@ -168,9 +180,6 @@ struct Controller {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     next_turn: u64,
-    /// What the in-flight paste is carrying, so the pill can show it when
-    /// nothing turned out to be able to receive it.
-    held: Option<crate::pill::Held>,
 }
 
 impl Controller {
@@ -180,7 +189,6 @@ impl Controller {
         let engine_loader = wiring.engine.clone();
         let engine = engine::Worker::spawn(wiring.engine, inbox.0.clone());
         Controller {
-            held: None,
             session: Session::Idle,
             readiness: Readiness::Loading(Progress {
                 phase: engine::Phase::Downloading,
@@ -581,7 +589,18 @@ impl Controller {
                 match result.map(|transcription| transcription.text) {
                     Ok(Some(text)) => {
                         self.history.record(text.as_str());
-                        self.begin_paste(text.followed_by_space(), paste::Clipboard::RestorePrior)
+                        {
+                            let held = crate::pill::Held {
+                                text: text.as_str().to_owned(),
+                                note: None,
+                                clipboard: text.as_str().to_owned(),
+                            };
+                            self.begin_paste(
+                                text.followed_by_space(),
+                                paste::Clipboard::RestorePrior,
+                                held,
+                            )
+                        }
                     }
                     Ok(None) => {
                         self.finish(Notice::NothingHeard);
@@ -624,27 +643,31 @@ impl Controller {
                 state
             }
             (Session::PackagingTake { .. }, Msg::Packaged(_, result)) => match result {
-                Ok(paste) => self.begin_paste(Text::literal(paste), paste::Clipboard::Keep),
+                Ok(packaged) => {
+                    let held = crate::pill::Held {
+                        // A take with no narration still names what it caught.
+                        text: packaged.spoken.clone().unwrap_or_else(|| {
+                            packaged.note.clone().unwrap_or_else(|| "No narration.".to_owned())
+                        }),
+                        note: packaged.note.clone(),
+                        clipboard: packaged.paste.clone(),
+                    };
+                    self.begin_paste(Text::literal(packaged.paste), paste::Clipboard::Keep, held)
+                }
                 Err(error) => {
                     self.finish(Notice::ScreenRecordingFailed(error));
                     Session::Idle
                 }
             },
             (state @ Session::Pasting { turn, .. }, Msg::Paste(done, _)) if turn != done => state,
-            (Session::Pasting { .. }, Msg::Paste(_, paste::Outcome(result))) => match result {
+            (Session::Pasting { held, .. }, Msg::Paste(_, paste::Outcome(result))) => match result
+            {
                 Ok(paste::Landing::Pasted) => {
                     let _ = self.pill.send(PillEvent::Hide);
                     Session::Idle
                 }
                 Ok(paste::Landing::Held) => {
-                    match self.held.take() {
-                        Some(held) => {
-                            let _ = self.pill.send(PillEvent::Held(held));
-                        }
-                        None => {
-                            let _ = self.pill.send(PillEvent::Hide);
-                        }
-                    }
+                    let _ = self.pill.send(PillEvent::Held(held));
                     Session::Idle
                 }
                 Err(paste::Error::AccessibilityDenied) => {
@@ -836,7 +859,11 @@ impl Controller {
                 }
             }
             let result = clip::package_take(take.dir, duration_ms, &transcription, captured)
-                .map(|packaged| packaged.paste)
+                .map(|packaged| Packaged {
+                    paste: packaged.paste,
+                    spoken: packaged.spoken,
+                    note: packaged.note,
+                })
                 .map_err(|error| error.to_string());
             let _ = tx.send(Msg::Packaged(turn, result));
         });
@@ -847,8 +874,14 @@ impl Controller {
         }
     }
 
-    fn begin_paste(&mut self, text: Text, clipboard: paste::Clipboard) -> Session {
-        self.held = Some(crate::clip::describe(text.as_str()));
+    /// `held` is what the pill shows if nothing turns out to be able to receive
+    /// the text. It rides with the state, so it cannot outlive the paste.
+    fn begin_paste(
+        &mut self,
+        text: Text,
+        clipboard: paste::Clipboard,
+        held: crate::pill::Held,
+    ) -> Session {
         let turn = self.mint_turn();
         let tx = self.tx.clone();
         self.paste.paste(text, clipboard, move |outcome| {
@@ -857,6 +890,7 @@ impl Controller {
         Session::Pasting {
             turn,
             since: Instant::now(),
+            held,
         }
     }
 
