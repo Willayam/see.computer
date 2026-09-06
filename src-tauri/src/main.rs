@@ -10,6 +10,7 @@ mod history;
 mod hotkeys;
 mod menu;
 mod mic;
+mod numbers;
 mod paste;
 mod paths;
 mod pill;
