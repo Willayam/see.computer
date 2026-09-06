@@ -117,6 +117,11 @@ fn write_external(original: &Path, prepared: &Path) -> ort::Result<()> {
     Ok(())
 }
 
+/// The two passes every transcript goes through before anyone sees it.
+fn tidy(raw: &str) -> String {
+    crate::numbers::normalise(&crate::filler::strip(raw))
+}
+
 impl Engine for Parakeet {
     fn transcribe(&mut self, audio: &Audio16k) -> Result<Transcription, EngineError> {
         // A stat per utterance, so editing the vocabulary file is all it takes.
@@ -136,7 +141,7 @@ impl Engine for Parakeet {
                     .tokens
                     .iter()
                     .filter_map(|token| {
-                        let text = crate::filler::strip(&token.text);
+                        let text = tidy(&token.text);
                         (!text.is_empty()).then(|| Segment {
                             start_ms: (token.start.max(0.0) * 1000.0).round() as u64,
                             end_ms: (token.end.max(0.0) * 1000.0).round() as u64,
@@ -144,7 +149,7 @@ impl Engine for Parakeet {
                         })
                     })
                     .collect(),
-                text: Text::parse(crate::filler::strip(&result.text)),
+                text: Text::parse(tidy(&result.text)),
             })
             .map_err(|error| EngineError::Inference(error.to_string()))
     }
