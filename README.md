@@ -1,6 +1,6 @@
 # see.computer
 
-Ultra-fast, local-first dictation and instant video links for the Mac. Free and open source (MIT).
+Ultra-fast, local-first dictation and instant video links for the Mac. Free and open source (MIT). Website at [see.computer](https://see.computer).
 
 ## Install
 
