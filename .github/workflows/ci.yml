@@ -12,7 +12,7 @@ concurrency:
 jobs:
   check:
     name: fmt, clippy, test
-    runs-on: macos-15
+    runs-on: macos-26
     defaults:
       run:
         working-directory: src-tauri
