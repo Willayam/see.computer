@@ -1,14 +1,17 @@
 name: Website
 
-# Publishes site/ to the Cloudflare Pages project "see-computer", which serves
-# https://see.computer. Needs two repository secrets:
-#   CLOUDFLARE_API_TOKEN   a token with the Cloudflare Pages: Edit permission
-#   CLOUDFLARE_ACCOUNT_ID  the account id shown by `wrangler whoami`
+# Publishes site/ to https://see.computer as a Cloudflare Worker with static
+# assets, using wrangler.toml at the repo root. Needs one repository secret,
+# CLOUDFLARE_API_TOKEN, with the Workers Scripts: Edit permission on the
+# Cocco Ventures account. CLOUDFLARE_ACCOUNT_ID is already set.
+#
+# Until the token exists, `bunx wrangler deploy` from the repo root does the
+# same thing with a local wrangler login.
 
 on:
   push:
     branches: [main]
-    paths: ["site/**"]
+    paths: ["site/**", "wrangler.toml"]
   workflow_dispatch:
 
 jobs:
@@ -20,4 +23,4 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy site --project-name see-computer --branch main
+          command: deploy

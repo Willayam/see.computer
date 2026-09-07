@@ -1,0 +1,20 @@
+# Serves site/ as a Cloudflare Worker with static assets at https://see.computer.
+# Deploy with `bunx wrangler deploy` from the repo root. The custom domain
+# creates its own DNS record, so nothing has to be added by hand.
+name = "see-computer"
+compatibility_date = "2026-09-01"
+account_id = "29392a6d23b11e67789d7f1c9bcc5853"
+workers_dev = false
+
+[assets]
+directory = "site"
+html_handling = "auto-trailing-slash"
+not_found_handling = "404-page"
+
+[[routes]]
+pattern = "see.computer"
+custom_domain = true
+
+[[routes]]
+pattern = "www.see.computer"
+custom_domain = true
