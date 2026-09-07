@@ -2,17 +2,27 @@
 
 Ultra-fast, local-first dictation and instant video links for the Mac. Free and open source (MIT).
 
+## Install
+
+Download the DMG from the [latest release](https://github.com/Willayam/see.computer/releases/latest), drag see.computer into Applications, and open it. It needs macOS 14 or later on Apple Silicon.
+
+The app lives in the menu bar. On first launch it downloads the 670 MB speech model, and the pill at the bottom of the screen shows the percentage. macOS then asks for permissions, each the first time the feature that needs it runs. Microphone and Input Monitoring make hold-to-talk work. Accessibility lets the app paste for you. Screen Recording is only asked for the first time you hold the trigger with Shift. The tray menu has a shortcut to each pane, and the [Permissions](#permissions) section below says what each one is for.
+
+Then click into any text field, hold the Globe key, say something, and let go.
+
+If you would rather build it yourself, see [Build and run](#build-and-run).
+
 Three gestures. That is the whole interface.
 
 | Gesture | What happens |
 |---|---|
-| Hold **Left Option**, speak, release | The spoken text is pasted at your cursor, in any app. Audio never leaves the machine. |
-| Double tap **Left Option**, speak, tap to finish | The same take, held open with nothing on the trigger. Made for long narration, where holding a key for two minutes is the thing that gets in the way. One tap of the trigger finishes it and pastes, Esc throws it away. To take a shot or a clip inside a locked take, hold the trigger again and use Shift as usual; Shift on its own is left alone, so you can still type a capital letter. |
-| Hold **Left Option+Shift**, release to stop | Records the screen and microphone while held. On release, the recording is packaged into an agent-readable take folder. The paste contains the narration in quotes, a blank line, then a tail naming the captures and the path to `take.md`. Releasing before about 0.6 seconds discards the recording. |
+| Hold **Globe** (Fn), speak, release | The spoken text is pasted at your cursor, in any app. Audio never leaves the machine. |
+| Double tap **Globe**, speak, tap to finish | The same take, held open with nothing on the trigger. Made for long narration, where holding a key for two minutes is the thing that gets in the way. One tap of the trigger finishes it and pastes, Esc throws it away. To take a shot or a clip inside a locked take, hold the trigger again and use Shift as usual; Shift on its own is left alone, so you can still type a capital letter. |
+| Hold **Globe+Shift**, release to stop | Records the screen and microphone while held. On release, the recording is packaged into an agent-readable take folder. The paste contains the narration in quotes, a blank line, then a tail naming the captures and the path to `take.md`. Releasing before about 0.6 seconds discards the recording. |
 
-Choose Left Option, Right Option, or Fn (Globe) from the tray. Right Option is AltGr on the Swedish keyboard layout. The recording gesture always follows the trigger: whatever key you pick, hold it with Shift to record and release to stop, and double tap it to lock a take open. Both halves of the double tap have to be taps, so an ordinary hold is never mistaken for one and hold-to-talk starts exactly as fast as it always did. A locked take wears a lit ring around the pill, because a live microphone nobody is touching should never look like an idle one. The lock lives in the event tap that decodes the gesture: if the tap dies, the lock goes with it and the take finishes normally rather than leaving a microphone open that nothing can close.
+The Globe key is the default, the same key Apple and Wispr Flow use for dictation. If macOS has the Globe key set to start its own Dictation, set it to Do Nothing under System Settings > Keyboard so a double tap is not caught by both. Choose Left Option or Right Option from the tray instead if you use Globe for something else. Right Option is AltGr on the Swedish keyboard layout. The recording gesture always follows the trigger: whatever key you pick, hold it with Shift to record and release to stop, and double tap it to lock a take open. Both halves of the double tap have to be taps, so an ordinary hold is never mistaken for one and hold-to-talk starts exactly as fast as it always did. A locked take wears a lit ring around the pill, because a live microphone nobody is touching should never look like an idle one. The lock lives in the event tap that decodes the gesture: if the tap dies, the lock goes with it and the take finishes normally rather than leaving a microphone open that nothing can close.
 
-Dictation runs NVIDIA Parakeet TDT 0.6b v3 (INT8, ONNX) on the CPU. On an M3 Max a six-second Swedish sentence comes back in about 155 ms. The model is 670 MB and downloads on first launch into `~/Library/Application Support/see.computer/models/`.
+Dictation runs NVIDIA Parakeet TDT 0.6b v3 (INT8, ONNX) on the CPU. On an M3 Max a six-second English sentence comes back in about 200 ms, the median of eight runs of `see-computer transcribe` on `fixtures/en.wav`. The model is 670 MB and downloads on first launch into `~/Library/Application Support/see.computer/models/`.
 
 Hesitation is dropped before anything is pasted. `um`, `uh` and `hm` go, along with the comma or full stop stuck to them, and the next word takes over the capital letter they were holding. Hedges like `like` and `actually` stay, because they are real words far more often than they are filler, and so does `er`, which is Swedish for "your". A dictation that was nothing but a hum pastes nothing at all.
 
@@ -100,3 +110,7 @@ The menu behind the tray icon is a non-activating `NSPanel` filled with `NSGlass
 One controller thread owns the app's state, an enum with one variant per thing the app can be doing (`Idle`, `Dictating`, `Transcribing`, `Packaging`, `Pasting`). Everything else sends it a message: the global-shortcut handler, the engine worker that owns the Parakeet model, the thread that waits for `screencapture` to finish, and the paste thread that owns the clipboard. Nothing slow runs on the hotkey thread, and dictating while recording cannot be expressed. Every thread names its scheduling class in `qos.rs` rather than taking the default, which the macOS scheduler ranks below anything the user is looking at: the event tap, the controller and the paste run user-interactive, the engine runs user-initiated, and upkeep runs utility. The pill window is created non-focusable and ordered in once with `orderFrontRegardless`, so it can never take the keystroke that pastes.
 
 Screen recording spawns `/usr/sbin/screencapture -v -g -x` and stops it with SIGINT. ScreenCaptureKit is a later variant behind the same `Recorder` type.
+
+## License
+
+MIT. See `LICENSE`. The speech model and the vendored crate carry their own licenses, listed in `THIRD_PARTY.md`.

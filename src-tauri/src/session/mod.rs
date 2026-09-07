@@ -384,9 +384,10 @@ impl Controller {
                 let audio = self.mic.as_mut().map(|mic| mic.disarm(armed));
                 let mic_live = self.mic.as_ref().is_some_and(Mic::is_live);
                 let mic_heard = self.mic.as_ref().is_some_and(Mic::heard);
-                if let Some(notice) = audio.as_ref().and_then(|audio| {
-                    incomplete_dictation_notice(fed, audio, mic_live, mic_heard)
-                }) {
+                if let Some(notice) = audio
+                    .as_ref()
+                    .and_then(|audio| incomplete_dictation_notice(fed, audio, mic_live, mic_heard))
+                {
                     if notice == Notice::MicSilent {
                         self.mic = None;
                     }
@@ -650,7 +651,10 @@ impl Controller {
                     let held = crate::pill::Held {
                         // A take with no narration still names what it caught.
                         text: packaged.spoken.clone().unwrap_or_else(|| {
-                            packaged.note.clone().unwrap_or_else(|| "No narration.".to_owned())
+                            packaged
+                                .note
+                                .clone()
+                                .unwrap_or_else(|| "No narration.".to_owned())
                         }),
                         note: packaged.note.clone(),
                         clipboard: packaged.paste.clone(),
@@ -663,25 +667,26 @@ impl Controller {
                 }
             },
             (state @ Session::Pasting { turn, .. }, Msg::Paste(done, _)) if turn != done => state,
-            (Session::Pasting { held, .. }, Msg::Paste(_, paste::Outcome(result))) => match result
-            {
-                Ok(paste::Landing::Pasted) => {
-                    let _ = self.pill.send(PillEvent::Hide);
-                    Session::Idle
+            (Session::Pasting { held, .. }, Msg::Paste(_, paste::Outcome(result))) => {
+                match result {
+                    Ok(paste::Landing::Pasted) => {
+                        let _ = self.pill.send(PillEvent::Hide);
+                        Session::Idle
+                    }
+                    Ok(paste::Landing::Held) => {
+                        let _ = self.pill.send(PillEvent::Held(held));
+                        Session::Idle
+                    }
+                    Err(paste::Error::AccessibilityDenied) => {
+                        self.finish(Notice::CopiedNoPaste);
+                        Session::Idle
+                    }
+                    Err(error) => {
+                        self.finish(Notice::PasteFailed(error.to_string()));
+                        Session::Idle
+                    }
                 }
-                Ok(paste::Landing::Held) => {
-                    let _ = self.pill.send(PillEvent::Held(held));
-                    Session::Idle
-                }
-                Err(paste::Error::AccessibilityDenied) => {
-                    self.finish(Notice::CopiedNoPaste);
-                    Session::Idle
-                }
-                Err(error) => {
-                    self.finish(Notice::PasteFailed(error.to_string()));
-                    Session::Idle
-                }
-            },
+            }
             (state, _) => state,
         };
     }

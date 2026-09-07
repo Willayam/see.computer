@@ -271,7 +271,6 @@ fn configure_hud(window: &WebviewWindow) {
     }
 }
 
-
 /// The card's width depends on the text, which only the webview can measure.
 /// It reports the size it needs, the window grows to exactly that, and only
 /// then does the card animate in, so it is never clipped by a 260px window.
@@ -293,8 +292,12 @@ fn attach_card_listeners(
         let Ok(size) = serde_json::from_str::<Size>(event.payload()) else {
             return;
         };
-        if sizing_card.lock().map(|slot| slot.is_none()).unwrap_or(true) {
-            return;                     // the card went away while we were asked to grow
+        if sizing_card
+            .lock()
+            .map(|slot| slot.is_none())
+            .unwrap_or(true)
+        {
+            return; // the card went away while we were asked to grow
         }
         let window = sizing_window.clone();
         let _ = sizing.run_on_main_thread(move || {
@@ -541,9 +544,25 @@ mod tests {
     fn quiet_speech_fills_the_bars_like_loud_speech_and_pauses_stay_flat() {
         let loud = scaled_peaks(0.0);
         let quiet = scaled_peaks(-20.0);
-        assert!(percentile(&loud, 0.9) >= 0.95, "loud p90 {}", percentile(&loud, 0.9));
-        assert!(percentile(&quiet, 0.9) >= 0.95, "quiet p90 {}", percentile(&quiet, 0.9));
-        assert!(percentile(&quiet, 0.5) >= 0.6, "quiet p50 {}", percentile(&quiet, 0.5));
-        assert!(percentile(&quiet, 0.1) <= 0.05, "quiet p10 {}", percentile(&quiet, 0.1));
+        assert!(
+            percentile(&loud, 0.9) >= 0.95,
+            "loud p90 {}",
+            percentile(&loud, 0.9)
+        );
+        assert!(
+            percentile(&quiet, 0.9) >= 0.95,
+            "quiet p90 {}",
+            percentile(&quiet, 0.9)
+        );
+        assert!(
+            percentile(&quiet, 0.5) >= 0.6,
+            "quiet p50 {}",
+            percentile(&quiet, 0.5)
+        );
+        assert!(
+            percentile(&quiet, 0.1) <= 0.05,
+            "quiet p10 {}",
+            percentile(&quiet, 0.1)
+        );
     }
 }

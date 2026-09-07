@@ -17,7 +17,7 @@ fn history_default() -> bool {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            trigger: Trigger::LeftOption,
+            trigger: Trigger::Fn,
             history: true,
         }
     }
