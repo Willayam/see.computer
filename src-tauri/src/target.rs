@@ -82,11 +82,7 @@ struct Attribute(CFStringRef);
 impl Attribute {
     fn new(name: &std::ffi::CStr) -> Option<Attribute> {
         let string = unsafe {
-            CFStringCreateWithCString(
-                std::ptr::null(),
-                name.as_ptr(),
-                K_CF_STRING_ENCODING_UTF8,
-            )
+            CFStringCreateWithCString(std::ptr::null(), name.as_ptr(), K_CF_STRING_ENCODING_UTF8)
         };
         (!string.is_null()).then_some(Attribute(string))
     }
@@ -130,7 +126,11 @@ pub fn log(observation: &Observation, held: bool) {
         // that silently fails to open collects no evidence at all.
         let _ = std::fs::create_dir_all(parent);
     }
-    let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
         return;
     };
     let _ = writeln!(
@@ -169,13 +169,14 @@ fn frontmost() -> Option<(i32, String)> {
             if utf8.is_null() {
                 String::new()
             } else {
-                std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+                std::ffi::CStr::from_ptr(utf8)
+                    .to_string_lossy()
+                    .into_owned()
             }
         };
         Some((pid, label))
     }
 }
-
 
 /// Reads no text. Only asks whether a caret could be placed, so nothing the
 /// user has written is ever pulled out of their app.

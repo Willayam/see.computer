@@ -87,7 +87,7 @@ pub struct Summary {
 
 impl Summary {
     /// The same text the take pasted at the cursor.
-pub fn paste(&self) -> String {
+    pub fn paste(&self) -> String {
         paste(
             self.text.as_deref(),
             self.screenshot_count,

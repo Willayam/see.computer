@@ -365,9 +365,11 @@ static void ensure_panel(void) {
         NSGlassEffectView *glass = [[NSGlassEffectView alloc] initWithFrame:frame];
         glass.cornerRadius = kCornerRadius;
         glass.style = NSGlassEffectViewStyleRegular;
+#if defined(__MAC_27_0)
         if (@available(macOS 27.0, *)) {
             glass.effectIsInteractive = YES;
         }
+#endif
         glass.contentView = gBody;
         gShell = glass;
     } else {
@@ -410,7 +412,9 @@ static void ensure_submenu_panel(void) {
         NSGlassEffectView *glass = [[NSGlassEffectView alloc] initWithFrame:frame];
         glass.cornerRadius = kCornerRadius;
         glass.style = NSGlassEffectViewStyleRegular;
+#if defined(__MAC_27_0)
         if (@available(macOS 27.0, *)) glass.effectIsInteractive = YES;
+#endif
         glass.contentView = gSubmenuBody;
         gSubmenuShell = glass;
     } else {

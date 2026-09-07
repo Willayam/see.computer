@@ -1,0 +1,26 @@
+name: Website
+
+# Publishes site/ to https://see.computer as a Cloudflare Worker with static
+# assets, using wrangler.toml at the repo root. Needs one repository secret,
+# CLOUDFLARE_API_TOKEN, with the Workers Scripts: Edit permission on the
+# Cocco Ventures account. CLOUDFLARE_ACCOUNT_ID is already set.
+#
+# Until the token exists, `bunx wrangler deploy` from the repo root does the
+# same thing with a local wrangler login.
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", "wrangler.toml"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy

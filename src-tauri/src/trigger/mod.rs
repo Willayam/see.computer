@@ -728,7 +728,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn releasing_option_and_shift_together_ends_the_clip_then_the_session() {
         let (mut decoder, start) = dictating();
@@ -742,7 +741,6 @@ mod tests {
         assert_eq!(at(&ended, 0), after(start, 9_000));
         assert!(!decoder.dictating());
     }
-
 
     #[test]
     fn a_pending_tap_still_resolves_when_the_session_ends_under_it() {
