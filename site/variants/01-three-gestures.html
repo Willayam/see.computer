@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>see.computer. Three gestures. Local dictation and video takes for the Mac.</title>
+<meta name="description" content="Hold Option to dictate at your cursor. Hold Option and Shift to record the screen and your voice into a folder an agent can read. Free, local, MIT.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #f4f2ed;
+    --ink: #141414;
+    --mute: #66645e;
+    --rule: #141414;
+    --hair: rgba(20, 20, 20, .22);
+    --accent: #5ac8fa;
+    --rec: #ff3b30;
+    --chip: rgba(20, 20, 22, .92);
+    --display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+    --body: "IBM Plex Sans", "Helvetica Neue", Helvetica, sans-serif;
+    --mono: "IBM Plex Mono", Menlo, Consolas, monospace;
+    --gutter: clamp(1.25rem, 4vw, 4rem);
+    --max: 1320px;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { background: var(--paper); color: var(--ink); -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    font-family: var(--body);
+    font-size: 1.0625rem;
+    line-height: 1.55;
+    font-feature-settings: "kern", "liga";
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: inherit; text-decoration: none; }
+  p a { text-decoration: underline; text-underline-offset: .16em; text-decoration-thickness: 1px; }
+
+  a:focus-visible, button:focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: 3px;
+  }
+
+  h1, h2, h3 { font-weight: 400; margin: 0; }
+
+  .wrap { max-width: var(--max); margin: 0 auto; padding: 0 var(--gutter); }
+
+  .mono { font-family: var(--mono); }
+
+  /* Header */
+
+  .top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1.25rem 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .brand { display: inline-flex; align-items: center; gap: .75rem; font-family: var(--mono); font-size: .95rem; }
+
+  .mark { width: 26px; height: 26px; display: block; }
+
+  .top nav { display: flex; gap: 1.75rem; font-family: var(--mono); font-size: .9rem; }
+  .top nav a { padding: .25rem 0; border-bottom: 1px solid transparent; }
+  .top nav a:hover { border-bottom-color: var(--ink); }
+
+  /* Hero */
+
+  .hero { padding: clamp(2.5rem, 6vw, 5.5rem) 0 0; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: .85rem;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--mute);
+    display: flex;
+    flex-wrap: wrap;
+    gap: .4rem 2rem;
+    margin: 0 0 clamp(2rem, 5vw, 4rem);
+  }
+
+  h1 {
+    font-family: var(--display);
+    font-size: clamp(2.6rem, 8vw, 7.5rem);
+    line-height: .96;
+    letter-spacing: -.015em;
+    max-width: 12ch;
+    text-wrap: balance;
+    margin-bottom: clamp(2.5rem, 6vw, 5rem);
+  }
+
+  h1 em { font-style: italic; }
+
+  /* The gesture table */
+
+  .gestures { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+
+  .gesture {
+    display: grid;
+    grid-template-columns: minmax(4rem, 1fr) 6fr 5fr;
+    gap: 0 clamp(1rem, 3vw, 3rem);
+    align-items: start;
+    padding: clamp(1.75rem, 3.5vw, 3rem) 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .gesture .n {
+    font-family: var(--display);
+    font-size: clamp(4rem, 11vw, 10.5rem);
+    line-height: .8;
+    letter-spacing: -.03em;
+    font-variant-numeric: lining-nums;
+  }
+
+  .gesture h2 {
+    font-family: var(--display);
+    font-size: clamp(1.7rem, 4.3vw, 3.9rem);
+    line-height: 1.02;
+    letter-spacing: -.01em;
+    text-wrap: balance;
+  }
+
+  .gesture .keys { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1.1rem; align-items: center; }
+
+  .gesture .result { font-size: clamp(1rem, 1.35vw, 1.2rem); line-height: 1.5; max-width: 40ch; padding-top: .35em; }
+  .gesture .result p { margin: 0 0 .9em; }
+  .gesture .result p:last-child { margin-bottom: 0; }
+
+  kbd {
+    font-family: var(--mono);
+    font-size: .85rem;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    gap: .45em;
+    padding: .55em .7em .5em;
+    border: 1px solid var(--ink);
+    border-bottom-width: 3px;
+    border-radius: 6px;
+    background: var(--paper);
+    white-space: nowrap;
+  }
+  kbd .sym { font-size: 1.05rem; line-height: 1; }
+  .plus { font-family: var(--mono); color: var(--mute); }
+  .verb { font-family: var(--mono); font-size: .85rem; color: var(--mute); text-transform: uppercase; letter-spacing: .06em; }
+
+  /* Pitch and CTAs */
+
+  .pitch {
+    display: grid;
+    grid-template-columns: minmax(4rem, 1fr) 11fr;
+    gap: 0 clamp(1rem, 3vw, 3rem);
+    padding: clamp(2rem, 4vw, 3.5rem) 0 clamp(3rem, 7vw, 6rem);
+  }
+
+  .pitch p {
+    margin: 0 0 1.75rem;
+    font-size: clamp(1.15rem, 2vw, 1.6rem);
+    line-height: 1.35;
+    max-width: 34ch;
+    text-wrap: balance;
+  }
+
+  .ctas { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; }
+
+  .btn {
+    font-family: var(--mono);
+    font-size: .95rem;
+    display: inline-flex;
+    align-items: center;
+    gap: .6rem;
+    padding: .9rem 1.4rem;
+    border: 1px solid var(--ink);
+    border-radius: 999px;
+    transition: transform .3s cubic-bezier(.2, .8, .2, 1);
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn.primary { background: var(--ink); color: var(--paper); }
+  .btn .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+  .cta-note { font-family: var(--mono); font-size: .85rem; color: var(--mute); margin-left: .5rem; }
+
+  /* Numbered spec rows */
+
+  .row {
+    display: grid;
+    grid-template-columns: minmax(4rem, 1fr) 11fr;
+    gap: 0 clamp(1rem, 3vw, 3rem);
+    padding: clamp(2.5rem, 5vw, 4.5rem) 0;
+    border-top: 1px solid var(--rule);
+  }
+
+  .row .num {
+    font-family: var(--mono);
+    font-size: .95rem;
+    padding-top: .55rem;
+  }
+
+  .row .body { display: grid; grid-template-columns: 5fr 6fr; gap: 2.5rem clamp(2rem, 4vw, 4rem); }
+
+  .row h2 {
+    font-family: var(--display);
+    font-size: clamp(2rem, 4.2vw, 3.6rem);
+    line-height: 1.02;
+    letter-spacing: -.01em;
+    text-wrap: balance;
+    margin-bottom: 1.25rem;
+  }
+
+  .row h3 {
+    font-family: var(--mono);
+    font-size: .85rem;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--mute);
+    margin: 0 0 .75rem;
+  }
+
+  .row p { margin: 0 0 1em; max-width: 52ch; }
+  .row p:last-child { margin-bottom: 0; }
+  .row .aside { color: var(--mute); font-size: .95rem; }
+
+  .lead { font-size: clamp(1.05rem, 1.4vw, 1.2rem); }
+
+  .span2 { grid-column: 1 / -1; }
+
+  .row > *, .row .body > *, .pitch > *, .gesture > * { min-width: 0; }
+  pre { max-width: 100%; }
+
+  /* Spec lists */
+
+  .spec { margin: 0; padding: 0; border-top: 1px solid var(--hair); }
+  .spec > div {
+    display: grid;
+    grid-template-columns: minmax(7rem, 2fr) 5fr;
+    gap: 1rem;
+    padding: .8rem 0;
+    border-bottom: 1px solid var(--hair);
+    align-items: baseline;
+  }
+  .spec dt { font-family: var(--mono); font-size: .85rem; color: var(--mute); margin: 0; }
+  .spec dd { margin: 0; }
+  .spec dd.big { font-family: var(--display); font-size: clamp(1.8rem, 3vw, 2.6rem); line-height: 1; letter-spacing: -.01em; }
+  .spec dd.big small { font-family: var(--body); font-size: 1rem; color: var(--mute); margin-left: .5rem; letter-spacing: 0; }
+
+  /* Before and after */
+
+  .pairs { margin: 0; padding: 0; border-top: 1px solid var(--hair); font-family: var(--mono); font-size: .92rem; }
+  .pairs > div {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 1rem;
+    padding: .7rem 0;
+    border-bottom: 1px solid var(--hair);
+    align-items: baseline;
+  }
+  .pairs .from { color: var(--mute); }
+  .pairs .arrow { color: var(--mute); }
+  .pairs .to { white-space: nowrap; }
+  .pairs .to.gone { color: var(--mute); font-style: italic; }
+
+  /* Code and trees */
+
+  pre {
+    font-family: var(--mono);
+    font-size: .88rem;
+    line-height: 1.6;
+    margin: 0;
+    padding: 1.25rem 1.4rem;
+    border: 1px solid var(--ink);
+    border-radius: 4px;
+    overflow-x: auto;
+    white-space: pre;
+    tab-size: 2;
+  }
+  pre .c { color: var(--mute); }
+  .cap { font-family: var(--mono); font-size: .8rem; color: var(--mute); margin: .6rem 0 0; }
+  code { font-family: var(--mono); font-size: .9em; }
+
+  /* The pill */
+
+  .pills { display: grid; grid-template-columns: repeat(2, 1fr); gap: 2rem 2.5rem; margin-top: .5rem; }
+  .pillcase { display: flex; flex-direction: column; gap: .9rem; }
+  .stage {
+    height: 110px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding-bottom: 14px;
+    border: 1px solid var(--hair);
+    border-radius: 4px;
+    background: repeating-linear-gradient(0deg, transparent 0 7px, rgba(20,20,20,.05) 7px 8px);
+  }
+  .pill {
+    height: 32px;
+    min-width: 92px;
+    padding: 0 12px;
+    border-radius: 16px;
+    background: var(--chip);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    position: relative;
+  }
+  .pill.locked::before {
+    content: "";
+    position: absolute;
+    inset: -4px;
+    border-radius: 20px;
+    border: 2px solid var(--accent);
+    opacity: .9;
+  }
+  .bar {
+    width: 3px;
+    height: 16px;
+    border-radius: 2px;
+    background: var(--accent);
+    transform: scaleY(var(--h, .6));
+    transform-origin: center;
+  }
+  .pill.recording .bar { background: var(--rec); }
+  .pill.recording .rec {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--rec); margin-right: 6px;
+  }
+  .card {
+    width: min(100%, 300px);
+    background: var(--chip);
+    color: #f4f2ed;
+    border-radius: 14px;
+    padding: 12px 14px;
+    font-size: .85rem;
+    line-height: 1.4;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: .75rem;
+    align-items: center;
+  }
+  .card button {
+    font: inherit;
+    font-family: var(--mono);
+    font-size: .8rem;
+    color: var(--ink);
+    background: #f4f2ed;
+    border: 0;
+    border-radius: 999px;
+    padding: .4rem .8rem;
+    cursor: pointer;
+  }
+  .pillcase h3 { margin-bottom: .1rem; }
+  .pillcase p { font-size: .95rem; max-width: 34ch; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .pill.live .bar { animation: level 1.1s ease-in-out infinite alternate; }
+    .pill.live .bar:nth-child(2) { animation-delay: -.2s; }
+    .pill.live .bar:nth-child(3) { animation-delay: -.5s; }
+    .pill.live .bar:nth-child(4) { animation-delay: -.8s; }
+    .pill.live .bar:nth-child(5) { animation-delay: -.35s; }
+    .pill.live .bar:nth-child(6) { animation-delay: -.65s; }
+    .pill.live .bar:nth-child(7) { animation-delay: -.1s; }
+    .pill.locked::before { animation: ring 1.6s ease-in-out infinite alternate; }
+  }
+  @keyframes level {
+    from { transform: scaleY(calc(var(--h, .6) * .35)); }
+    to { transform: scaleY(var(--h, .6)); }
+  }
+  @keyframes ring {
+    from { opacity: .45; }
+    to { opacity: 1; }
+  }
+
+  /* Permissions */
+
+  .perm { margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+  .perm > div {
+    display: grid;
+    grid-template-columns: minmax(8rem, 2fr) 5fr;
+    gap: 1rem;
+    padding: 1.1rem 0;
+    border-bottom: 1px solid var(--hair);
+  }
+  .perm dt { font-family: var(--display); font-size: 1.5rem; line-height: 1.1; margin: 0; }
+  .perm dd { margin: 0; max-width: 52ch; }
+
+  /* Footer */
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding: 2rem 0 3rem;
+    font-family: var(--mono);
+    font-size: .85rem;
+    color: var(--mute);
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 1rem 2rem;
+  }
+  footer a { color: var(--ink); }
+  footer nav { display: flex; gap: 1.5rem; }
+
+  /* Breakpoints */
+
+  @media (max-width: 1000px) {
+    .row .body { grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 760px) {
+    .gesture { grid-template-columns: minmax(3rem, 1fr) 7fr; }
+    .gesture .result { grid-column: 2; }
+    .gesture .n { font-size: clamp(3rem, 12vw, 5rem); }
+    .pitch, .row { grid-template-columns: 1fr; gap: 1.25rem; }
+    .row .num { padding-top: 0; }
+    .pills { grid-template-columns: 1fr; }
+    .spec > div, .perm > div { grid-template-columns: 1fr; gap: .25rem; }
+    .pairs > div { grid-template-columns: 1fr auto 1fr; font-size: .85rem; }
+    .top nav { gap: 1.1rem; }
+  }
+
+  @media (max-width: 420px) {
+    .pairs > div { grid-template-columns: 1fr; gap: .15rem; }
+    .pairs .arrow { display: none; }
+    .pairs .to { white-space: normal; }
+    .top nav a:first-child { display: none; }
+  }
+</style>
+</head>
+<body>
+<!-- concept: The gesture table is the hero, set enormous. Near-monochrome paper and ink, hairline rules, one cyan accent. The rest of the page is numbered spec rows in the same grid, like a well-set specification sheet. -->
+
+<header class="wrap">
+  <div class="top">
+    <a class="brand" href="#top" aria-label="see.computer, home">
+      <svg class="mark" viewBox="0 0 26 26" role="img" aria-label="see.computer icon, a white ring and a black dot on a black rounded square">
+        <rect width="26" height="26" rx="6.5" fill="#141414"/>
+        <circle cx="13" cy="13" r="6.5" fill="none" stroke="#f4f2ed" stroke-width="2"/>
+        <circle cx="13" cy="13" r="2.4" fill="#f4f2ed"/>
+      </svg>
+      see.computer
+    </a>
+    <nav aria-label="Primary">
+      <a href="#takes">Takes</a>
+      <a href="https://github.com/Willayam/see.computer">Source</a>
+      <a href="https://github.com/Willayam/see.computer/releases/latest">Download</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+  <section class="wrap hero" aria-labelledby="h1">
+    <p class="eyebrow">
+      <span>Dictation and video takes for the Mac</span>
+      <span>Local. Free. MIT.</span>
+      <span>macOS 14, Apple Silicon</span>
+    </p>
+
+    <h1 id="h1">Three gestures. <em>That is the whole interface.</em></h1>
+
+    <ol class="gestures">
+      <li class="gesture">
+        <span class="n" aria-hidden="true">1</span>
+        <div>
+          <h2>Hold Option. Speak. Let go.</h2>
+          <div class="keys">
+            <span class="verb">Hold</span>
+            <kbd><span class="sym">&#8997;</span> Left Option</kbd>
+          </div>
+        </div>
+        <div class="result">
+          <p>The words are pasted at your cursor, in any app that has one. Audio never leaves the machine.</p>
+        </div>
+      </li>
+
+      <li class="gesture">
+        <span class="n" aria-hidden="true">2</span>
+        <div>
+          <h2>Double tap Option. Speak. Tap once to finish.</h2>
+          <div class="keys">
+            <span class="verb">Tap twice</span>
+            <kbd><span class="sym">&#8997;</span> Left Option</kbd>
+          </div>
+        </div>
+        <div class="result">
+          <p>A locked take, for narration that runs longer than you want to hold a key. Tap the trigger to paste. Esc throws it away.</p>
+          <p>Inside a locked take, hold the trigger again and add Shift for shots or clips.</p>
+        </div>
+      </li>
+
+      <li class="gesture">
+        <span class="n" aria-hidden="true">3</span>
+        <div>
+          <h2>Hold Option and Shift. Let go to stop.</h2>
+          <div class="keys">
+            <span class="verb">Hold</span>
+            <kbd><span class="sym">&#8997;</span> Left Option</kbd>
+            <span class="plus">+</span>
+            <kbd><span class="sym">&#8679;</span> Shift</kbd>
+          </div>
+        </div>
+        <div class="result">
+          <p>The screen and the microphone are recorded while you hold. On release they are packaged into a folder an agent can read, and the path is pasted at your cursor.</p>
+        </div>
+      </li>
+    </ol>
+
+    <div class="pitch">
+      <span aria-hidden="true"></span>
+      <div>
+        <p>The fastest way to share what you are seeing and saying with your computer, and with the agents running on it.</p>
+        <div class="ctas">
+          <a class="btn primary" href="https://github.com/Willayam/see.computer/releases/latest"><span class="dot" aria-hidden="true"></span>Download for Mac</a>
+          <a class="btn" href="https://github.com/Willayam/see.computer">View source</a>
+          <span class="cta-note">DMG, MIT licence</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap row" aria-labelledby="s1">
+    <span class="num" aria-hidden="true">01</span>
+    <div class="body">
+      <div>
+        <h2 id="s1">155 ms, on the CPU, with nothing uploaded</h2>
+        <p class="lead">The speech model is NVIDIA Parakeet TDT 0.6b v3, quantised to INT8 and run through ONNX on the CPU. On an M3 Max a six-second Swedish sentence comes back in about 155 ms. That is faster than reaching for the mouse.</p>
+        <p>Nothing is uploaded, ever. The 670 MB model downloads once, on first launch, and lives in <code>~/Library/Application Support/see.computer/models/</code>. After that the app works on a plane.</p>
+      </div>
+      <dl class="spec">
+        <div><dt>Latency</dt><dd class="big">155 ms<small>six-second sentence, M3 Max</small></dd></div>
+        <div><dt>Model</dt><dd>Parakeet TDT 0.6b v3, INT8 ONNX</dd></div>
+        <div><dt>Compute</dt><dd>CPU only</dd></div>
+        <div><dt>Download</dt><dd>670 MB, once</dd></div>
+        <div><dt>Languages</dt><dd>25 European languages. The README shows English and Swedish.</dd></div>
+        <div><dt>Network</dt><dd>None, after the model is on disk</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="wrap row" id="takes" aria-labelledby="s2">
+    <span class="num" aria-hidden="true">02</span>
+    <div class="body">
+      <div>
+        <h2 id="s2">A take is a folder an agent can read</h2>
+        <p class="lead">Hold the trigger with Shift and talk through what is on screen. Let go. The recording is written to <code>~/Documents/see.computer/</code> under a timestamp, and a short paste lands at your cursor. That paste is the narration in quotes, a blank line, then the names of the captures and the path to <code>take.md</code>.</p>
+        <p>An agent that can read files opens the exact frames where each thing was said, without decoding the video. A human, or a web chatbox, still gets the words. Both get the same paste.</p>
+        <p class="aside">Releasing before about 0.6 seconds discards the take, so a slipped key does not leave a file behind.</p>
+      </div>
+      <div>
+        <h3>What lands on disk</h3>
+<pre aria-label="Folder tree of one take">~/Documents/see.computer/2026-09-07T14-02-11/
+&#9500;&#9472; take.md            <span class="c">start here</span>
+&#9500;&#9472; transcript.json    <span class="c">the words</span>
+&#9500;&#9472; shots/             <span class="c">screenshots</span>
+&#9492;&#9472; clips/
+   &#9492;&#9472; 001/
+      &#9500;&#9472; clip.mov
+      &#9492;&#9472; frames/      <span class="c">JPEG frames</span></pre>
+      </div>
+      <div class="span2">
+        <h3>What gets pasted</h3>
+<pre aria-label="Example of the text pasted after a recording">"The submit button sits under the fold on this width. Move it above the table and make the table scroll on its own."
+
+shots/001.png
+clips/001/clip.mov
+~/Documents/see.computer/2026-09-07T14-02-11/take.md</pre>
+        <p class="cap">Paste this into a coding agent and it can open the frames. Paste it into a chat window and the first line still says what you meant.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap row" aria-labelledby="s3">
+    <span class="num" aria-hidden="true">03</span>
+    <div class="body">
+      <div>
+        <h2 id="s3">Cleanup happens before the paste</h2>
+        <p class="lead">Spoken text is not written text. Three passes run between the model and the cursor. None of them need a network.</p>
+        <h3>Hesitation</h3>
+        <p>um, uh and hm are dropped, together with the comma or full stop stuck to them. The next word takes over the capital. "like" and "actually" stay, because they are usually real words. "er" stays, because it is Swedish for "your". A dictation that was only a hum pastes nothing.</p>
+        <h3>Vocabulary</h3>
+        <p>Put words the model misses in <code>~/Documents/see.computer/vocabulary.md</code>, one per line. They are pushed into the decoder while it is still choosing, not substituted afterwards. The file is re-read when it changes. No restart.</p>
+        <p class="aside">A term only gets its bonus when the model was already considering it, so a long list stays safe. A bonus can win a close call. It cannot overturn a confident one.</p>
+      </div>
+      <div>
+        <h3>Numbers</h3>
+        <dl class="pairs">
+          <div><dt class="from">two hundred and seventy nine</dt><dd class="arrow" aria-hidden="true">&rarr;</dd><dd class="to">279</dd></div>
+          <div><dt class="from">twenty-five thousand</dt><dd class="arrow" aria-hidden="true">&rarr;</dd><dd class="to">25,000</dd></div>
+          <div><dt class="from">Fable five point one</dt><dd class="arrow" aria-hidden="true">&rarr;</dd><dd class="to">Fable 5.1</dd></div>
+          <div><dt class="from">tjugo procent</dt><dd class="arrow" aria-hidden="true">&rarr;</dd><dd class="to">20 %</dd></div>
+          <div><dt class="from">two million</dt><dd class="arrow" aria-hidden="true">&rarr;</dd><dd class="to">2 million</dd></div>
+          <div><dt class="from">seven</dt><dd class="arrow" aria-hidden="true">&rarr;</dd><dd class="to">seven</dd></div>
+        </dl>
+        <p class="cap">Ten and above become digits. Zero to nine stay words unless they carry a percent sign or a decimal point. English and Swedish.</p>
+        <h3 style="margin-top:2rem">Filler</h3>
+        <dl class="pairs">
+          <div><dt class="from">Um, move the button up.</dt><dd class="arrow" aria-hidden="true">&rarr;</dd><dd class="to">Move the button up.</dd></div>
+          <div><dt class="from">It is, uh, like, fine.</dt><dd class="arrow" aria-hidden="true">&rarr;</dd><dd class="to">It is, like, fine.</dd></div>
+          <div><dt class="from">Hm.</dt><dd class="arrow" aria-hidden="true">&rarr;</dd><dd class="to gone">nothing pasted</dd></div>
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap row" aria-labelledby="s4">
+    <span class="num" aria-hidden="true">04</span>
+    <div class="body">
+      <div>
+        <h2 id="s4">The pill is the only thing on screen</h2>
+        <p class="lead">A small overlay at the bottom of the display. Cyan bars while listening, scaled to the loudest thing heard lately, so a quiet room and a loud one both look alive. Red while recording. A lit ring when a take is locked, so a live microphone never looks idle.</p>
+        <p>If nothing could take the paste, because no text field had focus, the pill stretches into a card with the text and a Copy button. Nothing is lost.</p>
+        <p class="aside">Motion is a spring, 0.3 s response and 0.7 damping.</p>
+      </div>
+      <div class="pills">
+        <div class="pillcase">
+          <div class="stage">
+            <div class="pill live" role="img" aria-label="The pill while listening, seven cyan bars">
+              <span class="bar" style="--h:.5"></span><span class="bar" style="--h:.9"></span><span class="bar" style="--h:.7"></span><span class="bar" style="--h:1"></span><span class="bar" style="--h:.6"></span><span class="bar" style="--h:.85"></span><span class="bar" style="--h:.45"></span>
+            </div>
+          </div>
+          <h3>Listening</h3>
+          <p>Trigger held. Bars follow the microphone.</p>
+        </div>
+        <div class="pillcase">
+          <div class="stage">
+            <div class="pill live recording" role="img" aria-label="The pill while recording, red bars and a red dot">
+              <span class="rec"></span><span class="bar" style="--h:.6"></span><span class="bar" style="--h:1"></span><span class="bar" style="--h:.7"></span><span class="bar" style="--h:.9"></span><span class="bar" style="--h:.5"></span>
+            </div>
+          </div>
+          <h3>Recording</h3>
+          <p>Trigger and Shift held. Screen and voice captured.</p>
+        </div>
+        <div class="pillcase">
+          <div class="stage">
+            <div class="pill live locked" role="img" aria-label="The pill in a locked take, cyan bars with a lit ring around the pill">
+              <span class="bar" style="--h:.7"></span><span class="bar" style="--h:.5"></span><span class="bar" style="--h:1"></span><span class="bar" style="--h:.8"></span><span class="bar" style="--h:.6"></span><span class="bar" style="--h:.9"></span><span class="bar" style="--h:.5"></span>
+            </div>
+          </div>
+          <h3>Locked</h3>
+          <p>Double tapped. Hands free. Tap to paste, Esc to discard.</p>
+        </div>
+        <div class="pillcase">
+          <div class="stage">
+            <div class="card" role="group" aria-label="The pill stretched into a card because no text field had focus">
+              <span id="cardtext">Move the submit button above the table.</span>
+              <button type="button" data-copy="cardtext">Copy</button>
+            </div>
+          </div>
+          <h3>Nothing focused</h3>
+          <p>No cursor to paste into. The text waits here instead.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap row" aria-labelledby="s5">
+    <span class="num" aria-hidden="true">05</span>
+    <div class="body">
+      <div>
+        <h2 id="s5">Tray, history, trigger</h2>
+        <p class="lead">The menu bar panel lists recent dictations and recordings. Click one to copy it again. Settings live in the same panel, and there are few of them.</p>
+        <p>Dictation history is one markdown file per day in <code>~/Documents/see.computer/</code>. Plain files. Read them or delete them. Nothing prunes them for you. Turn the whole thing off with "Save Dictation History" in Settings.</p>
+        <p class="aside">The audio-never-leaves promise covers audio. If iCloud Desktop &amp; Documents sync is on, the transcript files will sync like any other document.</p>
+      </div>
+      <dl class="spec">
+        <div><dt>Trigger</dt><dd>Left Option, Right Option, or Fn, the Globe key. Right Option is AltGr on the Swedish layout. Recording and locking follow whichever trigger you picked.</dd></div>
+        <div><dt>Recents</dt><dd>Recent dictations and takes, click to copy</dd></div>
+        <div><dt>Folder</dt><dd>Where takes and history are written</dd></div>
+        <div><dt>Launch at login</dt><dd>On or off</dd></div>
+        <div><dt>History</dt><dd>On or off. One markdown file per day.</dd></div>
+        <div><dt>Permissions</dt><dd>Shortcuts to each System Settings pane</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="wrap row" aria-labelledby="s6">
+    <span class="num" aria-hidden="true">06</span>
+    <div class="body">
+      <div>
+        <h2 id="s6">Four permissions, and why each one</h2>
+        <p class="lead">macOS will ask for these on first use. Each one maps to one thing the app does. Screen Recording is only requested when you first use the video gesture.</p>
+      </div>
+      <dl class="perm">
+        <div><dt>Accessibility</dt><dd>To press Cmd+V for you. That is how the text reaches the cursor.</dd></div>
+        <div><dt>Input Monitoring</dt><dd>To notice a bare modifier key being held down. That is what hold-to-talk is.</dd></div>
+        <div><dt>Microphone</dt><dd>To hear you. Audio is transcribed on the CPU and never uploaded.</dd></div>
+        <div><dt>Screen Recording</dt><dd>For the video gesture only. Capture goes through the system screencapture tool.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="wrap row" aria-labelledby="s7">
+    <span class="num" aria-hidden="true">07</span>
+    <div class="body">
+      <div>
+        <h2 id="s7">Requirements and build</h2>
+        <p class="lead">macOS 14 or later on Apple Silicon. Download the DMG, drag it to Applications, and hold Option.</p>
+        <p>Built with Tauri v2 and Rust. One controller thread owns the app state. The menu bar panel is native AppKit with NSGlassEffectView. There is no bundler and no Node toolchain, so a build is one cargo command.</p>
+        <div class="ctas" style="margin-top:1.5rem">
+          <a class="btn primary" href="https://github.com/Willayam/see.computer/releases/latest"><span class="dot" aria-hidden="true"></span>Download for Mac</a>
+          <a class="btn" href="https://github.com/Willayam/see.computer">View source</a>
+        </div>
+      </div>
+      <div>
+        <h3>From source</h3>
+<pre aria-label="Build command">cd src-tauri
+cargo tauri build --debug --bundles app</pre>
+        <h3 style="margin-top:2rem">Command line, inside the bundle</h3>
+<pre aria-label="Command line tools">see-computer transcribe &lt;wav&gt;
+see-computer clip &lt;mov&gt;</pre>
+        <p class="cap">The same model and the same clip packaging, callable from a script.</p>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="wrap">
+  <span>see.computer. MIT licence.</span>
+  <nav aria-label="Footer">
+    <a href="https://github.com/Willayam/see.computer">GitHub</a>
+    <a href="https://github.com/Willayam/see.computer/releases/latest">Releases</a>
+    <a href="#top">Top</a>
+  </nav>
+</footer>
+
+<script>
+  document.querySelectorAll("button[data-copy]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var source = document.getElementById(button.dataset.copy);
+      if (!source || !navigator.clipboard) return;
+      navigator.clipboard.writeText(source.textContent).then(function () {
+        var label = button.textContent;
+        button.textContent = "Copied";
+        setTimeout(function () { button.textContent = label; }, 1200);
+      });
+    });
+  });
+</script>
+</body>
+</html>

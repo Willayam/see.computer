@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>see.computer. Local dictation and agent-readable screen takes for the Mac</title>
+<meta name="description" content="see.computer is a free, open-source Mac app. Hold Option and speak, the words land at your cursor. Hold Shift too and the screen and your voice are saved into a folder an agent can read. Everything runs on the CPU, nothing leaves the machine.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0a0b;
+  --ink: #ededf0;
+  --muted: #9a9aa3;
+  --dim: #75757f;
+  --line: rgba(255,255,255,.08);
+  --panel: rgba(255,255,255,.035);
+  --chip: rgba(20,20,22,.92);
+  --cyan: #5ac8fa;
+  --red: rgb(255,59,48);
+  --serif: "Instrument Serif", "Iowan Old Style", "Times New Roman", serif;
+  --sans: "Geist", "Helvetica Neue", Helvetica, sans-serif;
+  --mono: "Geist Mono", "SF Mono", Menlo, Consolas, monospace;
+  --spring: cubic-bezier(.2,.9,.25,1.15);
+  --ease: cubic-bezier(.25,.1,.25,1);
+  --max: 1120px;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 17px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(60% 50% at 50% 0%, rgba(90,200,250,.10), transparent 70%),
+    radial-gradient(120% 80% at 50% 100%, transparent 40%, rgba(0,0,0,.7));
+}
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; border-radius: 6px; }
+h1, h2, h3 { font-weight: 400; margin: 0; letter-spacing: -.01em; }
+h1 { font-family: var(--serif); font-size: clamp(2.9rem, 8.5vw, 6.6rem); line-height: .96; letter-spacing: -.025em; }
+h1 em, h2 em { font-style: italic; color: var(--cyan); }
+h2 { font-family: var(--serif); font-size: clamp(2.1rem, 4.6vw, 3.6rem); line-height: 1.02; letter-spacing: -.02em; }
+h3 { font-size: 1.05rem; font-weight: 600; letter-spacing: 0; }
+p { margin: 0 0 1em; }
+p.lead { font-size: clamp(1.05rem, 1.6vw, 1.3rem); color: var(--muted); max-width: 40ch; }
+.kicker {
+  font-family: var(--mono);
+  font-size: .78rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  display: block;
+  margin-bottom: 1rem;
+}
+code, kbd, pre { font-family: var(--mono); }
+code { font-size: .88em; background: rgba(255,255,255,.06); padding: .1em .38em; border-radius: 5px; }
+.wrap { width: min(var(--max), calc(100% - 2.5rem)); margin-inline: auto; position: relative; z-index: 1; }
+.hero-grid > *, .split > *, .trio > *, .req > *, .stack > *, .states > *, .gestures > * { min-width: 0; }
+pre { max-width: 100%; }
+section { padding: clamp(4rem, 9vw, 8rem) 0; border-top: 1px solid var(--line); }
+.head { max-width: 62ch; margin-bottom: clamp(2rem, 4vw, 3.5rem); }
+.head p { color: var(--muted); font-size: 1.1rem; margin-top: 1rem; }
+
+/* header */
+header { position: sticky; top: 0; z-index: 20; backdrop-filter: blur(18px) saturate(140%); -webkit-backdrop-filter: blur(18px) saturate(140%); background: rgba(10,10,11,.6); border-bottom: 1px solid var(--line); }
+header .wrap { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+.brand { display: flex; align-items: center; gap: .65rem; text-decoration: none; font-weight: 500; }
+.mark { width: 26px; height: 26px; border-radius: 7px; background: #000; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.14); }
+.mark::before { content: ""; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; }
+.mark::after { content: ""; width: 4px; height: 4px; border-radius: 50%; background: #fff; position: absolute; }
+.mark { position: relative; }
+nav ul { list-style: none; display: flex; gap: 1.4rem; margin: 0; padding: 0; font-size: .92rem; }
+nav a { text-decoration: none; color: var(--muted); }
+nav a:hover { color: var(--ink); }
+nav a.solid { color: var(--bg); background: var(--ink); padding: .4rem .85rem; border-radius: 999px; }
+@media (max-width: 560px) { nav li.hide { display: none; } }
+
+/* buttons */
+.btns { display: flex; gap: .75rem; flex-wrap: wrap; margin-top: 2rem; }
+.btn { display: inline-flex; align-items: center; gap: .5rem; padding: .8rem 1.3rem; border-radius: 999px; text-decoration: none; font-weight: 500; font-size: 1rem; border: 1px solid var(--line); transition: transform .3s var(--spring); }
+.btn:hover { transform: translateY(-1px); }
+.btn.primary { background: var(--cyan); color: #04111a; border-color: transparent; }
+.btn.ghost { background: var(--panel); color: var(--ink); }
+.btn small { font-family: var(--mono); font-size: .75rem; opacity: .7; }
+
+/* hero */
+.hero { border-top: 0; padding-top: clamp(3rem, 6vw, 5rem); }
+.hero-grid { display: grid; gap: 3rem; align-items: end; }
+@media (min-width: 900px) { .hero-grid { grid-template-columns: 1fr 1fr; gap: 4rem; } }
+.hero h1 { margin-bottom: 1.4rem; }
+.stage-wrap { position: relative; }
+.stage {
+  position: relative;
+  aspect-ratio: 16 / 10.5;
+  border-radius: 18px;
+  overflow: hidden;
+  background: #111114;
+  border: 1px solid var(--line);
+  box-shadow: 0 30px 80px rgba(0,0,0,.6), inset 0 0 0 1px rgba(255,255,255,.03);
+  isolation: isolate;
+}
+.blob { position: absolute; border-radius: 50%; filter: blur(60px); opacity: .55; }
+.blob.a { width: 60%; height: 70%; left: -10%; top: -20%; background: radial-gradient(circle, rgba(90,200,250,.55), transparent 70%); }
+.blob.b { width: 55%; height: 60%; right: -15%; top: 10%; background: radial-gradient(circle, rgba(255,59,48,.35), transparent 70%); }
+.blob.c { width: 50%; height: 50%; left: 30%; bottom: -25%; background: radial-gradient(circle, rgba(90,200,250,.3), transparent 70%); }
+.menubar { position: absolute; top: 0; left: 0; right: 0; height: 7%; background: rgba(255,255,255,.05); border-bottom: 1px solid rgba(255,255,255,.06); display: flex; align-items: center; padding: 0 4%; gap: 3%; }
+.menubar i { display: block; height: 4px; border-radius: 2px; background: rgba(255,255,255,.25); width: 8%; }
+.menubar i:first-child { width: 4%; }
+.menubar .tray { margin-left: auto; width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,.7); position: relative; }
+.menubar .tray::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: rgba(255,255,255,.7); }
+.win { position: absolute; border-radius: 10px; background: rgba(28,28,32,.55); border: 1px solid rgba(255,255,255,.09); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+.win.one { left: 6%; top: 15%; width: 52%; height: 60%; }
+.win.two { left: 45%; top: 27%; width: 48%; height: 55%; }
+.win::before { content: ""; position: absolute; left: 4%; top: 9%; width: 45%; height: 5px; border-radius: 3px; background: rgba(255,255,255,.18); }
+.win::after { content: ""; position: absolute; left: 4%; top: 22%; right: 6%; bottom: 14%; border-radius: 6px; background: repeating-linear-gradient(to bottom, rgba(255,255,255,.07) 0 4px, transparent 4px 14px); }
+.win.two::after { right: 30%; }
+.vignette { position: absolute; inset: 0; background: radial-gradient(90% 90% at 50% 45%, transparent 55%, rgba(0,0,0,.6)); pointer-events: none; }
+
+/* the pill */
+.dock { position: absolute; left: 0; right: 0; bottom: 7%; display: grid; place-items: center; }
+.pill {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 16px;
+  border-radius: 999px;
+  background: var(--chip);
+  border: 1px solid rgba(255,255,255,.1);
+  box-shadow: 0 8px 30px rgba(0,0,0,.5), 0 0 0 0 rgba(90,200,250,0);
+  transition: box-shadow .3s var(--ease), transform .3s var(--spring), opacity .3s var(--ease);
+  transform-origin: center;
+  will-change: transform;
+}
+.pill .ring { position: absolute; inset: -4px; border-radius: 999px; border: 2px solid var(--cyan); opacity: 0; transform: scale(.94); transition: opacity .3s var(--ease), transform .3s var(--spring); pointer-events: none; }
+.bars { display: flex; align-items: center; gap: 3px; height: 18px; }
+.bars i { display: block; width: 3px; height: 18px; border-radius: 2px; background: var(--cyan); transform: scaleY(.25); transform-origin: center; transition: background-color .2s, transform .3s var(--spring), opacity .3s; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); display: none; }
+.label { font-family: var(--mono); font-size: 12px; color: rgba(255,255,255,.85); white-space: nowrap; letter-spacing: .01em; }
+
+/* pill states */
+.stage[data-state="idle"] .pill { opacity: .55; transform: scale(.92); }
+.stage[data-state="idle"] .bars i { transform: scaleY(.18); opacity: .5; }
+.stage[data-state="idle"] .label { display: none; }
+.stage[data-state="listening"] .bars i,
+.stage[data-state="locked"] .bars i,
+.stage[data-state="recording"] .bars i,
+.stage:not([data-state]) .bars i,
+.mini.listening .bars i,
+.mini.locked .bars i,
+.mini.recording .bars i { animation: bounce 1.1s ease-in-out infinite alternate; }
+.bars i:nth-child(1) { animation-delay: -.1s; --h: .55; }
+.bars i:nth-child(2) { animation-delay: -.6s; --h: 1; }
+.bars i:nth-child(3) { animation-delay: -.3s; --h: .7; }
+.bars i:nth-child(4) { animation-delay: -.8s; --h: .95; }
+.bars i:nth-child(5) { animation-delay: -.45s; --h: .45; }
+@keyframes bounce { from { transform: scaleY(.22); } to { transform: scaleY(var(--h)); } }
+.stage[data-state="locked"] .pill, .mini.locked .pill { box-shadow: 0 8px 30px rgba(0,0,0,.5), 0 0 24px 2px rgba(90,200,250,.35); }
+.stage[data-state="locked"] .ring, .mini.locked .ring { opacity: 1; transform: scale(1); }
+.stage[data-state="recording"] .bars i, .mini.recording .bars i { background: var(--red); }
+.stage[data-state="recording"] .dot, .mini.recording .dot { display: block; animation: blink 1s ease-in-out infinite alternate; }
+.stage[data-state="recording"] .pill, .mini.recording .pill { box-shadow: 0 8px 30px rgba(0,0,0,.5), 0 0 24px 2px rgba(255,59,48,.3); }
+@keyframes blink { from { opacity: 1; } to { opacity: .35; } }
+.stage[data-state="transcribing"] .bars i { transform: scaleY(.22); opacity: .5; }
+.stage[data-state="card"] .pill { opacity: 0; transform: scale(.85); }
+.mini.warming .bars { display: none; }
+.mini.warming .dot { display: block; background: var(--cyan); animation: breathe 1.6s ease-in-out infinite alternate; }
+@keyframes breathe { from { transform: scale(.7); opacity: .5; } to { transform: scale(1); opacity: 1; } }
+.label::before { content: attr(data-idle); }
+.stage[data-state="listening"] .label::before, .stage:not([data-state]) .label::before { content: "Listening"; }
+.stage[data-state="locked"] .label::before { content: "Locked"; }
+.stage[data-state="recording"] .label::before { content: "Recording"; }
+.stage[data-state="transcribing"] .label::before { content: "Transcribing"; }
+
+/* the card the pill becomes */
+.card {
+  position: absolute;
+  width: min(360px, 84%);
+  border-radius: 16px;
+  background: var(--chip);
+  border: 1px solid rgba(255,255,255,.1);
+  box-shadow: 0 16px 50px rgba(0,0,0,.6);
+  padding: 14px 16px 12px;
+  bottom: -8px;
+  opacity: 0;
+  transform: scale(.3);
+  transform-origin: 50% 100%;
+  transition: opacity .25s var(--ease), transform .35s var(--spring);
+  pointer-events: none;
+}
+.card p { font-size: 13px; line-height: 1.45; margin: 0 0 10px; color: rgba(255,255,255,.9); }
+.card .row { display: flex; gap: 8px; align-items: center; }
+.card .copy { font-family: var(--mono); font-size: 11px; padding: 5px 10px; border-radius: 999px; background: var(--cyan); color: #04111a; font-weight: 500; }
+.card .x { margin-left: auto; font-family: var(--mono); font-size: 11px; color: rgba(255,255,255,.5); }
+.stage[data-state="card"] .card { opacity: 1; transform: scale(1); }
+.caption { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; margin-top: .9rem; font-family: var(--mono); font-size: .74rem; color: var(--dim); letter-spacing: .04em; text-transform: uppercase; }
+.caption b { font-weight: 500; color: var(--muted); }
+
+/* gestures */
+.gestures { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 18px; overflow: hidden; }
+@media (min-width: 820px) { .gestures { grid-template-columns: repeat(3, 1fr); } }
+.gesture { background: var(--bg); padding: 2rem 1.6rem; }
+.gesture .n { font-family: var(--serif); font-style: italic; font-size: 2.6rem; line-height: 1; color: var(--dim); display: block; margin-bottom: 1rem; }
+.gesture h3 { margin-bottom: .6rem; }
+.gesture p { color: var(--muted); font-size: .98rem; }
+.keys { display: flex; align-items: center; gap: .4rem; margin: 1.1rem 0 1.2rem; flex-wrap: wrap; }
+kbd {
+  display: inline-flex; align-items: center; justify-content: center; gap: .3rem;
+  min-width: 44px; height: 40px; padding: 0 12px;
+  border-radius: 9px; font-size: .82rem; font-weight: 500;
+  background: linear-gradient(180deg, rgba(255,255,255,.12), rgba(255,255,255,.05));
+  border: 1px solid rgba(255,255,255,.14);
+  box-shadow: 0 2px 0 rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.12);
+  color: var(--ink);
+}
+kbd.on { border-color: rgba(90,200,250,.6); box-shadow: 0 2px 0 rgba(0,0,0,.5), 0 0 16px rgba(90,200,250,.25); }
+kbd.rec { border-color: rgba(255,59,48,.6); box-shadow: 0 2px 0 rgba(0,0,0,.5), 0 0 16px rgba(255,59,48,.25); }
+.keys .plus, .keys .then { font-family: var(--mono); font-size: .75rem; color: var(--dim); }
+
+/* states grid */
+.states { display: grid; gap: 1rem; }
+@media (min-width: 640px) { .states { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1000px) { .states { grid-template-columns: repeat(3, 1fr); } }
+.state { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 1.4rem; display: flex; flex-direction: column; gap: 1rem; }
+.state h3 { font-family: var(--serif); font-weight: 400; font-size: 1.55rem; letter-spacing: -.01em; }
+.state p { color: var(--muted); font-size: .95rem; margin: 0; }
+.mini { height: 84px; border-radius: 12px; background: #0d0d10; border: 1px solid var(--line); display: grid; place-items: center; position: relative; overflow: hidden; }
+.mini::before { content: ""; position: absolute; inset: 0; background: radial-gradient(60% 80% at 50% 120%, rgba(90,200,250,.12), transparent 70%); }
+.mini .pill { height: 34px; padding: 0 14px; }
+.mini .label { font-size: 11px; }
+.mini.card-mini .pill { width: 86%; border-radius: 12px; height: auto; padding: 10px 12px; flex-direction: column; align-items: flex-start; gap: 6px; }
+.mini.card-mini .pill p { font-size: 11px; color: rgba(255,255,255,.9); margin: 0; }
+.mini.card-mini .row { display: flex; gap: 6px; width: 100%; font-family: var(--mono); font-size: 10px; }
+.mini.card-mini .copy { background: var(--cyan); color: #04111a; padding: 3px 8px; border-radius: 999px; }
+.mini.card-mini .x { margin-left: auto; color: rgba(255,255,255,.5); }
+.mini.idle .pill { opacity: .55; transform: scale(.92); }
+.mini.idle .bars i { transform: scaleY(.18); opacity: .5; }
+.mini.transcribing .bars i { transform: scaleY(.22); opacity: .5; }
+
+/* two column feature blocks */
+.split { display: grid; gap: 2.5rem; align-items: start; }
+@media (min-width: 900px) { .split { grid-template-columns: 1fr 1fr; gap: 4rem; } }
+.split p { color: var(--muted); }
+.split p strong { color: var(--ink); font-weight: 500; }
+.stat { font-family: var(--serif); font-size: clamp(3.5rem, 9vw, 7rem); line-height: .9; letter-spacing: -.03em; display: block; margin: .5rem 0 1rem; }
+.stat small { font-family: var(--mono); font-size: .8rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); display: block; margin-top: .8rem; }
+pre { margin: 0; padding: 1.2rem 1.3rem; border-radius: 14px; background: #0d0d10; border: 1px solid var(--line); font-size: .84rem; line-height: 1.6; overflow-x: auto; color: var(--ink); }
+pre .c { color: var(--dim); }
+pre .k { color: var(--cyan); }
+pre .r { color: var(--red); }
+.figcap { font-family: var(--mono); font-size: .74rem; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin: .6rem 0 0; }
+.stack { display: grid; gap: 1.2rem; }
+
+/* cleanup table */
+.rules { list-style: none; margin: 0; padding: 0; display: grid; gap: .5rem; }
+.rules li { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: .8rem; padding: .8rem 1rem; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); font-size: .95rem; }
+.rules li .from { color: var(--muted); }
+.rules li .arr { font-family: var(--mono); color: var(--dim); }
+.rules li .to { color: var(--ink); font-weight: 500; text-align: right; }
+.rules li .to.del { color: var(--red); font-family: var(--mono); font-size: .85rem; font-weight: 400; }
+.rules li .to.keep { color: var(--cyan); }
+.trio { display: grid; gap: 2.5rem; }
+@media (min-width: 900px) { .trio { grid-template-columns: repeat(3, 1fr); gap: 2rem; } }
+.trio h3 { margin-bottom: .6rem; font-family: var(--serif); font-weight: 400; font-size: 1.7rem; }
+.trio p { color: var(--muted); font-size: .97rem; }
+
+/* tray */
+.traypanel { border-radius: 16px; background: rgba(30,30,34,.7); border: 1px solid rgba(255,255,255,.1); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); padding: .8rem; font-size: .88rem; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.traypanel .sec { font-family: var(--mono); font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); padding: .5rem .6rem .3rem; }
+.traypanel .item { display: flex; justify-content: space-between; gap: 1rem; padding: .5rem .6rem; border-radius: 8px; color: var(--ink); }
+.traypanel .item:hover { background: rgba(255,255,255,.06); }
+.traypanel .item span:last-child { font-family: var(--mono); font-size: .72rem; color: var(--dim); white-space: nowrap; }
+.traypanel .item .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.traypanel .item .t.rec::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--red); margin-right: .5rem; vertical-align: 1px; }
+.traypanel .toggle { display: inline-block; width: 30px; height: 18px; border-radius: 999px; background: var(--cyan); position: relative; vertical-align: middle; }
+.traypanel .toggle::after { content: ""; position: absolute; top: 2px; right: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; }
+.traypanel .toggle.off { background: rgba(255,255,255,.18); }
+.traypanel .toggle.off::after { right: auto; left: 2px; }
+.traypanel hr { border: 0; border-top: 1px solid var(--line); margin: .4rem 0; }
+.traypanel .radio { display: inline-block; width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,.35); vertical-align: -2px; margin-right: .4rem; }
+.traypanel .radio.on { border-color: var(--cyan); background: radial-gradient(circle, var(--cyan) 40%, transparent 45%); }
+
+/* permissions */
+.perms { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+@media (min-width: 720px) { .perms { grid-template-columns: repeat(2, 1fr); } }
+.perms li { background: var(--bg); padding: 1.4rem 1.5rem; }
+.perms h3 { margin-bottom: .4rem; }
+.perms p { color: var(--muted); font-size: .95rem; margin: 0; }
+.perms .why { font-family: var(--mono); font-size: .72rem; color: var(--cyan); text-transform: uppercase; letter-spacing: .05em; display: block; margin-bottom: .5rem; }
+
+/* requirements / download */
+.req { display: grid; gap: 2rem; align-items: center; }
+@media (min-width: 900px) { .req { grid-template-columns: 1.2fr 1fr; gap: 4rem; } }
+.spec { list-style: none; margin: 1.5rem 0 0; padding: 0; display: grid; gap: .5rem; font-size: .95rem; }
+.spec li { display: flex; justify-content: space-between; gap: 1rem; padding: .7rem 0; border-bottom: 1px solid var(--line); }
+.spec li span:first-child { color: var(--muted); }
+.spec li span:last-child { font-family: var(--mono); font-size: .85rem; text-align: right; }
+.bigmark { width: 140px; height: 140px; border-radius: 34px; background: #000; border: 1px solid rgba(255,255,255,.14); display: grid; place-items: center; position: relative; margin: 0 auto; box-shadow: 0 30px 80px rgba(0,0,0,.6); }
+.bigmark::before { content: ""; width: 78px; height: 78px; border-radius: 50%; border: 9px solid #fff; }
+.bigmark::after { content: ""; width: 22px; height: 22px; border-radius: 50%; background: #fff; position: absolute; }
+
+/* footer */
+footer { border-top: 1px solid var(--line); padding: 2.5rem 0 3rem; color: var(--muted); font-size: .9rem; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 1rem 2rem; align-items: center; justify-content: space-between; }
+footer ul { list-style: none; margin: 0; padding: 0; display: flex; gap: 1.4rem; flex-wrap: wrap; }
+footer a { text-decoration: none; }
+footer a:hover { color: var(--ink); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  .stage .pill { opacity: 1 !important; transform: none !important; }
+  .stage .bars i, .mini .bars i { transform: scaleY(var(--h)) !important; opacity: 1 !important; }
+  .stage .bars i { background: var(--cyan) !important; }
+  .stage .ring, .stage .dot, .stage .card { display: none !important; }
+  .stage .label::before { content: "Listening" !important; }
+  .caption .live { display: none; }
+  .btn:hover { transform: none; }
+}
+</style>
+</head>
+<body>
+<!-- concept: "The pill." The whole app told through its one visible piece of UI, a large CSS reproduction of the overlay cycling idle, listening, locked, recording, transcribing, card at the foot of a blurred desktop; dark glass, cyan and red only, italic serif display type over mono labels. -->
+<header>
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="see.computer, home"><span class="mark" aria-hidden="true"></span>see.computer</a>
+    <nav aria-label="Site">
+      <ul>
+        <li class="hide"><a href="#gestures">Gestures</a></li>
+        <li class="hide"><a href="#takes">Takes</a></li>
+        <li class="hide"><a href="#permissions">Permissions</a></li>
+        <li><a href="https://github.com/Willayam/see.computer">Source</a></li>
+        <li><a class="solid" href="https://github.com/Willayam/see.computer/releases/latest">Download</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <span class="kicker">Free, open source, Mac only</span>
+        <h1>Speak. The words land <em>at your cursor.</em></h1>
+        <p class="lead">The fastest way to share what you are seeing and saying with your computer, and with the agents running on it. Hold Option and talk. Hold Shift too, and the screen and your voice go into a folder an agent can read.</p>
+        <div class="btns">
+          <a class="btn primary" href="https://github.com/Willayam/see.computer/releases/latest">Download for Mac <small>DMG</small></a>
+          <a class="btn ghost" href="https://github.com/Willayam/see.computer">View source</a>
+        </div>
+      </div>
+      <div class="stage-wrap">
+        <div class="stage" id="stage" data-state="listening" role="img" aria-label="A dark desktop with two frosted windows. At the bottom sits the see.computer pill, a small dark chip with cyan sound bars, cycling through listening, locked, recording, transcribing and a text card with a Copy button.">
+          <span class="blob a" aria-hidden="true"></span>
+          <span class="blob b" aria-hidden="true"></span>
+          <span class="blob c" aria-hidden="true"></span>
+          <div class="menubar" aria-hidden="true"><i></i><i></i><i></i><i></i><span class="tray"></span></div>
+          <div class="win one" aria-hidden="true"></div>
+          <div class="win two" aria-hidden="true"></div>
+          <div class="vignette" aria-hidden="true"></div>
+          <div class="dock" aria-hidden="true">
+            <div class="pill">
+              <span class="ring"></span>
+              <span class="dot"></span>
+              <span class="bars"><i></i><i></i><i></i><i></i><i></i></span>
+              <span class="label" data-idle=""></span>
+            </div>
+            <div class="card">
+              <p>Move the download button above the fold and make the ring a touch brighter.</p>
+              <div class="row"><span class="copy">Copy</span><span class="x">esc</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="caption">
+          <span>The pill, at the bottom of your screen</span>
+          <span class="live"><b id="state-name">listening</b></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="gestures">
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker">Three gestures</span>
+        <h2>One key does all of it.</h2>
+        <p>Left Option by default. Right Option or Fn if you prefer. Recording and locking follow whichever trigger you picked.</p>
+      </div>
+      <div class="gestures">
+        <article class="gesture">
+          <span class="n" aria-hidden="true">1</span>
+          <h3>Hold, speak, release</h3>
+          <div class="keys"><kbd class="on">&#8997; Option</kbd><span class="then">hold</span></div>
+          <p>Text is pasted at the cursor in any app. The audio never leaves the machine.</p>
+        </article>
+        <article class="gesture">
+          <span class="n" aria-hidden="true">2</span>
+          <h3>Double tap to lock</h3>
+          <div class="keys"><kbd class="on">&#8997;</kbd><kbd class="on">&#8997;</kbd><span class="then">then tap once to finish</span></div>
+          <p>A locked take for long narration, so you are not holding a key for two minutes. Tap the trigger to finish and paste. Esc throws it away. Inside a locked take, hold the trigger again and use Shift for shots or clips.</p>
+        </article>
+        <article class="gesture">
+          <span class="n" aria-hidden="true">3</span>
+          <h3>Add Shift to record</h3>
+          <div class="keys"><kbd class="on">&#8997; Option</kbd><span class="plus">+</span><kbd class="rec">&#8679; Shift</kbd><span class="then">hold</span></div>
+          <p>Records the screen and microphone while held. On release the recording is packaged into a take folder an agent can read, and a paste with the narration and the path. Let go before about 0.6 seconds and it is discarded.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="pill">
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker">The pill</span>
+        <h2>Six states, <em>one chip</em>, no focus.</h2>
+        <p>The pill is a dark overlay at the bottom of the screen. It cannot take focus, so it can never steal the keystroke that pastes. Motion is spring-driven, 0.3 s response, 0.7 damping.</p>
+      </div>
+      <div class="states">
+        <article class="state">
+          <div class="mini idle" aria-hidden="true"><div class="pill"><span class="ring"></span><span class="dot"></span><span class="bars"><i></i><i></i><i></i><i></i><i></i></span></div></div>
+          <h3>Idle</h3>
+          <p>Nothing to show, so it shows nothing. The pill stays out of the way until the trigger goes down.</p>
+        </article>
+        <article class="state">
+          <div class="mini listening" aria-hidden="true"><div class="pill"><span class="ring"></span><span class="dot"></span><span class="bars"><i></i><i></i><i></i><i></i><i></i></span><span class="label" data-idle="Listening"></span></div></div>
+          <h3>Listening</h3>
+          <p>Cyan bars, scaled to the loudest thing heard lately. A quiet room and a loud one both fill the bars, so you can always tell the mic is picking you up.</p>
+        </article>
+        <article class="state">
+          <div class="mini locked" aria-hidden="true"><div class="pill"><span class="ring"></span><span class="dot"></span><span class="bars"><i></i><i></i><i></i><i></i><i></i></span><span class="label" data-idle="Locked"></span></div></div>
+          <h3>Locked</h3>
+          <p>A lit ring around the chip. A live microphone nobody is touching should never look idle.</p>
+        </article>
+        <article class="state">
+          <div class="mini recording" aria-hidden="true"><div class="pill"><span class="ring"></span><span class="dot"></span><span class="bars"><i></i><i></i><i></i><i></i><i></i></span><span class="label" data-idle="Recording"></span></div></div>
+          <h3>Recording</h3>
+          <p>The bars turn red while Shift is held and the screen is being captured.</p>
+        </article>
+        <article class="state">
+          <div class="mini warming" aria-hidden="true"><div class="pill"><span class="ring"></span><span class="dot"></span><span class="bars"><i></i><i></i><i></i><i></i><i></i></span><span class="label" data-idle="Downloading model 42%"></span></div></div>
+          <h3>Warming</h3>
+          <p>A breathing dot while the model downloads, loads, or warms. It reads "Downloading model 42%", "Loading model", then "Warming up".</p>
+        </article>
+        <article class="state">
+          <div class="mini card-mini" aria-hidden="true"><div class="pill"><p>Nothing had focus, so the text is here.</p><div class="row"><span class="copy">Copy</span><span class="x">esc</span></div></div></div>
+          <h3>Card</h3>
+          <p>If no text field could take the paste, the pill stretches into a card with the text, a Copy button, and a dismiss. Nothing you said is lost.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="speed">
+    <div class="wrap split">
+      <div>
+        <span class="kicker">Speed and privacy</span>
+        <h2>On the CPU. <em>Off the network.</em></h2>
+        <span class="stat">155 ms<small>Six-second Swedish sentence, M3 Max</small></span>
+      </div>
+      <div>
+        <p>The speech model is <strong>NVIDIA Parakeet TDT 0.6b v3</strong>, quantised to INT8 and run through ONNX on the CPU. It downloads once on first launch, 670 MB, into <code>~/Library/Application Support/see.computer/models/</code>. After that the app works with the network cable pulled out.</p>
+        <p>Parakeet v3 covers 25 European languages. The README shows English and Swedish.</p>
+        <p>Your audio is never uploaded. The one caveat is on the transcript side. If iCloud Desktop &amp; Documents sync is on, the history files in <code>~/Documents/see.computer/</code> go wherever iCloud sends them. Turn history off in the tray if that matters to you.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="takes">
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker">Recording for agents</span>
+        <h2>A take is a folder, <em>not a video.</em></h2>
+        <p>Hold Option and Shift, talk over what is on screen, let go. The screen and the mic are packaged into a folder with the video, the frames, and the words with timestamps. An agent that can read files opens the exact frame where you said "this one" without decoding the video. A human, or a web chatbox, still gets the words.</p>
+      </div>
+      <div class="split">
+        <div class="stack">
+          <pre aria-label="The folder layout of a take"><span class="c">~/Documents/see.computer/</span>&lt;stamp&gt;/
+<span class="c">├──</span> <span class="k">take.md</span>            <span class="c">the entry point an agent opens</span>
+<span class="c">├──</span> transcript.json    <span class="c">words with timestamps</span>
+<span class="c">├──</span> shots/             <span class="c">screenshots</span>
+<span class="c">└──</span> clips/
+    <span class="c">└──</span> 001/
+        <span class="c">├──</span> clip.mov
+        <span class="c">└──</span> frames/    <span class="c">JPEG frames, one per moment</span></pre>
+          <p class="figcap">What lands on disk</p>
+        </div>
+        <div class="stack">
+          <pre aria-label="An example of the text that is pasted after a recording">"The ring stays lit after I press Esc. Watch the
+bottom of the screen when I let go here."
+
+shots/001.png
+clips/001/clip.mov
+<span class="k">~/Documents/see.computer/&lt;stamp&gt;/take.md</span></pre>
+          <p class="figcap">What gets pasted at your cursor</p>
+          <p style="margin-top:1.2rem;color:var(--muted)">The paste is the narration in quotes, a blank line, then the names of the captures and the path to <code>take.md</code>. Paste it into an agent chat and the agent has everything it needs to go look.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="cleanup">
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker">Cleanup</span>
+        <h2>What you meant, <em>not every sound.</em></h2>
+        <p>Three passes run before the paste. None of them has a settings screen.</p>
+      </div>
+      <div class="trio">
+        <div>
+          <h3>Hesitation goes</h3>
+          <p>um, uh and hm are dropped, along with the comma or full stop stuck to them, and the next word takes over the capital. "like" and "actually" stay because they are usually real words. "er" stays because it is Swedish for "your". A dictation that was only a hum pastes nothing.</p>
+          <ul class="rules" aria-label="Filler examples">
+            <li><span class="from">Um, so the ring</span><span class="arr" aria-hidden="true">&rarr;</span><span class="to">So the ring</span></li>
+            <li><span class="from">hm</span><span class="arr" aria-hidden="true">&rarr;</span><span class="to del">nothing pasted</span></li>
+            <li><span class="from">er bil</span><span class="arr" aria-hidden="true">&rarr;</span><span class="to keep">er bil</span></li>
+          </ul>
+        </div>
+        <div>
+          <h3>Numbers become figures</h3>
+          <p>Ten and above are digits. Zero to nine stay words unless they carry a percent sign or a decimal point. Works for English and Swedish.</p>
+          <ul class="rules" aria-label="Number examples">
+            <li><span class="from">two hundred and seventy nine</span><span class="arr" aria-hidden="true">&rarr;</span><span class="to">279</span></li>
+            <li><span class="from">twenty-five thousand</span><span class="arr" aria-hidden="true">&rarr;</span><span class="to">25,000</span></li>
+            <li><span class="from">Fable five point one</span><span class="arr" aria-hidden="true">&rarr;</span><span class="to">Fable 5.1</span></li>
+            <li><span class="from">tjugo procent</span><span class="arr" aria-hidden="true">&rarr;</span><span class="to">20 %</span></li>
+            <li><span class="from">two million</span><span class="arr" aria-hidden="true">&rarr;</span><span class="to keep">2 million</span></li>
+          </ul>
+        </div>
+        <div>
+          <h3>Your words, in the decoder</h3>
+          <p>Put words the model misses in <code>~/Documents/see.computer/vocabulary.md</code>, one per line. They are pushed into the decoder while it is still choosing, not swapped in afterwards. A term only gets its bonus when the model was already considering it, so a long list stays safe. A bonus wins a close call. It does not overturn a confident one. The file is re-read on change, no restart.</p>
+          <pre aria-label="Example vocabulary file"><span class="c"># vocabulary.md</span>
+Tauri
+Parakeet
+Willayam
+ONNX</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tray">
+    <div class="wrap split">
+      <div>
+        <span class="kicker">The tray</span>
+        <h2>Everything else lives in the menu bar.</h2>
+        <p>Click the menu bar icon and you get the recent dictations and recordings. Click one to copy it again. That is most of what the panel is for.</p>
+        <p><strong>History.</strong> One markdown file per day in <code>~/Documents/see.computer/</code>. Plain files you can read, grep, or delete. Nothing is pruned for you. Turn it off with "Save Dictation History" in Settings.</p>
+        <p><strong>Triggers.</strong> Left Option, Right Option, or Fn (Globe). Right Option is AltGr on the Swedish layout, so Swedes will probably want Left.</p>
+        <p><strong>Settings.</strong> The folder, launch at login, the history toggle, the trigger, and shortcuts to the permission panes.</p>
+      </div>
+      <div class="traypanel" role="img" aria-label="The tray panel. A list of recent dictations and one recording, then settings for history, trigger and launch at login.">
+        <div class="sec">Recent</div>
+        <div class="item"><span class="t">Move the download button above the fold and make the ring</span><span>2 min</span></div>
+        <div class="item"><span class="t">Byt till 25,000 i rubriken och kolla att det inte</span><span>14 min</span></div>
+        <div class="item"><span class="t rec">The ring stays lit after I press Esc. Watch the</span><span>1 h</span></div>
+        <div class="item"><span class="t">Fable 5.1 should review the paste format eval before we</span><span>3 h</span></div>
+        <hr>
+        <div class="sec">Settings</div>
+        <div class="item"><span class="t">Save Dictation History</span><span class="toggle" aria-hidden="true"></span></div>
+        <div class="item"><span class="t">Launch at Login</span><span class="toggle off" aria-hidden="true"></span></div>
+        <div class="item"><span class="t"><span class="radio on" aria-hidden="true"></span>Left Option</span></div>
+        <div class="item"><span class="t"><span class="radio" aria-hidden="true"></span>Right Option</span></div>
+        <div class="item"><span class="t"><span class="radio" aria-hidden="true"></span>Fn (Globe)</span></div>
+        <hr>
+        <div class="item"><span class="t">Open ~/Documents/see.computer</span><span>&#8599;</span></div>
+        <div class="item"><span class="t">Permissions</span><span>&#8599;</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="permissions">
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker">Permissions</span>
+        <h2>Four prompts, and <em>why each one.</em></h2>
+        <p>macOS will ask. Here is what each grant is used for, so you can decide with the facts. The first two are needed for dictation at all. The last one only matters if you record.</p>
+      </div>
+      <ul class="perms">
+        <li>
+          <span class="why">Needed to paste</span>
+          <h3>Accessibility</h3>
+          <p>The app pastes by pressing Cmd+V in the frontmost app. macOS only lets a process do that with Accessibility granted.</p>
+        </li>
+        <li>
+          <span class="why">Needed for hold-to-talk</span>
+          <h3>Input Monitoring</h3>
+          <p>The trigger is a bare modifier key. Watching a lone Option or Fn go down and up, in any app, needs Input Monitoring.</p>
+        </li>
+        <li>
+          <span class="why">Needed to hear you</span>
+          <h3>Microphone</h3>
+          <p>The audio is transcribed on the CPU and never uploaded. Without this grant there is nothing to transcribe.</p>
+        </li>
+        <li>
+          <span class="why">Only for the video hotkey</span>
+          <h3>Screen Recording</h3>
+          <p>Used only when you hold Shift with the trigger. Recording goes through the system screencapture tool. Skip this one if you only dictate.</p>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="download">
+    <div class="wrap req">
+      <div>
+        <span class="kicker">Get it</span>
+        <h2>macOS 14, Apple Silicon, <em>and nothing else.</em></h2>
+        <p style="color:var(--muted);margin-top:1rem">Download the DMG, drag it to Applications, grant the prompts, hold Option. The model downloads on first launch and the pill tells you how far along it is.</p>
+        <div class="btns">
+          <a class="btn primary" href="https://github.com/Willayam/see.computer/releases/latest">Download for Mac <small>DMG</small></a>
+          <a class="btn ghost" href="https://github.com/Willayam/see.computer">View source</a>
+        </div>
+        <ul class="spec">
+          <li><span>Requires</span><span>macOS 14 or later, Apple Silicon</span></li>
+          <li><span>Model</span><span>Parakeet TDT 0.6b v3, INT8 ONNX, 670 MB</span></li>
+          <li><span>Built with</span><span>Tauri v2, Rust, native AppKit panel</span></li>
+          <li><span>Build from source</span><span>cd src-tauri &amp;&amp; cargo tauri build --debug --bundles app</span></li>
+          <li><span>CLI in the bundle</span><span>see-computer transcribe &lt;wav&gt;<br>see-computer clip &lt;mov&gt;</span></li>
+          <li><span>License</span><span>MIT</span></li>
+        </ul>
+      </div>
+      <div>
+        <div class="bigmark" role="img" aria-label="The see.computer app icon, a black rounded square with a white ring and a black dot in the centre."></div>
+        <p style="text-align:center;color:var(--dim);font-family:var(--mono);font-size:.78rem;margin-top:1.5rem;letter-spacing:.05em;text-transform:uppercase">One controller thread. No bundler. No Node.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>see.computer is free and MIT licensed.</span>
+    <ul>
+      <li><a href="https://github.com/Willayam/see.computer">GitHub</a></li>
+      <li><a href="https://github.com/Willayam/see.computer/releases/latest">Releases</a></li>
+      <li><a href="https://github.com/Willayam/see.computer/blob/main/LICENSE">MIT license</a></li>
+    </ul>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var stage = document.getElementById('stage');
+  var name = document.getElementById('state-name');
+  if (!stage || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  var seq = [
+    ['idle', 1400],
+    ['listening', 2800],
+    ['locked', 2800],
+    ['recording', 2800],
+    ['transcribing', 1300],
+    ['card', 3800]
+  ];
+  var i = 2;
+  function step() {
+    var s = seq[i];
+    stage.setAttribute('data-state', s[0]);
+    if (name) name.textContent = s[0];
+    i = (i + 1) % seq.length;
+    setTimeout(step, s[1]);
+  }
+  setTimeout(step, seq[1][1]);
+})();
+</script>
+</body>
+</html>

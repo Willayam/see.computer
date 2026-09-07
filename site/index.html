@@ -1,0 +1,987 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>see.computer. Stop describing your screen. Let your agent see it.</title>
+<meta name="description" content="see.computer is the fastest way to show your agent what it needs. Hold the Globe key and speak, and the words land at your cursor. Add Shift, and your screen and voice become a folder a coding agent can read. Free, open source, MIT, fully local, no account. macOS 14, Apple Silicon.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #f4f2ed;
+    --ink: #141414;
+    --mute: #66645e;
+    --rule: #141414;
+    --hair: rgba(20, 20, 20, .22);
+    --accent: #5ac8fa;
+    --rec: #ff3b30;
+    --dark: #151618;
+    --dark-2: #1c1d21;
+    --dark-line: rgba(255, 255, 255, .11);
+    --dark-fg: #ebe8e2;
+    --dark-dim: #9c9a93;
+    --dark-faint: #74726c;
+    --chip: rgba(20, 20, 22, .92);
+    --display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+    --body: "IBM Plex Sans", "Helvetica Neue", Helvetica, sans-serif;
+    --mono: "IBM Plex Mono", Menlo, Consolas, monospace;
+    --gutter: clamp(1.25rem, 4vw, 4rem);
+    --max: 1320px;
+    --ease: cubic-bezier(.2, .8, .2, 1);
+  }
+
+  * { box-sizing: border-box; }
+
+  html { background: var(--paper); color: var(--ink); -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    font-family: var(--body);
+    font-size: 1.0625rem;
+    line-height: 1.55;
+    font-feature-settings: "kern", "liga";
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: inherit; text-decoration: none; }
+  p a, dd a, li a { text-decoration: underline; text-underline-offset: .16em; text-decoration-thickness: 1px; }
+
+  a:focus-visible, button:focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: 3px;
+  }
+  .dark a:focus-visible, .dark button:focus-visible { outline-color: var(--accent); }
+
+  h1, h2, h3 { font-weight: 400; margin: 0; }
+  h1 em, h2 em, h3 em { font-style: italic; }
+
+  p { margin: 0 0 1em; }
+  p:last-child { margin-bottom: 0; }
+
+  .wrap { max-width: var(--max); margin: 0 auto; padding: 0 var(--gutter); }
+
+  code {
+    font-family: var(--mono);
+    font-size: .9em;
+    overflow-wrap: anywhere;
+  }
+
+  pre {
+    font-family: var(--mono);
+    font-size: .88rem;
+    line-height: 1.6;
+    margin: 0;
+    padding: 1.2rem 1.4rem;
+    border: 1px solid var(--ink);
+    border-radius: 4px;
+    max-width: 100%;
+    overflow-x: auto;
+    white-space: pre;
+    tab-size: 2;
+  }
+  pre .c { color: var(--mute); }
+  pre.prewrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .cap { font-family: var(--mono); font-size: .8rem; color: var(--mute); margin: .6rem 0 0; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: .8rem;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--mute);
+    margin: 0 0 1rem;
+  }
+
+  /* Key caps */
+
+  kbd {
+    font-family: var(--mono);
+    font-size: .85rem;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    gap: .45em;
+    padding: .55em .7em .5em;
+    border: 1px solid var(--ink);
+    border-bottom-width: 3px;
+    border-radius: 6px;
+    background: var(--paper);
+    white-space: nowrap;
+    vertical-align: middle;
+  }
+  kbd .sym { font-size: 1.05rem; line-height: 1; }
+  kbd .glyph { width: 1em; height: 1em; display: block; }
+  .plus { font-family: var(--mono); color: var(--mute); }
+  .verb { font-family: var(--mono); font-size: .8rem; color: var(--mute); text-transform: uppercase; letter-spacing: .06em; }
+
+  /* Header */
+
+  .top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1.25rem 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .brand { display: inline-flex; align-items: center; gap: .75rem; font-family: var(--mono); font-size: .95rem; }
+  .mark { width: 26px; height: 26px; display: block; flex: none; }
+  .top nav { display: flex; flex-wrap: wrap; gap: .5rem 1.75rem; font-family: var(--mono); font-size: .9rem; }
+  .top nav a { padding: .25rem 0; border-bottom: 1px solid transparent; }
+  .top nav a:hover { border-bottom-color: var(--ink); }
+
+  /* Hero */
+
+  .hero { padding-block: clamp(2.5rem, 6vw, 5.5rem) clamp(3rem, 7vw, 6rem); }
+
+  .hero-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+    gap: clamp(2rem, 5vw, 5rem);
+    align-items: center;
+  }
+  .hero-grid > * { min-width: 0; }
+
+  h1 {
+    font-family: var(--display);
+    font-size: clamp(2.7rem, 6.2vw, 5.6rem);
+    line-height: .98;
+    letter-spacing: -.015em;
+    text-wrap: balance;
+    margin: 0 0 1.5rem;
+  }
+
+  .sub {
+    font-size: clamp(1.1rem, 1.6vw, 1.35rem);
+    line-height: 1.4;
+    max-width: 36ch;
+    text-wrap: pretty;
+  }
+  .sub strong { font-weight: 500; }
+
+  .ctas { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin-top: 1.75rem; }
+
+  .btn {
+    font-family: var(--mono);
+    font-size: .95rem;
+    display: inline-flex;
+    align-items: center;
+    gap: .6rem;
+    padding: .9rem 1.4rem;
+    border: 1px solid var(--ink);
+    border-radius: 999px;
+    background: var(--paper);
+    color: var(--ink);
+    transition: transform .3s var(--ease);
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn.primary { background: var(--ink); color: var(--paper); }
+  .btn .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); flex: none; }
+  .cta-note { font-family: var(--mono); font-size: .85rem; color: var(--mute); }
+
+  /* The dark artefact */
+
+  .term {
+    background: var(--dark);
+    color: var(--dark-fg);
+    border-radius: 12px;
+    box-shadow: 0 40px 80px -40px rgba(20, 20, 20, .55), 0 0 0 1px rgba(20, 20, 20, .9);
+    overflow: hidden;
+    font-family: var(--mono);
+    font-size: .85rem;
+    line-height: 1.55;
+    margin: 0;
+  }
+  .term .bar {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    padding: .7rem .9rem;
+    border-bottom: 1px solid var(--dark-line);
+    color: var(--dark-faint);
+    font-size: .75rem;
+  }
+  .term .dots { display: flex; gap: 6px; }
+  .term .dots i { width: 10px; height: 10px; border-radius: 50%; background: rgba(255, 255, 255, .14); display: block; }
+  .term .title { margin-left: .25rem; }
+  .term .tag { margin-left: auto; color: var(--accent); text-align: right; }
+  .term .split { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
+  .term .split > * { min-width: 0; }
+  .term .split > * + * { border-left: 1px solid var(--dark-line); }
+  .term .label { display: block; color: var(--dark-faint); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; padding: .8rem 1.1rem 0; }
+  .term pre {
+    border: 0;
+    border-radius: 0;
+    padding: .9rem 1.1rem 1.1rem;
+    background: transparent;
+    color: var(--dark-fg);
+    font-size: inherit;
+  }
+  .term pre.wrap-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .term .prompt { color: var(--accent); }
+  .term .dim { color: var(--dark-dim); }
+  .term .path { color: var(--accent); }
+  .term .tree { color: var(--dark-dim); }
+  .term .tree b { color: var(--dark-fg); font-weight: 500; }
+  .term .tree .hi { color: var(--dark-fg); text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: .2em; }
+  .term .tree .note { color: var(--dark-faint); font-style: italic; }
+  .term .foot { border-top: 1px solid var(--dark-line); border-bottom: 0; color: var(--dark-dim); }
+  .caret {
+    display: inline-block;
+    width: .55em;
+    height: 1.1em;
+    vertical-align: text-bottom;
+    background: var(--accent);
+    margin-left: 2px;
+  }
+
+  /* Sections */
+
+  .section { padding-block: clamp(3rem, 6vw, 5.5rem); border-top: 1px solid var(--rule); }
+  .section h2 {
+    font-family: var(--display);
+    font-size: clamp(2rem, 4.2vw, 3.6rem);
+    line-height: 1.02;
+    letter-spacing: -.01em;
+    text-wrap: balance;
+    margin-bottom: 1.25rem;
+    max-width: 22ch;
+  }
+  .section h3 {
+    font-family: var(--display);
+    font-size: clamp(1.5rem, 2.2vw, 1.9rem);
+    line-height: 1.1;
+    margin-bottom: .6rem;
+  }
+  .section .lead { font-size: clamp(1.05rem, 1.4vw, 1.2rem); max-width: 56ch; }
+  .section p { max-width: 56ch; }
+  .aside { color: var(--mute); font-size: .95rem; }
+  .label { font-family: var(--mono); font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--mute); margin: 0 0 .75rem; }
+
+  /* Pillars */
+
+  .pillars {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2.5rem clamp(1.5rem, 3vw, 3rem);
+  }
+  .pillars > * { min-width: 0; }
+  .pillar { border-top: 1px solid var(--rule); padding-top: 1.25rem; }
+  .pillar .n { font-family: var(--mono); font-size: .8rem; color: var(--mute); display: block; margin-bottom: 1.5rem; }
+  .pillar h2 {
+    font-family: var(--display);
+    font-size: clamp(1.9rem, 2.8vw, 2.6rem);
+    line-height: 1.02;
+    letter-spacing: -.01em;
+    margin-bottom: 1rem;
+    text-wrap: balance;
+  }
+  .pillar p { max-width: 40ch; }
+  .pillar .big {
+    font-family: var(--display);
+    font-size: clamp(3rem, 5vw, 4.5rem);
+    line-height: 1;
+    letter-spacing: -.02em;
+    margin: 0 0 .75rem;
+  }
+  .pillar .big small { font-family: var(--body); font-size: 1rem; color: var(--mute); letter-spacing: 0; margin-left: .4rem; }
+
+  /* Gestures */
+
+  .gestures { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+  .gesture {
+    display: grid;
+    grid-template-columns: minmax(3rem, 1fr) 6fr 5fr;
+    gap: .75rem clamp(1rem, 3vw, 3rem);
+    align-items: start;
+    padding: clamp(1.5rem, 3vw, 2.5rem) 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .gesture > * { min-width: 0; }
+  .gesture .n {
+    font-family: var(--display);
+    font-size: clamp(3rem, 8vw, 7rem);
+    line-height: .8;
+    letter-spacing: -.03em;
+  }
+  .gesture h3 {
+    font-family: var(--display);
+    font-size: clamp(1.6rem, 3.4vw, 3rem);
+    line-height: 1.02;
+    letter-spacing: -.01em;
+    text-wrap: balance;
+    margin-bottom: 1rem;
+  }
+  .gesture .keys { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+  .gesture .result { font-size: clamp(1rem, 1.3vw, 1.15rem); line-height: 1.5; max-width: 40ch; padding-top: .3em; }
+  .gesture .result p { margin: 0 0 .8em; }
+  .gesture .result p:last-child { margin-bottom: 0; }
+
+  .notes {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.5rem clamp(1.5rem, 3vw, 3rem);
+    margin-top: 2rem;
+  }
+  .notes > * { min-width: 0; }
+  .notes p { font-size: .95rem; color: var(--mute); max-width: 44ch; }
+  .notes p b { font-weight: 500; color: var(--ink); }
+
+  /* Two column rows */
+
+  .two {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+    gap: 2.5rem clamp(2rem, 4vw, 4rem);
+    align-items: start;
+  }
+  .two > * { min-width: 0; }
+  .span2 { grid-column: 1 / -1; }
+
+  .files { margin: 1.5rem 0 0; padding: 0; border-top: 1px solid var(--hair); }
+  .files > div {
+    display: grid;
+    grid-template-columns: minmax(7rem, 2fr) 5fr;
+    gap: 1rem;
+    padding: .8rem 0;
+    border-bottom: 1px solid var(--hair);
+    align-items: baseline;
+  }
+  .files > div > * { min-width: 0; }
+  .files dt { font-family: var(--mono); font-size: .85rem; margin: 0; }
+  .files dd { margin: 0; font-size: .95rem; }
+
+  /* Ledger */
+
+  .ledger {
+    width: 100%;
+    border-collapse: collapse;
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+    margin: 0;
+  }
+  .ledger th, .ledger td {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    text-align: left;
+    vertical-align: top;
+    padding: .8rem .75rem .8rem 0;
+    border-bottom: 1px solid var(--hair);
+  }
+  .ledger thead th {
+    font-family: var(--mono);
+    font-size: .75rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    font-weight: 400;
+    color: var(--mute);
+    border-bottom: 1px solid var(--rule);
+  }
+  .ledger tbody tr:last-child td, .ledger tbody tr:last-child th { border-bottom: 0; }
+  .ledger .num { width: 2.6rem; font-family: var(--mono); font-size: .8rem; color: var(--mute); font-weight: 400; padding-top: 1rem; }
+  .ledger .said { color: var(--mute); font-family: var(--mono); font-size: .92rem; }
+  .ledger .pasted { color: var(--ink); font-family: var(--mono); font-size: .92rem; }
+  .ledger .pasted .nil { font-style: italic; color: var(--mute); font-family: var(--body); }
+  .ledger .pass { width: 11rem; font-size: .85rem; color: var(--mute); padding-top: .95rem; }
+  .ledger .lbl { display: none; }
+
+  .cleanup-notes {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2rem clamp(1.5rem, 3vw, 3rem);
+    margin-top: 2.5rem;
+  }
+  .cleanup-notes > * { min-width: 0; }
+  .cleanup-notes h3 { font-size: 1.5rem; }
+  .cleanup-notes p { font-size: .95rem; }
+
+  /* The pill */
+
+  .pills { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2rem 2rem; margin-top: 2.5rem; }
+  .pills > * { min-width: 0; }
+  .pillcase { display: flex; flex-direction: column; gap: .8rem; }
+  .stage {
+    height: 110px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding: 0 12px 14px;
+    border: 1px solid var(--hair);
+    border-radius: 4px;
+    background: repeating-linear-gradient(0deg, transparent 0 7px, rgba(20, 20, 20, .05) 7px 8px);
+  }
+  .pill {
+    height: 32px;
+    min-width: 92px;
+    padding: 0 12px;
+    border-radius: 16px;
+    background: var(--chip);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    position: relative;
+  }
+  .pill.locked::before {
+    content: "";
+    position: absolute;
+    inset: -4px;
+    border-radius: 20px;
+    border: 2px solid var(--accent);
+    opacity: .9;
+  }
+  .pill .bar {
+    width: 3px;
+    height: 16px;
+    border-radius: 2px;
+    background: var(--accent);
+    transform: scaleY(var(--h, .6));
+    transform-origin: center;
+  }
+  .pill.recording .bar { background: var(--rec); }
+  .pill.recording .rec { width: 8px; height: 8px; border-radius: 50%; background: var(--rec); margin-right: 6px; }
+  .card {
+    width: min(100%, 300px);
+    background: var(--chip);
+    color: var(--paper);
+    border-radius: 14px;
+    padding: 12px 14px;
+    font-size: .85rem;
+    line-height: 1.4;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: .75rem;
+    align-items: center;
+  }
+  .card button {
+    font: inherit;
+    font-family: var(--mono);
+    font-size: .8rem;
+    color: var(--ink);
+    background: var(--paper);
+    border: 0;
+    border-radius: 999px;
+    padding: .4rem .8rem;
+    cursor: pointer;
+  }
+  .pillcase h3 { font-size: 1.4rem; margin-bottom: 0; }
+  .pillcase p { font-size: .95rem; }
+
+  .tray { margin: 0; padding: 0; border-top: 1px solid var(--hair); }
+  .tray > div {
+    display: grid;
+    grid-template-columns: minmax(7rem, 2fr) 5fr;
+    gap: 1rem;
+    padding: .8rem 0;
+    border-bottom: 1px solid var(--hair);
+    align-items: baseline;
+  }
+  .tray > div > * { min-width: 0; }
+  .tray dt { font-family: var(--mono); font-size: .85rem; color: var(--mute); margin: 0; }
+  .tray dd { margin: 0; font-size: .95rem; }
+
+  /* Permissions */
+
+  .perm { margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+  .perm > div {
+    display: grid;
+    grid-template-columns: minmax(8rem, 2fr) 5fr;
+    gap: 1rem;
+    padding: 1.1rem 0;
+    border-bottom: 1px solid var(--hair);
+  }
+  .perm > div > * { min-width: 0; }
+  .perm dt { font-family: var(--display); font-size: 1.5rem; line-height: 1.1; margin: 0; }
+  .perm dd { margin: 0; max-width: 52ch; }
+  .perm dd small { display: block; font-family: var(--mono); font-size: .8rem; color: var(--mute); margin-top: .25rem; }
+
+  /* Free and open source */
+
+  .free { border-top: 1px solid var(--rule); }
+  .free .inner {
+    display: grid;
+    grid-template-columns: minmax(0, 6fr) minmax(0, 5fr);
+    gap: 2.5rem clamp(2rem, 4vw, 4rem);
+    padding: clamp(3rem, 6vw, 5.5rem) 0;
+  }
+  .free .inner > * { min-width: 0; }
+  .free h2 {
+    font-family: var(--display);
+    font-size: clamp(2.4rem, 5vw, 4.6rem);
+    line-height: .98;
+    letter-spacing: -.015em;
+    text-wrap: balance;
+    margin-bottom: 1.25rem;
+  }
+  .facts { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--hair); }
+  .facts li { padding: .7rem 0; border-bottom: 1px solid var(--hair); font-size: .95rem; display: flex; gap: 1rem; align-items: baseline; }
+  .facts li::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; position: relative; top: -1px; }
+  .soon {
+    margin-top: 2rem;
+    padding: 1.1rem 1.25rem;
+    border: 1px solid var(--hair);
+    border-radius: 4px;
+    font-size: .95rem;
+    max-width: 52ch;
+  }
+  .soon p { margin: 0; }
+
+  /* Footer */
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding: 2rem 0 3rem;
+    font-family: var(--mono);
+    font-size: .85rem;
+    color: var(--mute);
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 1rem 2rem;
+  }
+  footer a { color: var(--ink); }
+  footer nav { display: flex; flex-wrap: wrap; gap: 1.5rem; }
+
+  /* Motion */
+
+  @media (prefers-reduced-motion: no-preference) {
+    .term { animation: rise .7s var(--ease) both; animation-delay: .1s; }
+    .caret { animation: blink 1.1s steps(1) infinite; }
+    .pill.live .bar { animation: level 1.1s ease-in-out infinite alternate; }
+    .pill.live .bar:nth-child(2) { animation-delay: -.2s; }
+    .pill.live .bar:nth-child(3) { animation-delay: -.5s; }
+    .pill.live .bar:nth-child(4) { animation-delay: -.8s; }
+    .pill.live .bar:nth-child(5) { animation-delay: -.35s; }
+    .pill.live .bar:nth-child(6) { animation-delay: -.65s; }
+    .pill.live .bar:nth-child(7) { animation-delay: -.1s; }
+    .pill.locked::before { animation: ring 1.6s ease-in-out infinite alternate; }
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+  @keyframes blink { 50% { opacity: 0; } }
+  @keyframes level {
+    from { transform: scaleY(calc(var(--h, .6) * .35)); }
+    to { transform: scaleY(var(--h, .6)); }
+  }
+  @keyframes ring { from { opacity: .45; } to { opacity: 1; } }
+
+  /* Breakpoints */
+
+  @media (max-width: 1100px) {
+    .pills { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+
+  @media (max-width: 960px) {
+    .hero-grid { grid-template-columns: 1fr; }
+    .two, .free .inner { grid-template-columns: 1fr; }
+    .pillars { grid-template-columns: 1fr; gap: 2rem; }
+    .cleanup-notes { grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 760px) {
+    .gesture { grid-template-columns: minmax(2.5rem, 1fr) 7fr; }
+    .gesture .result { grid-column: 2; }
+    .gesture .n { font-size: clamp(2.6rem, 10vw, 4rem); }
+    .notes { grid-template-columns: 1fr; }
+    .pills { grid-template-columns: 1fr; }
+    .files > div, .tray > div, .perm > div { grid-template-columns: 1fr; gap: .25rem; }
+    .top nav { gap: .5rem 1.1rem; }
+    .top nav a.hide-sm { display: none; }
+    .term .split { grid-template-columns: 1fr; }
+    .term .split > * + * { border-left: 0; border-top: 1px solid var(--dark-line); }
+    .ledger thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    .ledger tr { display: grid; grid-template-columns: 2.4rem minmax(0, 1fr); padding: .7rem 0; border-bottom: 1px solid var(--hair); }
+    .ledger tbody tr:last-child { border-bottom: 0; }
+    .ledger th, .ledger td { border: 0; padding: .15rem 0; width: auto; }
+    .ledger .num { grid-row: 1 / span 3; padding-top: .3rem; }
+    .ledger .pass { grid-column: 2; padding-top: .25rem; }
+    .ledger .lbl { display: inline-block; font-family: var(--body); font-size: .68rem; letter-spacing: .1em; text-transform: uppercase; color: var(--mute); width: 4.4rem; }
+  }
+
+  @media (max-width: 420px) {
+    .term .tag { display: none; }
+    .top nav a.hide-xs { display: none; }
+  }
+</style>
+</head>
+<body>
+<!-- concept: Stop describing your screen, let your agent see it. Paper and ink, Instrument Serif headings with an italic turn, a single dark artefact in the hero where a take has just been pasted next to the folder the agent opens. Three equal pillars, then a specification sheet with hairline rules and one cyan accent. -->
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="globe" viewBox="0 0 16 16">
+    <g fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">
+      <circle cx="8" cy="8" r="6.4"/>
+      <ellipse cx="8" cy="8" rx="2.7" ry="6.4"/>
+      <path d="M1.6 8h12.8M2.8 4.8h10.4M2.8 11.2h10.4"/>
+    </g>
+  </symbol>
+</svg>
+
+<header class="wrap">
+  <div class="top">
+    <a class="brand" href="#top" aria-label="see.computer, home">
+      <svg class="mark" viewBox="0 0 26 26" role="img" aria-label="see.computer icon, a white ring and a black dot on a black rounded square">
+        <rect width="26" height="26" rx="6.5" fill="#141414"/>
+        <circle cx="13" cy="13" r="6.5" fill="none" stroke="#f4f2ed" stroke-width="2"/>
+        <circle cx="13" cy="13" r="2.4" fill="#f4f2ed"/>
+      </svg>
+      see.computer
+    </a>
+    <nav aria-label="Primary">
+      <a class="hide-sm" href="#gestures">Gestures</a>
+      <a class="hide-sm" href="#takes">Takes</a>
+      <a class="hide-xs" href="https://github.com/Willayam/see.computer">Source</a>
+      <a href="https://github.com/Willayam/see.computer/releases/latest">Download</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+  <section class="wrap hero" aria-labelledby="h1">
+    <div class="hero-grid">
+      <div>
+        <p class="eyebrow">Dictation and takes for the Mac</p>
+        <h1 id="h1">Stop describing your screen. Let your agent <em>see</em> it.</h1>
+        <p class="sub">see.computer is the fastest way to show your agent what it needs. Speak, and the words land at your cursor. Add Shift, and your screen goes with them. <strong>Free and open source under MIT. Fully local. No account.</strong></p>
+        <div class="ctas">
+          <a class="btn primary" href="https://github.com/Willayam/see.computer/releases/latest"><span class="dot" aria-hidden="true"></span>Download for Mac</a>
+          <a class="btn" href="https://github.com/Willayam/see.computer">View source</a>
+          <span class="cta-note">DMG. macOS 14, Apple Silicon.</span>
+        </div>
+      </div>
+
+      <figure class="term dark" aria-label="A coding agent chat where a take has just been pasted, next to the folder the agent will open">
+        <div class="bar">
+          <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="title">agent</span>
+          <span class="tag">Globe+Shift released</span>
+        </div>
+        <div class="split">
+          <div>
+            <span class="label">Pasted at the cursor</span>
+<pre class="wrap-text"><span class="prompt">&gt;</span> "The sidebar overlaps the table once the window is narrower than about 900 pixels. The shot is at 1200, the clip is me dragging it down."
+
+<span class="dim">shots/001.png, clips/001 (14 frames)</span>
+<span class="path">~/Documents/see.computer/2026-09-07T14-02-11/take.md</span><span class="caret" aria-hidden="true"></span></pre>
+          </div>
+          <div>
+            <span class="label">What the agent opens</span>
+<pre class="tree"><b>2026-09-07T14-02-11/</b>
+&#9500;&#9472;&#9472; <span class="hi">take.md</span>
+&#9500;&#9472;&#9472; transcript.json
+&#9500;&#9472;&#9472; shots/
+&#9474;   &#9492;&#9472;&#9472; 001.png
+&#9492;&#9472;&#9472; clips/
+    &#9492;&#9472;&#9472; 001/
+        &#9500;&#9472;&#9472; clip.mov
+        &#9492;&#9472;&#9472; frames/  <span class="note">14 jpg</span></pre>
+          </div>
+        </div>
+      </figure>
+    </div>
+  </section>
+
+  <section class="wrap section" aria-label="Three reasons">
+    <div class="pillars">
+      <article class="pillar">
+        <span class="n" aria-hidden="true">01</span>
+        <h2>Ultra fast</h2>
+        <p class="big"><span data-bench="ms">200</span> ms<small>key-up to paste</small></p>
+        <p>That is a six-second sentence on an M3 Max. The engine warms the moment the key goes down, so by the time you let go most of the work is done. It runs on the CPU. Nothing is uploaded.</p>
+      </article>
+      <article class="pillar">
+        <span class="n" aria-hidden="true">02</span>
+        <h2>Shares context with your agent, <em>the fast way</em></h2>
+        <p>Hold Globe+Shift, talk over what is on screen, let go. The screen and your voice become a folder with take.md, the transcript with word timings, screenshots, and every clip already split into JPEG frames. The agent opens the exact frame where you said "this one" without decoding a video.</p>
+        <p>The paste carries the words too, so a web chat box with no file access still gets them.</p>
+      </article>
+      <article class="pillar">
+        <span class="n" aria-hidden="true">03</span>
+        <h2>Cleans it up</h2>
+        <p>um, uh and hm are dropped and the next word takes the capital. Spoken numbers come out as figures. twenty-five thousand becomes 25,000, five percent becomes 5 %.</p>
+        <p>Words the model has never heard go in <code>vocabulary.md</code> and are pushed into the decoder while it is still choosing.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="wrap section" id="gestures" aria-labelledby="h-gestures">
+    <p class="eyebrow">Gestures</p>
+    <h2 id="h-gestures">Three gestures on the <em>Globe</em> key</h2>
+    <p class="lead">The default trigger is Fn (Globe), the same key Apple and Wispr Flow use for dictation. Nothing to open, no window to find.</p>
+
+    <ol class="gestures">
+      <li class="gesture">
+        <span class="n" aria-hidden="true">1</span>
+        <div>
+          <h3>Hold Globe. Speak. Let go.</h3>
+          <div class="keys">
+            <span class="verb">Hold</span>
+            <kbd><svg class="glyph" aria-hidden="true"><use href="#globe"/></svg>Globe</kbd>
+          </div>
+        </div>
+        <div class="result">
+          <p>The text is pasted at your cursor, in any app that has one. A terminal, a chat box, a commit message.</p>
+        </div>
+      </li>
+
+      <li class="gesture">
+        <span class="n" aria-hidden="true">2</span>
+        <div>
+          <h3>Double tap Globe. Speak. Tap once more to finish.</h3>
+          <div class="keys">
+            <span class="verb">Tap twice</span>
+            <kbd><svg class="glyph" aria-hidden="true"><use href="#globe"/></svg>Globe</kbd>
+          </div>
+        </div>
+        <div class="result">
+          <p>A locked take, for narration that runs longer than you want to hold a key. Tap once to finish and paste. Esc throws it away. A lit ring around the pill while it is locked.</p>
+          <p>Inside a locked take, hold Globe again and add Shift for shots or clips.</p>
+        </div>
+      </li>
+
+      <li class="gesture">
+        <span class="n" aria-hidden="true">3</span>
+        <div>
+          <h3>Hold Globe and Shift. Let go to stop.</h3>
+          <div class="keys">
+            <span class="verb">Hold</span>
+            <kbd><svg class="glyph" aria-hidden="true"><use href="#globe"/></svg>Globe</kbd>
+            <span class="plus">+</span>
+            <kbd><span class="sym">&#8679;</span>Shift</kbd>
+          </div>
+        </div>
+        <div class="result">
+          <p>The screen and the microphone are recorded while you hold. On release they are packaged into a take folder and the paste lands at your cursor.</p>
+          <p>Release before about 0.6 seconds and the take is discarded, so a slipped key leaves nothing behind.</p>
+        </div>
+      </li>
+    </ol>
+
+    <div class="notes">
+      <p><b>Other keys.</b> Left Option and Right Option are available as the trigger in the tray. Locking and recording follow whichever key you pick.</p>
+      <p><b>If Globe starts Apple's Dictation.</b> macOS may have the Globe key set to start its own Dictation. Set it to Do Nothing under System Settings &gt; Keyboard.</p>
+    </div>
+  </section>
+
+  <section class="wrap section" id="takes" aria-labelledby="h-takes">
+    <p class="eyebrow">Takes</p>
+    <h2 id="h-takes">A take is a folder <em>an agent can read</em></h2>
+    <div class="two">
+      <div>
+        <p class="lead">Agents read files. They do not decode QuickTime. So a take is laid out for a reader with a file tool and nothing else. Hold Globe+Shift, talk through what is on screen, let go. The recording is written under a timestamp in <code>~/Documents/see.computer/</code>, and a short paste lands at your cursor.</p>
+        <p>The paste is the narration in quotes, a blank line, then the names of the captures and the path to <code>take.md</code>. A coding agent with file access follows the path and opens the frame that was on screen when you said "this one". A web chat box that cannot open your disk still gets the words in quotes. Both get the same paste.</p>
+        <dl class="files">
+          <div><dt>take.md</dt><dd>The narration and the captures in one file. Point an agent here and it has the whole story.</dd></div>
+          <div><dt>transcript.json</dt><dd>Word timings, so a reader can line up "the second field" with the frame on screen at that moment.</dd></div>
+          <div><dt>shots/</dt><dd>Screenshots as PNG.</dd></div>
+          <div><dt>clips/001/frames/</dt><dd>JPEG frames of the clip. The .mov sits next to them for a human.</dd></div>
+        </dl>
+      </div>
+      <div>
+        <p class="label">What lands on disk</p>
+<pre aria-label="Folder tree of one take">~/Documents/see.computer/2026-09-07T14-02-11/
+&#9500;&#9472;&#9472; take.md            <span class="c">start here</span>
+&#9500;&#9472;&#9472; transcript.json    <span class="c">word timings</span>
+&#9500;&#9472;&#9472; shots/             <span class="c">PNG screenshots</span>
+&#9474;   &#9492;&#9472;&#9472; 001.png
+&#9492;&#9472;&#9472; clips/
+    &#9492;&#9472;&#9472; 001/
+        &#9500;&#9472;&#9472; clip.mov
+        &#9492;&#9472;&#9472; frames/      <span class="c">JPEG frames</span></pre>
+        <p class="label" style="margin-top:2rem">What gets pasted</p>
+<pre class="prewrap" aria-label="Example of the text pasted after a recording">"The sidebar overlaps the table once the window is narrower than about 900 pixels. The shot is at 1200, the clip is me dragging it down."
+
+shots/001.png, clips/001 (14 frames)
+~/Documents/see.computer/2026-09-07T14-02-11/take.md</pre>
+        <p class="cap">Already have a .mov? <code>see-computer clip &lt;mov&gt;</code> packages it into a take the same way.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap section" id="cleanup" aria-labelledby="h-cleanup">
+    <p class="eyebrow">Cleanup</p>
+    <h2 id="h-cleanup">What gets fixed <em>before</em> it pastes</h2>
+    <p class="lead">Spoken text is not written text. Hesitation, spoken numbers and project names the model has never seen are each handled before Cmd+V, so the agent reads a sentence and not a transcript.</p>
+
+    <table class="ledger" style="margin-top:2rem">
+      <thead>
+        <tr><th scope="col" class="num">No.</th><th scope="col">Said</th><th scope="col">Pasted</th><th scope="col" class="pass">Pass</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row" class="num">01</th><td class="said"><span class="lbl">Said</span>Um, so twenty-five thousand</td><td class="pasted"><span class="lbl">Pasted</span>So 25,000</td><td class="pass">filler, numbers</td></tr>
+        <tr><th scope="row" class="num">02</th><td class="said"><span class="lbl">Said</span>two hundred and seventy nine</td><td class="pasted"><span class="lbl">Pasted</span>279</td><td class="pass">numbers</td></tr>
+        <tr><th scope="row" class="num">03</th><td class="said"><span class="lbl">Said</span>Fable five point one</td><td class="pasted"><span class="lbl">Pasted</span>Fable 5.1</td><td class="pass">numbers, decimal</td></tr>
+        <tr><th scope="row" class="num">04</th><td class="said"><span class="lbl">Said</span>five percent</td><td class="pasted"><span class="lbl">Pasted</span>5 %</td><td class="pass">numbers, percent</td></tr>
+        <tr><th scope="row" class="num">05</th><td class="said"><span class="lbl">Said</span>two million</td><td class="pasted"><span class="lbl">Pasted</span>2 million</td><td class="pass">numbers</td></tr>
+        <tr><th scope="row" class="num">06</th><td class="said"><span class="lbl">Said</span>It is, uh, like, fine.</td><td class="pasted"><span class="lbl">Pasted</span>It is, like, fine.</td><td class="pass">filler, "like" stays</td></tr>
+        <tr><th scope="row" class="num">07</th><td class="said"><span class="lbl">Said</span>seven</td><td class="pasted"><span class="lbl">Pasted</span>seven</td><td class="pass">left alone</td></tr>
+        <tr><th scope="row" class="num">08</th><td class="said"><span class="lbl">Said</span>Hm.</td><td class="pasted"><span class="lbl">Pasted</span><span class="nil">nothing pasted</span></td><td class="pass">filler</td></tr>
+      </tbody>
+    </table>
+
+    <div class="cleanup-notes">
+      <div>
+        <h3>Hesitation</h3>
+        <p>um, uh and hm are dropped, together with the comma or full stop stuck to them. The next word takes over the capital. "like" and "actually" stay, because they are usually real words. A dictation that was only a hum pastes nothing.</p>
+      </div>
+      <div>
+        <h3>Numbers</h3>
+        <p>Ten and above become digits. Zero to nine stay words unless they carry a percent sign or a decimal point.</p>
+      </div>
+      <div>
+        <h3>Vocabulary</h3>
+        <p>Put the words the model misses in <code>~/Documents/see.computer/vocabulary.md</code>, one per line. They are boosted inside the decoder while it is still choosing, not substituted afterwards. A term only gets its bonus when the model was already considering it, so a long list stays safe. A bonus can win a close call, not overturn a confident one. The file is re-read on change. No restart.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap section" id="pill" aria-labelledby="h-pill">
+    <p class="eyebrow">The pill and the tray</p>
+    <h2 id="h-pill">One chip says what the <em>microphone</em> is doing</h2>
+    <div class="two">
+      <div>
+        <p class="lead">A dark chip at the bottom of the screen. It appears when you hold the trigger and goes away when you let go. Cyan bars while listening, red while recording, a lit ring while a take is locked, so a live microphone never looks idle.</p>
+        <p>If no text field could take the paste, the pill stretches into a card with the text and a Copy button. Nothing is lost.</p>
+      </div>
+      <div>
+        <p class="label">The tray</p>
+        <dl class="tray">
+          <div><dt>Recent</dt><dd>Recent dictations and recordings. Click one to copy it again.</dd></div>
+          <div><dt>Trigger</dt><dd>Fn (Globe), Left Option or Right Option.</dd></div>
+          <div><dt>Folder</dt><dd>Where takes and history are written.</dd></div>
+          <div><dt>Launch at login</dt><dd>On or off.</dd></div>
+          <div><dt>History</dt><dd>One markdown file per day in <code>~/Documents/see.computer/</code>. Plain text, never pruned for you. Turn it off with "Save Dictation History".</dd></div>
+          <div><dt>Permissions</dt><dd>Shortcuts to each System Settings pane.</dd></div>
+        </dl>
+        <p class="aside" style="margin-top:1rem">If iCloud Desktop &amp; Documents sync is on, those text files sync like any other document. The promise about audio still holds. Audio never leaves the machine.</p>
+      </div>
+    </div>
+
+    <div class="pills">
+      <div class="pillcase">
+        <div class="stage">
+          <div class="pill live" role="img" aria-label="The pill while listening, seven cyan bars">
+            <span class="bar" style="--h:.5"></span><span class="bar" style="--h:.9"></span><span class="bar" style="--h:.7"></span><span class="bar" style="--h:1"></span><span class="bar" style="--h:.6"></span><span class="bar" style="--h:.85"></span><span class="bar" style="--h:.45"></span>
+          </div>
+        </div>
+        <h3>Listening</h3>
+        <p>Globe held. Bars follow the microphone.</p>
+      </div>
+      <div class="pillcase">
+        <div class="stage">
+          <div class="pill live recording" role="img" aria-label="The pill while recording, red bars and a red dot">
+            <span class="rec"></span><span class="bar" style="--h:.6"></span><span class="bar" style="--h:1"></span><span class="bar" style="--h:.7"></span><span class="bar" style="--h:.9"></span><span class="bar" style="--h:.5"></span>
+          </div>
+        </div>
+        <h3>Recording</h3>
+        <p>Globe and Shift held. Screen and voice captured.</p>
+      </div>
+      <div class="pillcase">
+        <div class="stage">
+          <div class="pill live locked" role="img" aria-label="The pill in a locked take, cyan bars with a lit ring around the pill">
+            <span class="bar" style="--h:.7"></span><span class="bar" style="--h:.5"></span><span class="bar" style="--h:1"></span><span class="bar" style="--h:.8"></span><span class="bar" style="--h:.6"></span><span class="bar" style="--h:.9"></span><span class="bar" style="--h:.5"></span>
+          </div>
+        </div>
+        <h3>Locked</h3>
+        <p>Double tapped. Hands free. Tap to paste, Esc to discard.</p>
+      </div>
+      <div class="pillcase">
+        <div class="stage">
+          <div class="card" role="group" aria-label="The pill stretched into a card because no text field had focus">
+            <span id="cardtext">Move the sidebar under the table below 900 pixels.</span>
+            <button type="button" data-copy="cardtext">Copy</button>
+          </div>
+        </div>
+        <h3>Nothing focused</h3>
+        <p>No cursor to paste into. The text waits here instead.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap section" id="permissions" aria-labelledby="h-perm">
+    <p class="eyebrow">Permissions</p>
+    <h2 id="h-perm">Four prompts from macOS, <em>and why each one</em></h2>
+    <div class="two">
+      <div>
+        <p class="lead">An app that pastes text and reads a bare modifier key needs more than the average menu bar utility. Each permission is asked the first time the feature that needs it runs, so the first launch has no surprises.</p>
+      </div>
+      <dl class="perm">
+        <div><dt>Accessibility</dt><dd>To press Cmd+V for you. That is how the text reaches the cursor.</dd></div>
+        <div><dt>Input Monitoring</dt><dd>To notice a bare modifier key being held down. That is what hold-to-talk is.</dd></div>
+        <div><dt>Microphone</dt><dd>To hear you. Audio is transcribed on the CPU and never uploaded.</dd></div>
+        <div><dt>Screen Recording</dt><dd>For the Globe+Shift take only. Dictation works without it.<small>asked the first time you record</small></dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="wrap free" id="free" aria-labelledby="h-free">
+    <div class="inner">
+      <div>
+        <p class="eyebrow">Free and open source</p>
+        <h2 id="h-free">Free. Open source. <em>Yours to read.</em></h2>
+        <p class="lead">MIT licence, source on <a href="https://github.com/Willayam/see.computer">GitHub</a>. The app runs on your Mac and stays there. No account, no analytics, no network calls other than the one model download on first launch.</p>
+        <div class="soon" role="note">
+          <p>Coming soon: cloud links. Share a take as a link with someone who is not at your Mac. The local app stays free.</p>
+        </div>
+      </div>
+      <ul class="facts" aria-label="What local means here">
+        <li>Speech model on the CPU. NVIDIA Parakeet TDT 0.6b v3, INT8 ONNX, 670 MB, downloaded once into <code>~/Library/Application Support/see.computer/models/</code>.</li>
+        <li>25 languages. Bulgarian, Croatian, Czech, Danish, Dutch, English, Estonian, Finnish, French, German, Greek, Hungarian, Italian, Latvian, Lithuanian, Maltese, Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Spanish, Swedish, Ukrainian.</li>
+        <li>Built with Tauri v2 and Rust. One controller thread owns the state. The menu is a native AppKit glass panel.</li>
+        <li>Takes and history are plain files in <code>~/Documents/see.computer/</code>. Read them, grep them, delete them.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="wrap section" id="download" aria-labelledby="h-download">
+    <p class="eyebrow">Requirements and download</p>
+    <h2 id="h-download">A DMG, <em>or cargo</em></h2>
+    <div class="two">
+      <div>
+        <p class="lead">macOS 14 or later on Apple Silicon. Open the DMG, drag the app to Applications, hold Globe. The model downloads on first launch.</p>
+        <p>Free and open source, MIT. No account.</p>
+        <div class="ctas">
+          <a class="btn primary" href="https://github.com/Willayam/see.computer/releases/latest"><span class="dot" aria-hidden="true"></span>Download for Mac</a>
+          <a class="btn" href="https://github.com/Willayam/see.computer">View source</a>
+        </div>
+      </div>
+      <div>
+        <p class="label">From source</p>
+<pre aria-label="Build command">cd src-tauri
+cargo tauri build --debug --bundles app</pre>
+        <p class="label" style="margin-top:2rem">Command line, inside the bundle</p>
+<pre aria-label="Command line tools">see-computer transcribe &lt;wav&gt;
+see-computer clip &lt;mov&gt;</pre>
+        <p class="cap">The same model and the same take packaging, callable from a script.</p>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="wrap">
+  <span>see.computer. MIT licence.</span>
+  <nav aria-label="Footer">
+    <a href="https://github.com/Willayam/see.computer">GitHub</a>
+    <a href="https://github.com/Willayam/see.computer/releases/latest">Releases</a>
+    <a href="#top">Top</a>
+  </nav>
+</footer>
+
+<script>
+  document.querySelectorAll("button[data-copy]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var source = document.getElementById(button.dataset.copy);
+      if (!source || !navigator.clipboard) return;
+      navigator.clipboard.writeText(source.textContent).then(function () {
+        var label = button.textContent;
+        button.textContent = "Copied";
+        setTimeout(function () { button.textContent = label; }, 1200);
+      });
+    });
+  });
+</script>
+</body>
+</html>
