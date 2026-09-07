@@ -927,7 +927,7 @@ shots/001.png, clips/001 (14 frames)
         </div>
       </div>
       <ul class="facts" aria-label="What local means here">
-        <li>Speech model on the CPU. NVIDIA Parakeet TDT 0.6b v3, INT8 ONNX, 670 MB, downloaded once into <code>~/Library/Application Support/see.computer/models/</code>.</li>
+        <li>Speech model on the CPU. <a href="https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3">NVIDIA Parakeet TDT 0.6b v3</a>, INT8 ONNX, 670 MB, downloaded once into <code>~/Library/Application Support/see.computer/models/</code>.</li>
         <li>25 languages. Bulgarian, Croatian, Czech, Danish, Dutch, English, Estonian, Finnish, French, German, Greek, Hungarian, Italian, Latvian, Lithuanian, Maltese, Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Spanish, Swedish, Ukrainian.</li>
         <li>Built with Tauri v2 and Rust. One controller thread owns the state. The menu is a native AppKit glass panel.</li>
         <li>Takes and history are plain files in <code>~/Documents/see.computer/</code>. Read them, grep them, delete them.</li>
@@ -949,7 +949,7 @@ shots/001.png, clips/001 (14 frames)
       </div>
       <div>
         <p class="label">From source</p>
-<pre aria-label="Build command">cd src-tauri
+<pre class="prewrap" aria-label="Build command">cd src-tauri
 cargo tauri build --debug --bundles app</pre>
         <p class="label" style="margin-top:2rem">Command line, inside the bundle</p>
 <pre aria-label="Command line tools">see-computer transcribe &lt;wav&gt;
