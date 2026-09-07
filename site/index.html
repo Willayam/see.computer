@@ -32,6 +32,23 @@
     --ease: cubic-bezier(.2, .8, .2, 1);
   }
 
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #121316;
+      --ink: #ebe8e2;
+      --mute: #9c9a93;
+      --rule: #ebe8e2;
+      --hair: rgba(235, 232, 226, .22);
+      --dark: #1b1d21;
+      --dark-2: #23252a;
+      --dark-line: rgba(255, 255, 255, .13);
+      --chip: rgba(28, 29, 33, .96);
+    }
+    .term { box-shadow: 0 40px 80px -40px rgba(0, 0, 0, .8), 0 0 0 1px var(--dark-line); }
+    .stage { background-image: repeating-linear-gradient(0deg, transparent 0 7px, rgba(235, 232, 226, .06) 7px 8px); }
+    img.shot { filter: none; }
+  }
+
   * { box-sizing: border-box; }
 
   html { background: var(--paper); color: var(--ink); -webkit-text-size-adjust: 100%; }
@@ -399,6 +416,10 @@
 
   /* The pill */
 
+  .shot { margin: 2.5rem 0 2rem; }
+  .shot img { display: block; width: 100%; max-width: 688px; height: auto; }
+  .shot figcaption { margin-top: .6rem; font-family: var(--mono); font-size: .8rem; color: var(--mute); }
+
   .pills { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2rem 2rem; margin-top: 2.5rem; }
   .pills > * { min-width: 0; }
   .pillcase { display: flex; flex-direction: column; gap: .8rem; }
@@ -445,7 +466,7 @@
   .card {
     width: min(100%, 300px);
     background: var(--chip);
-    color: var(--paper);
+    color: #f4f2ed;
     border-radius: 14px;
     padding: 12px 14px;
     font-size: .85rem;
@@ -459,8 +480,8 @@
     font: inherit;
     font-family: var(--mono);
     font-size: .8rem;
-    color: var(--ink);
-    background: var(--paper);
+    color: #141414;
+    background: #f4f2ed;
     border: 0;
     border-radius: 999px;
     padding: .4rem .8rem;
@@ -532,7 +553,7 @@
 
   footer {
     border-top: 1px solid var(--rule);
-    padding: 2rem 0 3rem;
+    padding-block: 2.5rem 4.5rem;
     font-family: var(--mono);
     font-size: .85rem;
     color: var(--mute);
@@ -859,6 +880,10 @@ shots/001.png, clips/001 (14 frames)
       </div>
     </div>
 
+    <figure class="shot">
+      <img src="images/card.png" width="1376" height="224" alt="The pill stretched into a card. A waveform glyph, the dictated sentence, a Copy button, and a dismiss cross on a dark rounded bar." loading="lazy">
+      <figcaption>A real capture. Nothing had focus, so the text waits on the card with a Copy button.</figcaption>
+    </figure>
     <div class="pills">
       <div class="pillcase">
         <div class="stage">
