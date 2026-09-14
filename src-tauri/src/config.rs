@@ -8,6 +8,8 @@ pub struct Config {
     pub trigger: Trigger,
     #[serde(default = "history_default")]
     pub history: bool,
+    #[serde(default)]
+    pub sharing: bool,
 }
 
 fn history_default() -> bool {
@@ -19,6 +21,7 @@ impl Default for Config {
         Self {
             trigger: Trigger::Fn,
             history: true,
+            sharing: false,
         }
     }
 }
@@ -50,5 +53,6 @@ mod tests {
         let config: Config = serde_json::from_str(r#"{"trigger":"left-option"}"#).unwrap();
         assert_eq!(config.trigger, Trigger::LeftOption);
         assert!(config.history);
+        assert!(!config.sharing);
     }
 }

@@ -1,0 +1,168 @@
+[
+  {
+    "ms": 8730.561167001724,
+    "message": {
+      "type": "Begin",
+      "id": "03af4a67-d659-46ff-9399-aba151457d26",
+      "expires_at": 1788969461,
+      "configuration": {
+        "model": "universal-3-5-pro",
+        "mode": "min_latency",
+        "api_version": "2025-05-12",
+        "speaker_labels": false,
+        "redact_pii": false,
+        "filter_profanity": false,
+        "domain": null,
+        "voice_focus": null
+      }
+    }
+  },
+  {
+    "ms": 9244.17145899497,
+    "message": {
+      "type": "SpeechStarted",
+      "timestamp": 0,
+      "confidence": 0.996471
+    }
+  },
+  {
+    "ms": 9244.860667036846,
+    "message": {
+      "turn_order": 0,
+      "turn_is_formatted": true,
+      "end_of_turn": true,
+      "transcript": "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up.",
+      "end_of_turn_confidence": 1.0,
+      "words": [
+        {
+          "start": 0,
+          "end": 217,
+          "text": "Hi,",
+          "confidence": 0.961256,
+          "word_is_final": true
+        },
+        {
+          "start": 231,
+          "end": 520,
+          "text": "this",
+          "confidence": 0.99993,
+          "word_is_final": true
+        },
+        {
+          "start": 534,
+          "end": 678,
+          "text": "is",
+          "confidence": 0.999984,
+          "word_is_final": true
+        },
+        {
+          "start": 692,
+          "end": 764,
+          "text": "a",
+          "confidence": 0.999917,
+          "word_is_final": true
+        },
+        {
+          "start": 778,
+          "end": 1139,
+          "text": "quick",
+          "confidence": 0.99928,
+          "word_is_final": true
+        },
+        {
+          "start": 1153,
+          "end": 1804,
+          "text": "dictation",
+          "confidence": 0.999665,
+          "word_is_final": true
+        },
+        {
+          "start": 1818,
+          "end": 2107,
+          "text": "test",
+          "confidence": 0.99997,
+          "word_is_final": true
+        },
+        {
+          "start": 2121,
+          "end": 2265,
+          "text": "in",
+          "confidence": 0.999558,
+          "word_is_final": true
+        },
+        {
+          "start": 2279,
+          "end": 2857,
+          "text": "English.",
+          "confidence": 0.999179,
+          "word_is_final": true
+        },
+        {
+          "start": 2871,
+          "end": 3015,
+          "text": "We",
+          "confidence": 0.999596,
+          "word_is_final": true
+        },
+        {
+          "start": 3029,
+          "end": 3246,
+          "text": "are",
+          "confidence": 0.997259,
+          "word_is_final": true
+        },
+        {
+          "start": 3260,
+          "end": 3911,
+          "text": "measuring",
+          "confidence": 0.99992,
+          "word_is_final": true
+        },
+        {
+          "start": 3925,
+          "end": 4142,
+          "text": "how",
+          "confidence": 0.999958,
+          "word_is_final": true
+        },
+        {
+          "start": 4156,
+          "end": 4445,
+          "text": "fast",
+          "confidence": 0.999986,
+          "word_is_final": true
+        },
+        {
+          "start": 4459,
+          "end": 4676,
+          "text": "the",
+          "confidence": 0.999857,
+          "word_is_final": true
+        },
+        {
+          "start": 4690,
+          "end": 4979,
+          "text": "text",
+          "confidence": 0.999864,
+          "word_is_final": true
+        },
+        {
+          "start": 4993,
+          "end": 5354,
+          "text": "shows",
+          "confidence": 0.999739,
+          "word_is_final": true
+        },
+        {
+          "start": 5368,
+          "end": 5585,
+          "text": "up.",
+          "confidence": 0.981555,
+          "word_is_final": true
+        }
+      ],
+      "utterance": "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up.",
+      "type": "Turn"
+    }
+  }
+]

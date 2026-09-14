@@ -19,10 +19,12 @@ mod recents;
 mod recorder;
 mod rivals;
 mod session;
+mod sharing;
 mod target;
 mod text;
 mod tray;
 mod trigger;
+mod updater;
 
 fn acquire_single_instance() -> std::fs::File {
     use std::os::fd::AsRawFd;
@@ -70,6 +72,8 @@ fn main() {
     let trigger = std::sync::Arc::new(std::sync::Mutex::new(config.trigger));
     let gesture = std::sync::Arc::new(trigger::Gesture::default());
     let history = history::History::start(config.history);
+    let sharing = sharing::Sharing::start(config.sharing);
+    let updater = updater::Updater::new(tx.clone(), pill_tx.clone());
     let status = std::sync::Arc::new(std::sync::Mutex::new(session::EngineStatus::Loading {
         phase: engine::Phase::Downloading,
         pct: None,
@@ -85,6 +89,7 @@ fn main() {
             pill: pill_tx,
             trail: session::Trail::from_env(),
             history: history.clone(),
+            sharing: sharing.clone(),
             status: status.clone(),
             gesture: gesture.clone(),
         },
@@ -99,12 +104,14 @@ fn main() {
     let setup_status = status;
     let app = tauri::Builder::default()
         .plugin(hotkeys::plugin(tx.clone()))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
         .setup(move |app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            updater.attach(app.handle());
             let cancel_app = app.handle().clone();
             pill::attach(app.handle(), pill_rx, move |armed| {
                 let app = cancel_app.clone();
@@ -113,11 +120,15 @@ fn main() {
             });
             tray::install(
                 app.handle(),
-                setup_tx,
-                setup_trigger.clone(),
-                tray_pill_tx,
-                setup_history,
-                setup_status,
+                tray::Wiring {
+                    inbox: setup_tx,
+                    trigger: setup_trigger.clone(),
+                    pill: tray_pill_tx,
+                    history: setup_history,
+                    status: setup_status,
+                    sharing,
+                    updater,
+                },
             )?;
             paste::accessibility_trusted(true);
             trigger::spawn_watcher(setup_trigger, setup_watcher_tx, setup_gesture);

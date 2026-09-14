@@ -1,0 +1,10 @@
+name = "see-computer-media-lab"
+main = "worker.mjs"
+compatibility_date = "2026-09-09"
+account_id = "29392a6d23b11e67789d7f1c9bcc5853"
+workers_dev = true
+
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "see-computer-media-lab"
+

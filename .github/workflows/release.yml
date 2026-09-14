@@ -1,7 +1,7 @@
 name: Release
 
-# Push a tag like v0.1.0 and this builds a signed, notarized DMG for Apple
-# Silicon and attaches it to a draft GitHub release. Publish the draft by hand.
+# Push a tag like v0.1.0 to build signed and notarized Apple Silicon bundles.
+# The job attaches them to a draft GitHub release. Publish the draft by hand.
 #
 # Secrets the job needs (Settings > Secrets and variables > Actions):
 #   APPLE_CERTIFICATE            base64 of the Developer ID Application .p12
@@ -10,8 +10,8 @@ name: Release
 #   APPLE_ID                     Apple ID used for notarization
 #   APPLE_PASSWORD               app-specific password for that Apple ID
 #   APPLE_TEAM_ID                the ten character team id
-# Without the signing secrets the DMG still builds, but Gatekeeper blocks it
-# on first open and every rebuild re-prompts for permissions.
+#   TAURI_SIGNING_PRIVATE_KEY     updater signing private key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 
 on:
   push:
@@ -31,7 +31,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - uses: tauri-apps/tauri-action@v0
+      - name: Require signing secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          missing=()
+          for name in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_SIGNING_IDENTITY \
+            APPLE_ID \
+            APPLE_PASSWORD \
+            APPLE_TEAM_ID \
+            TAURI_SIGNING_PRIVATE_KEY
+          do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} )); then
+            printf 'Missing required GitHub Actions secrets: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -40,10 +69,15 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: src-tauri
           tagName: ${{ github.ref_name }}
           releaseName: "see.computer ${{ github.ref_name }}"
           releaseBody: "Download the DMG, drag see.computer to Applications, and open it. The 670 MB speech model downloads on first launch."
           releaseDraft: true
-          args: --target aarch64-apple-darwin --bundles dmg
+          prerelease: false
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+          args: --target aarch64-apple-darwin

@@ -46,6 +46,7 @@ pub enum Activity {
     Locked,
     Transcribing,
     Recording,
+    RecordingLocked,
     Finalizing,
     Preparing {
         phase: crate::engine::Phase,
@@ -55,6 +56,7 @@ pub enum Activity {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Notice {
+    Info(String),
     NothingHeard,
     MicSilent,
     StillTranscribing,
@@ -81,6 +83,7 @@ pub enum Tone {
 impl Notice {
     pub fn tone(&self) -> Tone {
         match self {
+            Notice::Info(_) => Tone::Info,
             Notice::NothingHeard
             | Notice::StillTranscribing
             | Notice::Cancelled
@@ -100,6 +103,7 @@ impl Notice {
 
     pub fn text(&self) -> String {
         match self {
+            Notice::Info(text) => text.clone(),
             Notice::NothingHeard => "Nothing heard".to_owned(),
             Notice::MicSilent => "No sound from the microphone, try again".to_owned(),
             Notice::StillTranscribing => "Still transcribing".to_owned(),
@@ -198,7 +202,12 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
             levels_on.store(
                 matches!(
                     current,
-                    Some(Activity::Listening | Activity::Locked | Activity::Recording)
+                    Some(
+                        Activity::Listening
+                            | Activity::Locked
+                            | Activity::Recording
+                            | Activity::RecordingLocked
+                    )
                 ),
                 std::sync::atomic::Ordering::Relaxed,
             );
@@ -209,6 +218,7 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                         | Activity::Locked
                         | Activity::Transcribing
                         | Activity::Recording
+                        | Activity::RecordingLocked
                         | Activity::Finalizing
                 )
             );

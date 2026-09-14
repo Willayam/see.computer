@@ -1,0 +1,112 @@
+{
+  "run_id": "634451b4232419790bc1e96eecb92eed",
+  "endpoint": "https://see-computer-media-lab.cocco.workers.dev",
+  "live": false,
+  "uploads": [
+    {
+      "file": "1080p-15-2m.mp4",
+      "bytes": 2649674,
+      "upload_ms": 807.64025,
+      "sha256": "8051420d679b4e239509ff0b8ca183a528287a12b7730408ccb33cc12c739131",
+      "url": "https://see-computer-media-lab.cocco.workers.dev/d/634451b4232419790bc1e96eecb92eed/1080p-15-2m.mp4",
+      "attempts": [
+        {
+          "attempt": 0,
+          "success": true,
+          "elapsed_ms": 1268.8309160000001
+        }
+      ],
+      "elapsed_with_retries_ms": 1268.834167
+    },
+    {
+      "file": "1440p-15-2m.mp4",
+      "bytes": 2664368,
+      "upload_ms": 1197.447292,
+      "sha256": "1198a3057513ffdd73093a1efa75afbc65f172ac3ad22d94120f10014087b64a",
+      "url": "https://see-computer-media-lab.cocco.workers.dev/d/634451b4232419790bc1e96eecb92eed/1440p-15-2m.mp4",
+      "attempts": [
+        {
+          "attempt": 0,
+          "success": true,
+          "elapsed_ms": 1659.7584579999998
+        }
+      ],
+      "elapsed_with_retries_ms": 1659.7630829999998
+    },
+    {
+      "file": "1440p-15-4m.mp4",
+      "bytes": 3506830,
+      "upload_ms": 1903.4097080000004,
+      "sha256": "1fd850d2f4c73dca711afec962d307c6c7da38a7398d18c579e1c70b66fbe937",
+      "url": "https://see-computer-media-lab.cocco.workers.dev/d/634451b4232419790bc1e96eecb92eed/1440p-15-4m.mp4",
+      "attempts": [
+        {
+          "attempt": 0,
+          "success": true,
+          "elapsed_ms": 3139.9477090000005
+        }
+      ],
+      "elapsed_with_retries_ms": 3139.9528749999995
+    },
+    {
+      "file": "1440p-30-4m.mp4",
+      "bytes": 3538475,
+      "upload_ms": 1029.3385409999996,
+      "sha256": "ae137a4c7a6df3174b01a10ecbec21b11dc97d4a8dace53a8cc921ba395a23c4",
+      "url": "https://see-computer-media-lab.cocco.workers.dev/d/634451b4232419790bc1e96eecb92eed/1440p-30-4m.mp4",
+      "attempts": [
+        {
+          "attempt": 0,
+          "success": true,
+          "elapsed_ms": 3390.98425
+        }
+      ],
+      "elapsed_with_retries_ms": 3390.988125
+    },
+    {
+      "file": "reference-2.png",
+      "bytes": 301910,
+      "upload_ms": 680.2539580000016,
+      "sha256": "cc43497c6de937a8e52c43ff0958fc89c3cf089b08dbc09f73d18d189479b821",
+      "url": "https://see-computer-media-lab.cocco.workers.dev/d/634451b4232419790bc1e96eecb92eed/reference-2.png",
+      "attempts": [
+        {
+          "attempt": 0,
+          "success": true,
+          "elapsed_ms": 1189.6402090000001
+        }
+      ],
+      "elapsed_with_retries_ms": 1189.6455839999992
+    },
+    {
+      "file": "index.html",
+      "bytes": 2518,
+      "upload_ms": 324.091334,
+      "sha256": "bc639e9dfc84bc6770672621c40a0bd35465374444e29bf98cf12238ecea969b",
+      "url": "https://see-computer-media-lab.cocco.workers.dev/d/634451b4232419790bc1e96eecb92eed/index.html",
+      "attempts": [
+        {
+          "attempt": 0,
+          "success": true,
+          "elapsed_ms": 561.720583
+        }
+      ],
+      "elapsed_with_retries_ms": 561.723167
+    },
+    {
+      "file": "take.md",
+      "bytes": 805,
+      "upload_ms": 516.8908329999997,
+      "sha256": "0fd390023a1ef8ce011321aecc85e30ed4d5c33647da18120b75294e4231918f",
+      "url": "https://see-computer-media-lab.cocco.workers.dev/d/634451b4232419790bc1e96eecb92eed/take.md",
+      "attempts": [
+        {
+          "attempt": 0,
+          "success": true,
+          "elapsed_ms": 1065.598165999999
+        }
+      ],
+      "elapsed_with_retries_ms": 1065.6024580000008
+    }
+  ]
+}

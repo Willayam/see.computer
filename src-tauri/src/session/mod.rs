@@ -119,9 +119,20 @@ pub enum Msg {
     /// The take just opened is locked: it stays live with nothing on the
     /// trigger, until a tap of the trigger finishes it or Esc cancels it.
     TakeLocked,
+    VideoLocked,
+    TriggerEdge {
+        at: std::time::SystemTime,
+        held: bool,
+        shift: bool,
+    },
+    TriggerReset,
+    TriggerReady,
+    TriggerUnavailable,
     Cancel,
     Quit,
     RetryEngine,
+    PrepareUpdate(Sender<bool>),
+    UpdateAborted,
     Engine(engine::Event),
     Packaged(Turn, Result<Packaged, String>),
     Paste(Turn, paste::Outcome),
@@ -141,6 +152,7 @@ pub struct Wiring {
     pub pill: Sender<PillEvent>,
     pub trail: Trail,
     pub history: crate::history::History,
+    pub sharing: crate::sharing::Sharing,
     pub status: std::sync::Arc<std::sync::Mutex<EngineStatus>>,
     pub gesture: std::sync::Arc<trigger::Gesture>,
 }
@@ -175,6 +187,9 @@ struct Controller {
     pill: Sender<PillEvent>,
     trail: Trail,
     history: crate::history::History,
+    sharing: crate::sharing::Sharing,
+    updating: bool,
+    share_take: bool,
     status: std::sync::Arc<std::sync::Mutex<EngineStatus>>,
     gesture: std::sync::Arc<trigger::Gesture>,
     tx: Sender<Msg>,
@@ -204,6 +219,9 @@ impl Controller {
             pill: wiring.pill,
             trail: wiring.trail,
             history: wiring.history,
+            sharing: wiring.sharing,
+            updating: false,
+            share_take: false,
             status: wiring.status,
             gesture: wiring.gesture,
             tx: inbox.0,
@@ -256,12 +274,28 @@ impl Controller {
     fn step(&mut self, msg: Msg) {
         let from = session_label(&self.session);
         let message = msg_label(&msg);
+        if let Msg::TriggerEdge { at, .. } = msg {
+            self.trail.record_at(from, message, from, at);
+            return;
+        }
         if matches!(msg, Msg::Quit) {
             self.quit();
             self.trail.record(from, message, "Idle");
             return;
         }
         match msg {
+            Msg::PrepareUpdate(reply) => {
+                let allowed = matches!(self.session, Session::Idle) && !self.updating;
+                // Reserve the idle controller before replying, so a hotkey cannot race installation.
+                if allowed {
+                    self.updating = true;
+                }
+                if reply.send(allowed).is_err() && allowed {
+                    self.updating = false;
+                }
+            }
+            Msg::UpdateAborted => self.updating = false,
+            Msg::TriggerReset | Msg::TriggerReady | Msg::TriggerUnavailable => {}
             Msg::Engine(engine::Event::Progress(progress)) => {
                 let activity = Activity::Preparing {
                     phase: progress.phase,
@@ -312,7 +346,11 @@ impl Controller {
                     }
                 }
             }
-            other => self.step_session(other),
+            other if !self.updating => self.step_session(other),
+            _ => {}
+        }
+        if message == "MainPressed" && !matches!(self.session, Session::Dictating { .. }) {
+            self.gesture.request_unlock();
         }
         let to = session_label(&self.session);
         self.trail.record(from, message, to);
@@ -352,6 +390,7 @@ impl Controller {
                                 return;
                             }
                             let armed = mic.arm();
+                            self.share_take = self.sharing.enabled();
                             self.engine.warm();
                             self.show(Activity::Listening);
                             Session::Dictating {
@@ -467,6 +506,20 @@ impl Controller {
                 self.show(Activity::Recording);
                 state
             }
+            (state @ Session::Dictating { .. }, Msg::VideoLocked) => {
+                if matches!(
+                    state,
+                    Session::Dictating {
+                        active_clip: Some(_),
+                        ..
+                    }
+                ) {
+                    self.show(Activity::RecordingLocked);
+                } else {
+                    self.gesture.request_unlock();
+                }
+                state
+            }
             (state @ Session::Dictating { .. }, Msg::TakeLocked) => {
                 self.show(Activity::Locked);
                 state
@@ -513,12 +566,23 @@ impl Controller {
                 let active_clip = if active_clip.is_some() {
                     active_clip
                 } else {
-                    match self.recorder.start() {
-                        Ok(active) => Some(ActiveClip {
-                            active,
-                            started: at,
-                            recording_start_ms: capture_offset_ms(since, Instant::now()),
-                        }),
+                    let result = match &capture_dir {
+                        Some(dir) => self.recorder.start_in(&dir.join("live")),
+                        None => self.recorder.start(),
+                    };
+                    match result {
+                        Ok(active) => {
+                            if self.share_take {
+                                if let Some(dir) = &capture_dir {
+                                    self.sharing.begin(dir);
+                                }
+                            }
+                            Some(ActiveClip {
+                                active,
+                                started: at,
+                                recording_start_ms: capture_offset_ms(since, Instant::now()),
+                            })
+                        }
                         Err(error) => {
                             self.flash(Notice::ScreenRecordingFailed(error.to_string()));
                             None
@@ -573,6 +637,7 @@ impl Controller {
                 if let Some(clip) = active_clip {
                     clip.active.abort();
                 }
+                self.sharing.cancel(capture_dir.as_deref());
                 discard_captures(capture_dir, captures);
                 self.finish(Notice::Cancelled);
                 Session::Idle
@@ -621,6 +686,7 @@ impl Controller {
                 state
             }
             (Session::TranscribingTake { take, .. }, Msg::Cancel) => {
+                self.sharing.cancel(take.dir.as_deref());
                 discard_take(take);
                 self.finish(Notice::Cancelled);
                 Session::Idle
@@ -708,6 +774,9 @@ impl Controller {
                     .join(format!("{:03}.png", capture_screenshot_count(captures) + 1));
                 match self.recorder.screenshot(&path) {
                     Ok(pending) => {
+                        if self.share_take {
+                            self.sharing.begin(&dir);
+                        }
                         *capture_dir = Some(dir);
                         captures.push(Capture::Shot { at_ms, pending });
                         self.shot();
@@ -797,6 +866,8 @@ impl Controller {
             // tap dies, and the take then ends here as it always would.
             let release = !self.gesture.held() && !self.gesture.locked();
             if release {
+                self.gesture.request_unlock();
+                self.trail.record("Dictating", "MissedRelease", "Dictating");
                 self.step(Msg::MainReleased);
             } else if let Session::Dictating { armed, fed, .. } = &mut self.session {
                 if let Some(audio) = self.mic.as_mut().map(|mic| mic.drain(armed)) {
@@ -813,6 +884,7 @@ impl Controller {
             if let Session::TranscribingTake { take, .. } =
                 std::mem::replace(&mut self.session, Session::Idle)
             {
+                self.sharing.cancel(take.dir.as_deref());
                 discard_take(take);
             }
             self.finish(Notice::TimedOut("Transcription"));
@@ -839,6 +911,7 @@ impl Controller {
     ) -> Session {
         let turn = self.mint_turn();
         let tx = self.tx.clone();
+        let sharing = self.sharing.clone();
         std::thread::spawn(move || {
             let mut captured = Vec::new();
             for capture in take.captures {
@@ -866,13 +939,25 @@ impl Controller {
                     }
                 }
             }
+            let take_dir = take.dir.clone();
+            let empty = captured.is_empty();
             let result = clip::package_take(take.dir, duration_ms, &transcription, captured)
-                .map(|packaged| Packaged {
-                    paste: packaged.paste,
-                    spoken: packaged.spoken,
-                    note: packaged.note,
+                .map(|packaged| {
+                    if empty {
+                        sharing.cancel(take_dir.as_deref());
+                    } else if let Some(dir) = packaged.markdown.parent() {
+                        sharing.finalize(dir);
+                    }
+                    Packaged {
+                        paste: crate::sharing::paste_link(&packaged.markdown, packaged.paste),
+                        spoken: packaged.spoken,
+                        note: packaged.note,
+                    }
                 })
                 .map_err(|error| error.to_string());
+            if result.is_err() {
+                sharing.cancel(take_dir.as_deref());
+            }
             let _ = tx.send(Msg::Packaged(turn, result));
         });
         self.show(Activity::Finalizing);
@@ -924,9 +1009,13 @@ impl Controller {
                 if let Some(clip) = active_clip {
                     clip.active.abort();
                 }
+                self.sharing.cancel(capture_dir.as_deref());
                 discard_captures(capture_dir, captures);
             }
-            Session::TranscribingTake { take, .. } => discard_take(take),
+            Session::TranscribingTake { take, .. } => {
+                self.sharing.cancel(take.dir.as_deref());
+                discard_take(take);
+            }
             _ => {}
         }
     }
@@ -1043,9 +1132,26 @@ pub fn msg_label(message: &Msg) -> &'static str {
         Msg::ClipStarted(_) => "ClipStarted",
         Msg::ClipEnded(_) => "ClipEnded",
         Msg::TakeLocked => "TakeLocked",
+        Msg::VideoLocked => "VideoLocked",
+        Msg::TriggerEdge {
+            held: true,
+            shift: true,
+            ..
+        } => "TriggerWithShift",
+        Msg::TriggerEdge {
+            held: true,
+            shift: false,
+            ..
+        } => "TriggerWithoutShift",
+        Msg::TriggerEdge { held: false, .. } => "TriggerUp",
+        Msg::TriggerReset => "TriggerReset",
+        Msg::TriggerReady => "TriggerReady",
+        Msg::TriggerUnavailable => "TriggerUnavailable",
         Msg::Cancel => "Cancel",
         Msg::Quit => "Quit",
         Msg::RetryEngine => "RetryEngine",
+        Msg::PrepareUpdate(_) => "PrepareUpdate",
+        Msg::UpdateAborted => "UpdateAborted",
         Msg::Engine(engine::Event::Progress(_)) => "EngineProgress",
         Msg::Engine(engine::Event::Ready(_)) => "EngineReady",
         Msg::Engine(engine::Event::Done(_, _)) => "EngineDone",
@@ -1061,13 +1167,19 @@ pub struct Trail(Option<std::fs::File>);
 
 impl Trail {
     pub fn from_env() -> Trail {
-        let file = std::env::var_os("SEE_COMPUTER_STATE_LOG").and_then(|path| {
+        let path = std::env::var_os("SEE_COMPUTER_STATE_LOG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| crate::paths::app_support().join("events.tsv"));
+        let file = (|| {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok()?;
+            }
             std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)
                 .ok()
-        });
+        })();
         Trail(file)
     }
 
@@ -1077,10 +1189,21 @@ impl Trail {
     }
 
     pub fn record(&mut self, from: &str, msg: &str, to: &str) {
+        self.record_at(from, msg, to, std::time::SystemTime::now());
+    }
+
+    fn record_at(&mut self, from: &str, msg: &str, to: &str, at: std::time::SystemTime) {
         let Some(file) = self.0.as_mut() else {
             return;
         };
-        let millis = std::time::SystemTime::now()
+        // Keep at most 1 MiB of event labels. Never record key contents or speech.
+        if file
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() >= 1024 * 1024)
+        {
+            let _ = file.set_len(0);
+        }
+        let millis = at
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_millis())
             .unwrap_or(0);

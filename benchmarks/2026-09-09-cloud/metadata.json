@@ -1,0 +1,29 @@
+{
+  "started": "2026-09-09T14:53:03+0200",
+  "rounds": 5,
+  "providers": [
+    "elevenlabs",
+    "assemblyai",
+    "groq-turbo",
+    "groq-large"
+  ],
+  "missing_credentials": [
+    "soniox"
+  ],
+  "models": {
+    "elevenlabs": "scribe_v2_realtime",
+    "assemblyai": "universal-3-5-pro",
+    "groq-turbo": "whisper-large-v3-turbo",
+    "groq-large": "whisper-large-v3",
+    "soniox": "stt-rt-v5"
+  },
+  "clips": [
+    "en",
+    "sv",
+    "sv-en",
+    "en-sv"
+  ],
+  "chunk_ms": 100,
+  "python": "3.12.12 (main, Feb 12 2026, 00:42:34) [Clang 21.1.4 ]",
+  "note": "New connection at simulated recording start; no auth-token minting overhead."
+}

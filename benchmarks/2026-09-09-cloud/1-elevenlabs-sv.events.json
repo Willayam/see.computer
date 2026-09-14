@@ -1,0 +1,82 @@
+[
+  {
+    "ms": 230.1522500347346,
+    "message": {
+      "message_type": "session_started",
+      "session_id": "a27e0398216e4d56b491c87b1c34016a",
+      "config": {
+        "sample_rate": 16000,
+        "audio_format": "pcm_16000",
+        "language_code": null,
+        "secondary_languages": [
+          "sv",
+          "en"
+        ],
+        "timestamps_granularity": "word",
+        "vad_commit_strategy": false,
+        "vad_silence_threshold_secs": 1.5,
+        "vad_threshold": 0.4,
+        "min_speech_duration_ms": 100,
+        "min_silence_duration_ms": 100,
+        "max_tokens_to_recompute": 5,
+        "model_id": "scribe_v2_realtime",
+        "disable_logging": false,
+        "include_timestamps": false,
+        "include_language_detection": false,
+        "filter_background_audio": false,
+        "keyterms": [],
+        "no_verbatim": false,
+        "entity_detection": null
+      }
+    }
+  },
+  {
+    "ms": 2239.9200840154663,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej!"
+    }
+  },
+  {
+    "ms": 2340.5147090088576,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är ett test"
+    }
+  },
+  {
+    "ms": 3246.9110840465873,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är test av diktering på svenska."
+    }
+  },
+  {
+    "ms": 4151.557334000245,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är ett test av diktering på svenska. Vi"
+    }
+  },
+  {
+    "ms": 5057.786209043115,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt du-"
+    }
+  },
+  {
+    "ms": 6065.552292042412,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp."
+    }
+  },
+  {
+    "ms": 6220.144708990119,
+    "message": {
+      "message_type": "committed_transcript",
+      "text": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp."
+    }
+  }
+]

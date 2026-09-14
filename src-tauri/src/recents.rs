@@ -87,7 +87,6 @@ fn recent_recordings(dir: &Path, limit: usize) -> Vec<(DateTime<Local>, PathBuf)
                     metadata.is_file()
                         && path.extension().is_some_and(|extension| extension == "mov")
                         || metadata.is_dir()
-                            && path.join("clips").is_dir()
                             && (path.join("take.md").is_file() || path.join("clip.md").is_file())
                 })
                 .and_then(|metadata| metadata.modified().ok())
@@ -198,6 +197,16 @@ mod tests {
         let recordings = recent_recordings(&dir, 10);
 
         assert!(recordings.iter().any(|(_, path)| path == &take));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn screenshot_only_takes_appear_in_recents() {
+        let dir = temp_dir();
+        let take = dir.join("2026-09-09-10-00-00");
+        std::fs::create_dir_all(take.join("shots")).unwrap();
+        std::fs::write(take.join("take.md"), "# Screenshot").unwrap();
+        assert_eq!(recent_recordings(&dir, 5)[0].1, take);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

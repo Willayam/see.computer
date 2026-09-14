@@ -5,7 +5,7 @@
   <!-- Menu-bar only from the first frame; setup also sets ActivationPolicy::Accessory for `tauri dev`. -->
   <key>LSUIElement</key><true/>
   <key>NSMicrophoneUsageDescription</key>
-  <string>see.computer transcribes your voice on this Mac. Audio never leaves the machine.</string>
+  <string>see.computer transcribes your voice on this Mac. If you turn on sharing, recorded clips and their audio are uploaded with the transcript.</string>
   <key>NSScreenCaptureUsageDescription</key>
   <string>see.computer records your screen when you press the video hotkey.</string>
 </dict>

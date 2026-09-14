@@ -1,0 +1,65 @@
+[
+  {
+    "backend": "cpu4",
+    "clip": "en.wav",
+    "variants": [
+      "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."
+    ]
+  },
+  {
+    "backend": "cpu4",
+    "clip": "mixed.wav",
+    "variants": [
+      "Hey, the hare test of dictating posvenska, the mat the hurts not text and dikarup. Hi, this is a quick dictation test in English, we are measuring how fast the text shows up."
+    ]
+  },
+  {
+    "backend": "cpu4",
+    "clip": "sv.wav",
+    "variants": [
+      "Hej! Det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp."
+    ]
+  },
+  {
+    "backend": "cpu8",
+    "clip": "en.wav",
+    "variants": [
+      "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."
+    ]
+  },
+  {
+    "backend": "cpu8",
+    "clip": "mixed.wav",
+    "variants": [
+      "Hey, the hare test of dictating posvenska, the mat the hurts not text and dikarup. Hi, this is a quick dictation test in English, we are measuring how fast the text shows up."
+    ]
+  },
+  {
+    "backend": "cpu8",
+    "clip": "sv.wav",
+    "variants": [
+      "Hej! Det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp."
+    ]
+  },
+  {
+    "backend": "mlx-gpu",
+    "clip": "en.wav",
+    "variants": [
+      "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."
+    ]
+  },
+  {
+    "backend": "mlx-gpu",
+    "clip": "mixed.wav",
+    "variants": [
+      "Hey, det här är a test of dictering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."
+    ]
+  },
+  {
+    "backend": "mlx-gpu",
+    "clip": "sv.wav",
+    "variants": [
+      "Hej! Det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp."
+    ]
+  }
+]

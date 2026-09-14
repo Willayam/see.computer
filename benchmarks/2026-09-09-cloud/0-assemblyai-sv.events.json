@@ -1,0 +1,161 @@
+[
+  {
+    "ms": 6903.652749955654,
+    "message": {
+      "type": "Begin",
+      "id": "0a773952-649f-4bba-9215-9087a24e3072",
+      "expires_at": 1788969251,
+      "configuration": {
+        "model": "universal-3-5-pro",
+        "mode": "min_latency",
+        "api_version": "2025-05-12",
+        "speaker_labels": false,
+        "redact_pii": false,
+        "filter_profanity": false,
+        "domain": null,
+        "voice_focus": null
+      }
+    }
+  },
+  {
+    "ms": 7544.255750020966,
+    "message": {
+      "type": "SpeechStarted",
+      "timestamp": 0,
+      "confidence": 0.991302
+    }
+  },
+  {
+    "ms": 7544.925958034582,
+    "message": {
+      "turn_order": 0,
+      "turn_is_formatted": true,
+      "end_of_turn": true,
+      "transcript": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp.",
+      "end_of_turn_confidence": 1.0,
+      "words": [
+        {
+          "start": 0,
+          "end": 323,
+          "text": "Hej,",
+          "confidence": 0.914956,
+          "word_is_final": true
+        },
+        {
+          "start": 339,
+          "end": 581,
+          "text": "det",
+          "confidence": 0.999963,
+          "word_is_final": true
+        },
+        {
+          "start": 597,
+          "end": 839,
+          "text": "här",
+          "confidence": 0.999999,
+          "word_is_final": true
+        },
+        {
+          "start": 855,
+          "end": 1016,
+          "text": "är",
+          "confidence": 0.999997,
+          "word_is_final": true
+        },
+        {
+          "start": 1032,
+          "end": 1274,
+          "text": "ett",
+          "confidence": 0.946447,
+          "word_is_final": true
+        },
+        {
+          "start": 1290,
+          "end": 1613,
+          "text": "test",
+          "confidence": 0.999958,
+          "word_is_final": true
+        },
+        {
+          "start": 1629,
+          "end": 1790,
+          "text": "av",
+          "confidence": 0.999513,
+          "word_is_final": true
+        },
+        {
+          "start": 1806,
+          "end": 2533,
+          "text": "diktering",
+          "confidence": 0.996839,
+          "word_is_final": true
+        },
+        {
+          "start": 2549,
+          "end": 2710,
+          "text": "på",
+          "confidence": 0.999997,
+          "word_is_final": true
+        },
+        {
+          "start": 2726,
+          "end": 3372,
+          "text": "svenska.",
+          "confidence": 0.998,
+          "word_is_final": true
+        },
+        {
+          "start": 3388,
+          "end": 3549,
+          "text": "Vi",
+          "confidence": 0.999975,
+          "word_is_final": true
+        },
+        {
+          "start": 3565,
+          "end": 3969,
+          "text": "mäter",
+          "confidence": 0.997406,
+          "word_is_final": true
+        },
+        {
+          "start": 3985,
+          "end": 4227,
+          "text": "hur",
+          "confidence": 0.999992,
+          "word_is_final": true
+        },
+        {
+          "start": 4243,
+          "end": 4728,
+          "text": "snabbt",
+          "confidence": 0.999554,
+          "word_is_final": true
+        },
+        {
+          "start": 4744,
+          "end": 5229,
+          "text": "texten",
+          "confidence": 0.999971,
+          "word_is_final": true
+        },
+        {
+          "start": 5245,
+          "end": 5649,
+          "text": "dyker",
+          "confidence": 0.99993,
+          "word_is_final": true
+        },
+        {
+          "start": 5665,
+          "end": 5988,
+          "text": "upp.",
+          "confidence": 0.999632,
+          "word_is_final": true
+        }
+      ],
+      "utterance": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp.",
+      "type": "Turn"
+    }
+  }
+]

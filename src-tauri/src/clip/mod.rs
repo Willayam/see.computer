@@ -88,12 +88,15 @@ pub struct Summary {
 impl Summary {
     /// The same text the take pasted at the cursor.
     pub fn paste(&self) -> String {
-        paste(
-            self.text.as_deref(),
-            self.screenshot_count,
-            self.clip_count,
-            self.clip_duration_ms,
+        crate::sharing::paste_link(
             &self.markdown,
+            paste(
+                self.text.as_deref(),
+                self.screenshot_count,
+                self.clip_count,
+                self.clip_duration_ms,
+                &self.markdown,
+            ),
         )
     }
 }
@@ -363,14 +366,19 @@ fn package_session_with(
                         }));
                     }
                 }
-                json_captures.push(serde_json::json!({
+                let mut capture = serde_json::json!({
                     "type": "clip",
                     "startMs": clip.start_ms,
                     "endMs": clip.end_ms,
                     "durationMs": clip.end_ms.saturating_sub(clip.start_ms),
                     "video": video,
                     "frames": frames,
-                }));
+                });
+                let playlist = crate::recorder::segment_dir(&clip.path).join("index.m3u8");
+                if playlist.is_file() {
+                    capture["playlist"] = path_from(dir, &playlist).into();
+                }
+                json_captures.push(capture);
                 movies.push((&clip.path, nested_mov));
             }
         }

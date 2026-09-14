@@ -19,6 +19,8 @@ https://github.com/altunenes/parakeet-rs
 
 ## Runtime and framework
 
+The hosted sharing viewer includes the hls.js 1.7.2 light build, Apache-2.0. Its license is kept at `services/shares/public/hls-LICENSE`. Source at https://github.com/video-dev/hls.js.
+
 - **ONNX Runtime** (Microsoft, MIT), through the `ort` crate (MIT OR Apache-2.0).
 - **Tauri** (MIT OR Apache-2.0).
 - All other Rust dependencies are listed in `src-tauri/Cargo.lock` with their licenses recorded on crates.io.

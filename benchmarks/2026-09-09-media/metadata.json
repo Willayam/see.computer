@@ -1,0 +1,33 @@
+{
+  "started": "2026-09-09T15:29:46+0200",
+  "source_sha256": "8fa4aef126fbea765171dfac877ea5c385c2817397fb466dbd1558543a4458ca",
+  "rounds": 2,
+  "profiles": {
+    "1440p-15-2m": [
+      2560,
+      1440,
+      15,
+      "2M"
+    ],
+    "1440p-15-4m": [
+      2560,
+      1440,
+      15,
+      "4M"
+    ],
+    "1440p-30-4m": [
+      2560,
+      1440,
+      30,
+      "4M"
+    ],
+    "1080p-15-2m": [
+      1920,
+      1080,
+      15,
+      "2M"
+    ]
+  },
+  "ffmpeg": "ffmpeg version 8.1 Copyright (c) 2000-2026 the FFmpeg developers",
+  "network": "Loopback HTTP with controlled sender rate and 50 ms overhead. Not R2 latency."
+}

@@ -1,0 +1,75 @@
+[
+  {
+    "ms": 214.51812493614852,
+    "message": {
+      "message_type": "session_started",
+      "session_id": "1ac13a32517e49b1a3368b5a7a9c34f1",
+      "config": {
+        "sample_rate": 16000,
+        "audio_format": "pcm_16000",
+        "language_code": null,
+        "secondary_languages": [
+          "sv",
+          "en"
+        ],
+        "timestamps_granularity": "word",
+        "vad_commit_strategy": false,
+        "vad_silence_threshold_secs": 1.5,
+        "vad_threshold": 0.4,
+        "min_speech_duration_ms": 100,
+        "min_silence_duration_ms": 100,
+        "max_tokens_to_recompute": 5,
+        "model_id": "scribe_v2_realtime",
+        "disable_logging": false,
+        "include_timestamps": false,
+        "include_language_detection": false,
+        "filter_background_audio": false,
+        "keyterms": [],
+        "no_verbatim": false,
+        "entity_detection": null
+      }
+    }
+  },
+  {
+    "ms": 2250.774584012106,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hi, this"
+    }
+  },
+  {
+    "ms": 2250.848750001751,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hi. This is a quick dictation."
+    }
+  },
+  {
+    "ms": 3158.7932920083404,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hi. This is a quick dictation test in English."
+    }
+  },
+  {
+    "ms": 4264.745916938409,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hi. This is a quick dictation test in English. We are meas"
+    }
+  },
+  {
+    "ms": 5069.457583944313,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hi. This is a quick dictation test in English. We are measuring how fast the"
+    }
+  },
+  {
+    "ms": 5813.088083988987,
+    "message": {
+      "message_type": "committed_transcript",
+      "text": "Hi. This is a quick dictation test in English. We are measuring how fast the text shows up."
+    }
+  }
+]

@@ -27,3 +27,21 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - name: Compile native media test
+        working-directory: .
+        run: |
+          mkdir -p .audit/native-media-test
+          clang -fobjc-arc -Werror -Wno-nullability-completeness -Wno-incompatible-pointer-types \
+            -mmacosx-version-min=14.0 scripts/test-recorder.m \
+            -framework AVFoundation -framework CoreGraphics -framework CoreMedia \
+            -framework CoreVideo -framework Foundation -framework ScreenCaptureKit \
+            -framework UniformTypeIdentifiers -framework VideoToolbox -framework AudioToolbox \
+            -o .audit/native-media-test/test-recorder
+
+  sharing:
+    name: Sharing service tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun test services/shares/worker.test.mjs

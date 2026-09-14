@@ -1,0 +1,21 @@
+{
+  "args": {
+    "python": "/tmp/see-backend-bench-venv/bin/python",
+    "mlx_model": "mlx-community/parakeet-tdt-0.6b-v3",
+    "modes": [
+      "cpu8",
+      "coreml-gpu",
+      "coreml-ane"
+    ],
+    "runs": 10,
+    "rounds": 2,
+    "hogs": 14,
+    "timeout": 240,
+    "out": "/Users/williamlarsten/.t3/worktrees/see.computer/t3code-a27bafbf/.audit/backend-bench/coreml-results"
+  },
+  "started": "2026-09-08T23:17:36+0200",
+  "commit": "48bbc916ff793103d860093eacdeff1344b52050",
+  "macos": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A5425a\n",
+  "hardware": "machdep.cpu.brand_string: Apple M3 Max\nhw.memsize: 38654705664\nhw.logicalcpu: 14\n",
+  "coreml_format": "NeuralNetwork"
+}

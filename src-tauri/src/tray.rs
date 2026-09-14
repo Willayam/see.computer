@@ -54,25 +54,41 @@ struct Panel {
     trigger: Arc<Mutex<Trigger>>,
     pill: Sender<PillEvent>,
     history: History,
+    sharing: crate::sharing::Sharing,
+    updater: crate::updater::Updater,
     status: Arc<Mutex<EngineStatus>>,
     settings_expanded: Arc<Mutex<bool>>,
     payloads: Arc<Mutex<Vec<Payload>>>,
 }
 
-pub fn install(
-    app: &AppHandle,
-    inbox: Sender<Msg>,
-    trigger: Arc<Mutex<Trigger>>,
-    pill: Sender<PillEvent>,
-    history: History,
-    status: Arc<Mutex<EngineStatus>>,
-) -> tauri::Result<()> {
+pub struct Wiring {
+    pub inbox: Sender<Msg>,
+    pub trigger: Arc<Mutex<Trigger>>,
+    pub pill: Sender<PillEvent>,
+    pub history: History,
+    pub status: Arc<Mutex<EngineStatus>>,
+    pub sharing: crate::sharing::Sharing,
+    pub updater: crate::updater::Updater,
+}
+
+pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
+    let Wiring {
+        inbox,
+        trigger,
+        pill,
+        history,
+        status,
+        sharing,
+        updater,
+    } = wiring;
     let panel = Panel {
         app: app.clone(),
         inbox,
         trigger,
         pill,
         history,
+        sharing,
+        updater,
         status,
         settings_expanded: Arc::new(Mutex::new(false)),
         payloads: Arc::new(Mutex::new(Vec::new())),
@@ -171,6 +187,15 @@ impl Panel {
         rows.push(submenu("permission-settings", "Permissions"));
         rows.push(Row::Separator);
         rows.push(item(
+            "sharing-toggle",
+            "Make recordings shareable",
+            self.sharing.enabled(),
+            None,
+        ));
+        rows.push(Row::Hint("Anyone with the link can view".to_owned()));
+        rows.push(submenu("sharing-settings", "Sharing status and limits"));
+        rows.push(Row::Separator);
+        rows.push(item(
             "see-computer-folder",
             "Open see.computer Folder",
             false,
@@ -188,7 +213,17 @@ impl Panel {
             open_at_login(&self.app),
             None,
         ));
+        rows.push(item("update", &self.updater.label(), false, None));
         rows
+    }
+
+    fn sharing_rows(&self) -> Vec<Row> {
+        vec![
+            Row::Hint(self.sharing.status()),
+            Row::Hint("256 MiB per share · 1,500 files".to_owned()),
+            item("sharing-retry", "Retry uploads", false, None),
+            item("sharing-revoke", "Remove last shared link", false, None),
+        ]
     }
 
     fn trigger_rows(&self) -> Vec<Row> {
@@ -224,6 +259,28 @@ impl Panel {
             return Some(self.trigger_rows());
         }
         match id {
+            "sharing-toggle" => {
+                self.sharing.set_enabled(!self.sharing.enabled());
+                self.save_config();
+                Some(self.main_rows())
+            }
+            "sharing-retry" => {
+                self.sharing.retry();
+                Some(self.sharing_rows())
+            }
+            "sharing-revoke" => {
+                self.sharing.revoke_latest();
+                Some(self.sharing_rows())
+            }
+            "sharing-settings" => Some(self.sharing_rows()),
+            "update" => {
+                if self.updater.ready() {
+                    self.updater.install();
+                } else {
+                    self.updater.check();
+                }
+                Some(self.main_rows())
+            }
             "settings" => {
                 let mut expanded = self
                     .settings_expanded
@@ -292,6 +349,7 @@ impl Panel {
         let config = Config {
             trigger: current_trigger(&self.trigger),
             history: self.history.enabled(),
+            sharing: self.sharing.enabled(),
         };
         if let Err(error) = config.save() {
             eprintln!("could not save preferences: {error}");

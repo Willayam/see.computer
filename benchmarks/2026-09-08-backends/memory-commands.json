@@ -1,0 +1,21 @@
+{
+  "cpu8": [
+    "scripts/bench-backends/target/release/see-backend-bench",
+    "cpu8",
+    "/Users/williamlarsten/Library/Application Support/see.computer/models/parakeet-tdt-0.6b-v3-onnx/int8-prepared",
+    "1",
+    ".audit/backend-bench/memory-cache",
+    "fixtures/en.wav",
+    "fixtures/sv.wav",
+    ".audit/backend-bench/results/mixed.wav"
+  ],
+  "mlx-gpu": [
+    "/tmp/see-backend-bench-venv/bin/python",
+    "scripts/bench-backends/mlx_bench.py",
+    "/Users/williamlarsten/.cache/huggingface/hub/models--mlx-community--parakeet-tdt-0.6b-v3/snapshots/ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15",
+    "1",
+    "fixtures/en.wav",
+    "fixtures/sv.wav",
+    ".audit/backend-bench/results/mixed.wav"
+  ]
+}

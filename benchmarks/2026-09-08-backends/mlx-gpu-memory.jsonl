@@ -1,0 +1,9 @@
+{"mode": "mlx-gpu", "event": "load", "ms": 755.1337080076337}
+{"mode": "mlx-gpu", "event": "warm", "clip": "fixtures/en.wav", "run": -1, "seconds": 5.636625, "ms": 131.5935830352828, "text": "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."}
+{"mode": "mlx-gpu", "event": "warm", "clip": "fixtures/sv.wav", "run": -1, "seconds": 6.0105625, "ms": 85.8065829379484, "text": "Hej! Det h\u00e4r \u00e4r ett test av diktering p\u00e5 svenska. Vi m\u00e4ter hur snabbt texten dyker upp."}
+{"mode": "mlx-gpu", "event": "warm", "clip": ".audit/backend-bench/results/mixed.wav", "run": -1, "seconds": 11.6471875, "ms": 143.2896670885384, "text": "Hey, det h\u00e4r \u00e4r a test of dictering p\u00e5 svenska. Vi m\u00e4ter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."}
+{"mode": "mlx-gpu", "event": "ready", "device": "Device(gpu, 0)"}
+{"mode": "mlx-gpu", "event": "sample", "clip": "fixtures/en.wav", "run": 0, "seconds": 5.636625, "ms": 85.23058402352035, "text": "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."}
+{"mode": "mlx-gpu", "event": "sample", "clip": "fixtures/sv.wav", "run": 0, "seconds": 6.0105625, "ms": 85.70916706230491, "text": "Hej! Det h\u00e4r \u00e4r ett test av diktering p\u00e5 svenska. Vi m\u00e4ter hur snabbt texten dyker upp."}
+{"mode": "mlx-gpu", "event": "sample", "clip": ".audit/backend-bench/results/mixed.wav", "run": 0, "seconds": 11.6471875, "ms": 140.72129200212657, "text": "Hey, det h\u00e4r \u00e4r a test of dictering p\u00e5 svenska. Vi m\u00e4ter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."}
+{"mode": "mlx-gpu", "event": "memory", "peak_gpu_bytes": 2294036068}

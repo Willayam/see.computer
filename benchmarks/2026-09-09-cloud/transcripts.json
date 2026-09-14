@@ -1,0 +1,144 @@
+[
+  {
+    "provider": "assemblyai",
+    "clip": "en",
+    "transcripts": {
+      "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up.": 5
+    },
+    "errors": {}
+  },
+  {
+    "provider": "assemblyai",
+    "clip": "en-sv",
+    "transcripts": {
+      "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up. Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp.": 5
+    },
+    "errors": {}
+  },
+  {
+    "provider": "assemblyai",
+    "clip": "sv",
+    "transcripts": {
+      "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp.": 5
+    },
+    "errors": {}
+  },
+  {
+    "provider": "assemblyai",
+    "clip": "sv-en",
+    "transcripts": {
+      "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English. We are measuring how fast the text shows up.": 5
+    },
+    "errors": {}
+  },
+  {
+    "provider": "elevenlabs",
+    "clip": "en",
+    "transcripts": {
+      "Hi. This is a quick dictation test in English. We are measuring how fast the text shows up.": 5
+    },
+    "errors": {}
+  },
+  {
+    "provider": "elevenlabs",
+    "clip": "en-sv",
+    "transcripts": {
+      "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up. Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp.": 3
+    },
+    "errors": {
+      "[Errno 51] Connect call failed ('34.8.184.191', 443)": 2
+    }
+  },
+  {
+    "provider": "elevenlabs",
+    "clip": "sv",
+    "transcripts": {
+      "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp.": 4
+    },
+    "errors": {
+      "[Errno 51] Connect call failed ('34.8.184.191', 443)": 1
+    }
+  },
+  {
+    "provider": "elevenlabs",
+    "clip": "sv-en",
+    "transcripts": {
+      "Hej, det här är ett test av dictering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English. We are measuring how fast the text shows up.": 5
+    },
+    "errors": {}
+  },
+  {
+    "provider": "groq-large",
+    "clip": "en",
+    "transcripts": {
+      "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up.": 4
+    },
+    "errors": {
+      "All connection attempts failed": 1
+    }
+  },
+  {
+    "provider": "groq-large",
+    "clip": "en-sv",
+    "transcripts": {
+      "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up. Hej, det här är test av diktering på svenska. Vi mäter hur snabbt texten dyker upp.": 3
+    },
+    "errors": {
+      "All connection attempts failed": 2
+    }
+  },
+  {
+    "provider": "groq-large",
+    "clip": "sv",
+    "transcripts": {
+      "Hej, det här är ett test av diktering på svenska, vi mäter hur snabbt texten dyker upp.": 5
+    },
+    "errors": {}
+  },
+  {
+    "provider": "groq-large",
+    "clip": "sv-en",
+    "transcripts": {
+      "Hej, det här är test av diktering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English. We are measuring how fast the text shows up.": 5
+    },
+    "errors": {}
+  },
+  {
+    "provider": "groq-turbo",
+    "clip": "en",
+    "transcripts": {
+      "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up.": 4
+    },
+    "errors": {
+      "All connection attempts failed": 1
+    }
+  },
+  {
+    "provider": "groq-turbo",
+    "clip": "en-sv",
+    "transcripts": {
+      "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up. Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp.": 5
+    },
+    "errors": {}
+  },
+  {
+    "provider": "groq-turbo",
+    "clip": "sv",
+    "transcripts": {
+      "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp.": 2
+    },
+    "errors": {
+      "All connection attempts failed": 3
+    }
+  },
+  {
+    "provider": "groq-turbo",
+    "clip": "sv-en",
+    "transcripts": {
+      "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp. Hej, det här är en snabb diktation test i engelska. Vi medierar hur snabbt texten ser upp.": 4
+    },
+    "errors": {
+      "All connection attempts failed": 1
+    }
+  }
+]

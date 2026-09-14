@@ -1,0 +1,25 @@
+name = "see-computer-shares"
+main = "worker.mjs"
+compatibility_date = "2026-09-09"
+account_id = "29392a6d23b11e67789d7f1c9bcc5853"
+workers_dev = true
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+[vars]
+PUBLIC_ORIGIN = "https://see-computer-shares.cocco.workers.dev"
+
+[[r2_buckets]]
+binding = "SHARES"
+bucket_name = "see-computer-shares"
+
+[[durable_objects.bindings]]
+name = "COORDINATOR"
+class_name = "Coordinator"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Coordinator"]

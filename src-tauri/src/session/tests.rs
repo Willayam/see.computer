@@ -1,5 +1,23 @@
 //! Controller state machine tests.
 
+#[test]
+fn update_install_reserves_idle_controller_and_abort_releases_it() {
+    let (mut controller, _, dir) = test_controller();
+    let (tx, rx) = std::sync::mpsc::channel();
+    controller.step(Msg::PrepareUpdate(tx));
+    assert!(rx.recv().unwrap());
+    controller.step(Msg::MainPressed);
+    assert!(matches!(controller.session, Session::Idle));
+    controller.step(Msg::UpdateAborted);
+    controller.step(Msg::MainPressed);
+    assert!(matches!(controller.session, Session::Dictating { .. }));
+    let (tx, rx) = std::sync::mpsc::channel();
+    controller.step(Msg::PrepareUpdate(tx));
+    assert!(!rx.recv().unwrap());
+    controller.step(Msg::Cancel);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
@@ -57,6 +75,7 @@ fn test_controller_with_fixture(
     let script = recorder_script(&dir);
     let (pill_tx, pill_rx) = std::sync::mpsc::channel();
     let mut controller = Controller::for_test(Wiring {
+        sharing: crate::sharing::Sharing::disabled(),
         mic: mic::Source::Replay(fixture(&dir, seconds, sample)),
         engine: engine::Loader::Canned("hello world".to_owned()),
         recorder: Recorder::with_program(script, dir.clone()),
@@ -498,4 +517,45 @@ fn trail_uses_stable_labels() {
     trail.record("Idle", "MainPressed", "Dictating");
     let line = std::fs::read_to_string(path).unwrap();
     assert!(line.ends_with("\tIdle\tMainPressed\tDictating\n"));
+}
+
+#[test]
+fn video_lock_keeps_active_clip_and_shows_recording_locked() {
+    let (mut controller, pill, dir) = test_controller();
+    controller.step(Msg::MainPressed);
+    controller.step(Msg::ClipStarted(Instant::now()));
+    controller.step(Msg::VideoLocked);
+    assert!(matches!(
+        controller.session,
+        Session::Dictating {
+            active_clip: Some(_),
+            ..
+        }
+    ));
+    assert!(pill
+        .try_iter()
+        .any(|event| matches!(event, PillEvent::Show(Activity::RecordingLocked))));
+    controller.step(Msg::Cancel);
+    assert!(matches!(controller.session, Session::Idle));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn rejected_start_and_missed_release_request_decoder_reset() {
+    let (mut controller, _, dir) = test_controller();
+    controller.step(Msg::MainPressed);
+    controller.step(Msg::MainReleased);
+    controller.step(Msg::MainPressed);
+    assert!(
+        controller.gesture.take_unlock(),
+        "busy controller rejects the decoder's new take"
+    );
+    controller.step(Msg::Cancel);
+    controller.step(Msg::MainPressed);
+    controller.expire();
+    assert!(
+        controller.gesture.take_unlock(),
+        "watchdog release also resets the held gesture"
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }

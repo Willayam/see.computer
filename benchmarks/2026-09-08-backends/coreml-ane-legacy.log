@@ -1,0 +1,4 @@
+2026-09-08T21:17:14.741953Z  WARN ort::logging: CoreMLExecutionProvider::GetCapability, number of partitions supported by CoreML: 270 number of nodes in the graph: 2380 number of nodes supported by CoreML: 925
+2026-09-08T21:17:18.020563Z  WARN ort::logging: Some nodes were not assigned to the preferred execution providers which may or may not have an negative impact on performance. e.g. ORT explicitly assigns shape related ops to CPU to improve perf.
+2026-09-08T21:17:18.247077Z  WARN ort::logging: CoreMLExecutionProvider::GetCapability, number of partitions supported by CoreML: 4 number of nodes in the graph: 39 number of nodes supported by CoreML: 13
+2026-09-08T21:17:18.255624Z  WARN ort::logging: Some nodes were not assigned to the preferred execution providers which may or may not have an negative impact on performance. e.g. ORT explicitly assigns shape related ops to CPU to improve perf.

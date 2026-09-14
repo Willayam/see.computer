@@ -16,11 +16,15 @@ Three gestures. That is the whole interface.
 
 | Gesture | What happens |
 |---|---|
-| Hold **Globe** (Fn), speak, release | The spoken text is pasted at your cursor, in any app. Audio never leaves the machine. |
-| Double tap **Globe**, speak, tap to finish | The same take, held open with nothing on the trigger. Made for long narration, where holding a key for two minutes is the thing that gets in the way. One tap of the trigger finishes it and pastes, Esc throws it away. To take a shot or a clip inside a locked take, hold the trigger again and use Shift as usual; Shift on its own is left alone, so you can still type a capital letter. |
+| Hold **Globe** (Fn), speak, release | The spoken text is pasted at your cursor, in any app. Plain dictation stays local. |
+| Hold **Globe**, double-tap **Shift**, release both | Locks screen recording and narration. Tap Globe once to stop and paste. Esc cancels. |
 | Hold **Globe+Shift**, release to stop | Records the screen and microphone while held. On release, the recording is packaged into an agent-readable take folder. The paste contains the narration in quotes, a blank line, then a tail naming the captures and the path to `take.md`. Releasing before about 0.6 seconds discards the recording. |
 
-The Globe key is the default, the same key Apple and Wispr Flow use for dictation. If macOS has the Globe key set to start its own Dictation, set it to Do Nothing under System Settings > Keyboard so a double tap is not caught by both. Choose Left Option or Right Option from the tray instead if you use Globe for something else. Right Option is AltGr on the Swedish keyboard layout. The recording gesture always follows the trigger: whatever key you pick, hold it with Shift to record and release to stop, and double tap it to lock a take open. Both halves of the double tap have to be taps, so an ordinary hold is never mistaken for one and hold-to-talk starts exactly as fast as it always did. A locked take wears a lit ring around the pill, because a live microphone nobody is touching should never look like an idle one. The lock lives in the event tap that decodes the gesture: if the tap dies, the lock goes with it and the take finishes normally rather than leaving a microphone open that nothing can close.
+The Globe key is the default. Hold it to dictate. While holding it, tap Shift for a screenshot, hold Shift for a video clip, or double-tap Shift to lock video and narration. A single screenshot waits up to 300 ms for a possible second tap. After video locks, release both keys and use the computer normally. Tap the trigger once to stop, or press Esc to cancel. The pill shows a red ring while video is locked.
+
+Double-tap Globe is left to macOS, and the app does not change system keyboard shortcuts. Choose Left Option or Right Option in the tray to use a different trigger. Option triggers also support double-tap for locked dictation, shown with a blue ring. Holding that trigger and double-tapping Shift locks video. Right Option is AltGr on a Swedish keyboard.
+
+If the keyboard listener is interrupted, the app finishes the current take and rebuilds the listener with fresh gesture state. Controller cancellations, rejected starts, and missed key releases also reset the gesture decoder.
 
 Dictation runs NVIDIA Parakeet TDT 0.6b v3 (INT8, ONNX) on the CPU. On an M3 Max a six-second English sentence comes back in about 200 ms, the median of eight runs of `see-computer transcribe` on `fixtures/en.wav`. The model is 670 MB and downloads on first launch into `~/Library/Application Support/see.computer/models/`.
 
@@ -30,13 +34,23 @@ Numbers are written the way you would read them, not the way they were said. Par
 
 Recordings land in `~/Documents/see.computer/`, next to the dictation history. Each `<stamp>/` take contains `take.md`, `transcript.json`, screenshots under `shots/`, and numbered clips under `clips/`. A clip keeps its movie at `clips/001/clip.mov` and its JPEG frames under `clips/001/frames/`. The paste puts the narration in quotes, leaves a blank line, then names the screenshots and clips before the `take.md` path. A human or a web chatbox gets the words even where a local path is dead. An agent that can read files can open the exact frames where each thing was said without decoding the video. If packaging fails or times out, the pill says so and the movie stays in `~/Documents/see.computer/`, where the tray panel still lists it and copies its `file://` link. The tray panel lists recordings among the recent dictations by their narration, under a video glyph where a dictation carries a waveform, and picking one copies that same text. `see-computer clip <mov>` moves an existing recording into a new take folder and prints its `take.md` path.
 
+## Optional sharing beta
+
+In version 0.1.1, turn on **Make recordings shareable** in Settings. It applies to new takes. Video chunks and locally compressed screenshots upload while you record. Transcription still runs on your Mac. Plain dictation does not create a share.
+
+Anyone with the link can view the captures and transcript. The beta allows 10 shares per installation per month, keeps links for 30 days, and limits each share to 256 MiB and 1,500 files. Cancelled takes count toward the allowance. There is no paid plan yet.
+
+Turning sharing off pauses uploads. Connection failures retry automatically, including after an app restart. A pending link includes the local take path in the pasted text. If publishing fails, recent items copy the local path. **Remove last shared link** queues deletion of the latest share. Local originals stay in Documents.
+
+The service runs on private R2 storage in Cocco Ventures. See [the hosting instructions](services/shares/README.md) for limits and deployment, and [signed updates](docs/updates.md) for the release setup. Public distribution still needs Apple Developer ID signing and notarization.
+
 ## Dictation history
 
 Transcripts are written to disk as plain text by default, with one markdown file per day in `~/Documents/see.computer/`. If macOS denies Documents access, they go to `~/Library/Application Support/see.computer/history/` instead.
 
 Turn history off with **Save Dictation History** in the tray's **Settings**. Open **see.computer Folder** there to inspect or delete the plain files. There is no auto-pruning.
 
-The audio-never-leaves-the-machine promise does not extend to transcript files in Documents when iCloud Desktop & Documents syncing is on.
+Files in Documents can also sync through iCloud Desktop & Documents, if you have enabled it.
 
 ## Custom vocabulary
 
@@ -89,7 +103,7 @@ Another dictation app listening on the same key doubles every input. Quit the ot
 Environment variables provide deterministic seams for local checks.
 
 - `SEE_COMPUTER_AUDIO_FILE=<wav>` replaces the microphone. Every dictation returns that file's audio.
-- `SEE_COMPUTER_STATE_LOG=<path>` appends one line per state transition: `<unix ms>\t<from>\t<message>\t<to>`.
+- `SEE_COMPUTER_STATE_LOG=<path>` overrides the default local trace at `~/Library/Application Support/see.computer/events.tsv`. It records trigger/Shift edges, listener recovery, and controller transitions as `<unix ms>\t<from>\t<message>\t<to>`. It contains no typed characters, audio, or transcripts. The log starts over at 1 MiB.
 - `SEE_COMPUTER_HISTORY_DIR=<directory>` writes dictation history directly to that directory without fallback or healing.
 
 `scripts/launch-for-verification.sh [wav] [trail]` launches the built bundle with both set. `scripts/press-mod.swift` posts the modifier gestures as real keyboard events so a script can drive the app, and `scripts/click-tray.swift` opens the menu panel the same way. `see-computer transcribe <wav>` (the binary inside the bundle) transcribes a file and prints the text without starting the GUI.
@@ -107,9 +121,9 @@ Tauri v2 with a Rust backend. The only web content is `ui/pill.html`, the small 
 
 The menu behind the tray icon is a non-activating `NSPanel` filled with `NSGlassEffectView`, built in `native/menu.m` from a row list `tray.rs` rebuilds on every open. Its main view centers recent dictations and recordings. Settings expands inline with folder, startup, and history controls, while trigger and permission choices open beside it. Model recovery appears only when the model is unavailable. The panel never becomes key, so the app being dictated into keeps its focus. An `NSMenu` would have run a modal tracking loop on the main thread and could not have carried the material.
 
-One controller thread owns the app's state, an enum with one variant per thing the app can be doing (`Idle`, `Dictating`, `Transcribing`, `Packaging`, `Pasting`). Everything else sends it a message: the global-shortcut handler, the engine worker that owns the Parakeet model, the thread that waits for `screencapture` to finish, and the paste thread that owns the clipboard. Nothing slow runs on the hotkey thread, and dictating while recording cannot be expressed. Every thread names its scheduling class in `qos.rs` rather than taking the default, which the macOS scheduler ranks below anything the user is looking at: the event tap, the controller and the paste run user-interactive, the engine runs user-initiated, and upkeep runs utility. The pill window is created non-focusable and ordered in once with `orderFrontRegardless`, so it can never take the keystroke that pastes.
+One controller thread owns the app's state, an enum with one variant per thing the app can be doing (`Idle`, `Dictating`, `Transcribing`, `Packaging`, `Pasting`). Everything else sends it a message: the global-shortcut handler, the engine worker that owns the Parakeet model, the native recorder teardown thread, and the paste thread that owns the clipboard. Nothing slow runs on the hotkey thread, and dictating while recording cannot be expressed. Every thread names its scheduling class in `qos.rs` rather than taking the default, which the macOS scheduler ranks below anything the user is looking at: the event tap, the controller and the paste run user-interactive, the engine runs user-initiated, and upkeep runs utility. The pill window is created non-focusable and ordered in once with `orderFrontRegardless`, so it can never take the keystroke that pastes.
 
-Screen recording spawns `/usr/sbin/screencapture -v -g -x` and stops it with SIGINT. ScreenCaptureKit is a later variant behind the same `Recorder` type.
+ScreenCaptureKit captures video into a hardware H.264 encoder at up to 2560 × 1440, 15 fps and 2 Mbps. Microphone audio uses mono AAC at 64 kbps. Completed one-second fragments are written atomically to disk. The uploader reads those files on a utility thread. Screenshots use `/usr/sbin/screencapture` and are compressed to JPEG locally for upload.
 
 ## License
 

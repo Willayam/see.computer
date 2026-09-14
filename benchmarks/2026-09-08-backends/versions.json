@@ -1,0 +1,16 @@
+{
+  "mlx_model": "mlx-community/parakeet-tdt-0.6b-v3",
+  "mlx_revision": "ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15",
+  "mlx_version": "0.32.2",
+  "parakeet_mlx_version": "0.5.2",
+  "onnxruntime_rust": "2.0.0-rc.13",
+  "parakeet_rs": "vendored 0.3.7",
+  "file_sha256": {
+    "en.wav": "2aa0afcd34dcb1854ece81cc234fbab7cfb600047dc0e73b80a908fed801ba86",
+    "sv.wav": "be626671840cf2bc0fa9e248652b699889dd1b4819398a858f6f9186a1f15aa2",
+    "encoder-model.int8.onnx": "84fb235d5920b9fa0eabdef6e9cd840598142ce74a6b9b5d3bf71dc0b552e076",
+    "encoder-model.int8.onnx.data": "5e01c7788940a3199c1bd877ebada236ea1ef0377a949da3f1ad264bf48e989e",
+    "decoder_joint-model.int8.onnx": "eea7483ee3d1a30375daedc8ed83e3960c91b098812127a0d99d1c8977667a70",
+    "vocab.txt": "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"
+  }
+}

@@ -1,0 +1,65 @@
+[
+  {
+    "backend": "coreml-ane",
+    "clip": "en.wav",
+    "variants": [
+      "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."
+    ]
+  },
+  {
+    "backend": "coreml-ane",
+    "clip": "mixed.wav",
+    "variants": [
+      "Hey, the hairy test of dictating posvenska, the mat the hurznak text and dikarup. Hi, this is a quick dictation test in English, we are measuring how fast the text shows up."
+    ]
+  },
+  {
+    "backend": "coreml-ane",
+    "clip": "sv.wav",
+    "variants": [
+      "Hej! Det här är test av diktering på svenska. Vi mäter hur snabbt texten dyker upp."
+    ]
+  },
+  {
+    "backend": "coreml-gpu",
+    "clip": "en.wav",
+    "variants": [
+      "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."
+    ]
+  },
+  {
+    "backend": "coreml-gpu",
+    "clip": "mixed.wav",
+    "variants": [
+      "Hey, the hairy test of dictating posvenska, the mat the hurznak text and dikarup. Hi, this is a quick dictation test in English, we are measuring how fast the text shows up."
+    ]
+  },
+  {
+    "backend": "coreml-gpu",
+    "clip": "sv.wav",
+    "variants": [
+      "Hej! Det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp."
+    ]
+  },
+  {
+    "backend": "cpu8",
+    "clip": "en.wav",
+    "variants": [
+      "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."
+    ]
+  },
+  {
+    "backend": "cpu8",
+    "clip": "mixed.wav",
+    "variants": [
+      "Hey, the hare test of dictating posvenska, the mat the hurts not text and dikarup. Hi, this is a quick dictation test in English, we are measuring how fast the text shows up."
+    ]
+  },
+  {
+    "backend": "cpu8",
+    "clip": "sv.wav",
+    "variants": [
+      "Hej! Det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp."
+    ]
+  }
+]

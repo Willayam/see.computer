@@ -1,0 +1,22 @@
+{
+  "en": {
+    "reference": "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up.",
+    "seconds": 5.636625,
+    "pcm_sha256": "db51e359661fd0b2cb3591157fdac3d765a1dc403f1ea5fd81914cb1749cf69e"
+  },
+  "sv": {
+    "reference": "Hej! Det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp.",
+    "seconds": 6.0105625,
+    "pcm_sha256": "e3d802bdd1248fee4778f616ad8f02a6dd62b2b3b9aaabd4e44efe53e280a426"
+  },
+  "sv-en": {
+    "reference": "Hej! Det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English. We are measuring how fast the text shows up.",
+    "seconds": 11.6471875,
+    "pcm_sha256": "7303f0a8d2d5db949477129d53796063161026432b9b6b8acaec302a4c12bb33"
+  },
+  "en-sv": {
+    "reference": "Hi, this is a quick dictation test in English. We are measuring how fast the text shows up. Hej! Det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp.",
+    "seconds": 11.6471875,
+    "pcm_sha256": "c9d5d3ec4d18f61e9b145fce97722f21adbd850adf4db0b46ae9a9437253264e"
+  }
+}

@@ -1,0 +1,8 @@
+{"event":"load","mode":"cpu8","ms":352.85641699999996}
+{"clip":"fixtures/en.wav","event":"warm","mode":"cpu8","ms":179.838167,"text":"Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."}
+{"clip":"fixtures/sv.wav","event":"warm","mode":"cpu8","ms":144.89041699999999,"text":"Hej! Det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp."}
+{"clip":".audit/backend-bench/results/mixed.wav","event":"warm","mode":"cpu8","ms":267.836042,"text":"Hey, the hare test of dictating posvenska, the mat the hurts not text and dikarup. Hi, this is a quick dictation test in English, we are measuring how fast the text shows up."}
+{"event":"ready","mode":"cpu8"}
+{"clip":"fixtures/en.wav","event":"sample","mode":"cpu8","ms":138.28562499999998,"run":0,"seconds":5.636625,"text":"Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."}
+{"clip":"fixtures/sv.wav","event":"sample","mode":"cpu8","ms":140.27062500000002,"run":0,"seconds":6.0105625,"text":"Hej! Det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp."}
+{"clip":".audit/backend-bench/results/mixed.wav","event":"sample","mode":"cpu8","ms":261.64712499999996,"run":0,"seconds":11.6471875,"text":"Hey, the hare test of dictating posvenska, the mat the hurts not text and dikarup. Hi, this is a quick dictation test in English, we are measuring how fast the text shows up."}

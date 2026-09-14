@@ -15,5 +15,17 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=ImageIO");
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rerun-if-changed=native/frame.m");
+    cc::Build::new()
+        .file("native/recording.m")
+        .flag("-fobjc-arc")
+        .flag("-mmacosx-version-min=14.0")
+        .compile("screcording");
+    println!("cargo:rustc-link-lib=framework=ScreenCaptureKit");
+    println!("cargo:rustc-link-lib=framework=VideoToolbox");
+    println!("cargo:rustc-link-lib=framework=CoreVideo");
+    println!("cargo:rustc-link-lib=framework=AudioToolbox");
+    println!("cargo:rustc-link-lib=framework=UniformTypeIdentifiers");
+    println!("cargo:rustc-link-arg=-mmacosx-version-min=14.0");
+    println!("cargo:rerun-if-changed=native/recording.m");
     tauri_build::build();
 }

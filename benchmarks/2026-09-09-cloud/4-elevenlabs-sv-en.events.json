@@ -1,0 +1,124 @@
+[
+  {
+    "ms": 204.68333398457617,
+    "message": {
+      "message_type": "session_started",
+      "session_id": "05d92da0fa204fbd92799a6ad47ba06b",
+      "config": {
+        "sample_rate": 16000,
+        "audio_format": "pcm_16000",
+        "language_code": null,
+        "secondary_languages": [
+          "sv",
+          "en"
+        ],
+        "timestamps_granularity": "word",
+        "vad_commit_strategy": false,
+        "vad_silence_threshold_secs": 1.5,
+        "vad_threshold": 0.4,
+        "min_speech_duration_ms": 100,
+        "min_silence_duration_ms": 100,
+        "max_tokens_to_recompute": 5,
+        "model_id": "scribe_v2_realtime",
+        "disable_logging": false,
+        "include_timestamps": false,
+        "include_language_detection": false,
+        "filter_background_audio": false,
+        "keyterms": [],
+        "no_verbatim": false,
+        "entity_detection": null
+      }
+    }
+  },
+  {
+    "ms": 2321.01666694507,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej!"
+    }
+  },
+  {
+    "ms": 2419.8274590307847,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är ett test"
+    }
+  },
+  {
+    "ms": 3324.0682089235634,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är test av diktering på svenska."
+    }
+  },
+  {
+    "ms": 4709.819374955259,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är ett test av diktering på svenska. Vi"
+    }
+  },
+  {
+    "ms": 5745.225333957933,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt du-"
+    }
+  },
+  {
+    "ms": 6847.999833989888,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp."
+    }
+  },
+  {
+    "ms": 7147.956583998166,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp. Hi."
+    }
+  },
+  {
+    "ms": 8054.622167022899,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är ett test av dictering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dict"
+    }
+  },
+  {
+    "ms": 8959.376416984014,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är ett test av dictering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dictation test in"
+    }
+  },
+  {
+    "ms": 10058.120292029344,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är ett test av dictering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English. We are"
+    }
+  },
+  {
+    "ms": 11142.348333960399,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är ett test av dictering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English. We are measuring how fast"
+    }
+  },
+  {
+    "ms": 12150.982292019762,
+    "message": {
+      "message_type": "partial_transcript",
+      "text": "Hej, det här är ett test av dictering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."
+    }
+  },
+  {
+    "ms": 12188.483709003776,
+    "message": {
+      "message_type": "committed_transcript",
+      "text": "Hej, det här är ett test av dictering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English. We are measuring how fast the text shows up."
+    }
+  }
+]

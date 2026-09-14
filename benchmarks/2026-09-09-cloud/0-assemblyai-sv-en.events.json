@@ -1,0 +1,1260 @@
+[
+  {
+    "ms": 718.952624942176,
+    "message": {
+      "type": "Begin",
+      "id": "66e91e72-b533-4688-bdff-fdce283b2674",
+      "expires_at": 1788969215,
+      "configuration": {
+        "model": "universal-3-5-pro",
+        "mode": "min_latency",
+        "api_version": "2025-05-12",
+        "speaker_labels": false,
+        "redact_pii": false,
+        "filter_profanity": false,
+        "domain": null,
+        "voice_focus": null
+      }
+    }
+  },
+  {
+    "ms": 930.0006669946015,
+    "message": {
+      "type": "SpeechStarted",
+      "timestamp": 0,
+      "confidence": 0.835106
+    }
+  },
+  {
+    "ms": 930.716999922879,
+    "message": {
+      "turn_order": 0,
+      "turn_is_formatted": true,
+      "end_of_turn": false,
+      "transcript": "Hej!",
+      "end_of_turn_confidence": 0.0,
+      "words": [
+        {
+          "start": 0,
+          "end": 288,
+          "text": "Hej!",
+          "confidence": 0.835106,
+          "word_is_final": false
+        }
+      ],
+      "utterance": "",
+      "type": "Turn"
+    }
+  },
+  {
+    "ms": 2324.4700839277357,
+    "message": {
+      "turn_order": 0,
+      "turn_is_formatted": true,
+      "end_of_turn": false,
+      "transcript": "Hej, det här är ett test av dikt.",
+      "end_of_turn_confidence": 0.0,
+      "words": [
+        {
+          "start": 0,
+          "end": 289,
+          "text": "Hej,",
+          "confidence": 0.898445,
+          "word_is_final": false
+        },
+        {
+          "start": 303,
+          "end": 520,
+          "text": "det",
+          "confidence": 0.999895,
+          "word_is_final": false
+        },
+        {
+          "start": 534,
+          "end": 751,
+          "text": "här",
+          "confidence": 0.999994,
+          "word_is_final": false
+        },
+        {
+          "start": 765,
+          "end": 909,
+          "text": "är",
+          "confidence": 0.999994,
+          "word_is_final": false
+        },
+        {
+          "start": 923,
+          "end": 1140,
+          "text": "ett",
+          "confidence": 0.867297,
+          "word_is_final": false
+        },
+        {
+          "start": 1154,
+          "end": 1443,
+          "text": "test",
+          "confidence": 0.999069,
+          "word_is_final": false
+        },
+        {
+          "start": 1457,
+          "end": 1601,
+          "text": "av",
+          "confidence": 0.823089,
+          "word_is_final": false
+        },
+        {
+          "start": 1615,
+          "end": 1977,
+          "text": "dikt.",
+          "confidence": 0.63315,
+          "word_is_final": false
+        }
+      ],
+      "utterance": "",
+      "type": "Turn"
+    }
+  },
+  {
+    "ms": 3532.6773339184,
+    "message": {
+      "turn_order": 0,
+      "turn_is_formatted": true,
+      "end_of_turn": false,
+      "transcript": "Hej, det här är ett test av diktering på svenska.",
+      "end_of_turn_confidence": 0.0,
+      "words": [
+        {
+          "start": 0,
+          "end": 315,
+          "text": "Hej,",
+          "confidence": 0.909156,
+          "word_is_final": false
+        },
+        {
+          "start": 330,
+          "end": 566,
+          "text": "det",
+          "confidence": 0.999925,
+          "word_is_final": false
+        },
+        {
+          "start": 581,
+          "end": 817,
+          "text": "här",
+          "confidence": 0.999997,
+          "word_is_final": false
+        },
+        {
+          "start": 832,
+          "end": 989,
+          "text": "är",
+          "confidence": 0.999996,
+          "word_is_final": false
+        },
+        {
+          "start": 1004,
+          "end": 1240,
+          "text": "ett",
+          "confidence": 0.891569,
+          "word_is_final": false
+        },
+        {
+          "start": 1255,
+          "end": 1570,
+          "text": "test",
+          "confidence": 0.999799,
+          "word_is_final": false
+        },
+        {
+          "start": 1585,
+          "end": 1742,
+          "text": "av",
+          "confidence": 0.998628,
+          "word_is_final": false
+        },
+        {
+          "start": 1757,
+          "end": 2466,
+          "text": "diktering",
+          "confidence": 0.992972,
+          "word_is_final": false
+        },
+        {
+          "start": 2481,
+          "end": 2638,
+          "text": "på",
+          "confidence": 0.999995,
+          "word_is_final": false
+        },
+        {
+          "start": 2653,
+          "end": 3283,
+          "text": "svenska.",
+          "confidence": 0.992869,
+          "word_is_final": false
+        }
+      ],
+      "utterance": "",
+      "type": "Turn"
+    }
+  },
+  {
+    "ms": 4923.0611668899655,
+    "message": {
+      "turn_order": 0,
+      "turn_is_formatted": true,
+      "end_of_turn": false,
+      "transcript": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt",
+      "end_of_turn_confidence": 0.0,
+      "words": [
+        {
+          "start": 0,
+          "end": 312,
+          "text": "Hej,",
+          "confidence": 0.877602,
+          "word_is_final": false
+        },
+        {
+          "start": 327,
+          "end": 561,
+          "text": "det",
+          "confidence": 0.999954,
+          "word_is_final": false
+        },
+        {
+          "start": 576,
+          "end": 810,
+          "text": "här",
+          "confidence": 0.999998,
+          "word_is_final": false
+        },
+        {
+          "start": 825,
+          "end": 981,
+          "text": "är",
+          "confidence": 0.999997,
+          "word_is_final": false
+        },
+        {
+          "start": 996,
+          "end": 1230,
+          "text": "ett",
+          "confidence": 0.898552,
+          "word_is_final": false
+        },
+        {
+          "start": 1245,
+          "end": 1557,
+          "text": "test",
+          "confidence": 0.999889,
+          "word_is_final": false
+        },
+        {
+          "start": 1572,
+          "end": 1728,
+          "text": "av",
+          "confidence": 0.998758,
+          "word_is_final": false
+        },
+        {
+          "start": 1743,
+          "end": 2445,
+          "text": "diktering",
+          "confidence": 0.993618,
+          "word_is_final": false
+        },
+        {
+          "start": 2460,
+          "end": 2616,
+          "text": "på",
+          "confidence": 0.999996,
+          "word_is_final": false
+        },
+        {
+          "start": 2631,
+          "end": 3255,
+          "text": "svenska.",
+          "confidence": 0.99937,
+          "word_is_final": false
+        },
+        {
+          "start": 3270,
+          "end": 3426,
+          "text": "Vi",
+          "confidence": 0.995392,
+          "word_is_final": false
+        },
+        {
+          "start": 3441,
+          "end": 3831,
+          "text": "mäter",
+          "confidence": 0.988489,
+          "word_is_final": false
+        },
+        {
+          "start": 3846,
+          "end": 4080,
+          "text": "hur",
+          "confidence": 0.999789,
+          "word_is_final": false
+        },
+        {
+          "start": 4095,
+          "end": 4563,
+          "text": "snabbt",
+          "confidence": 0.997222,
+          "word_is_final": false
+        }
+      ],
+      "utterance": "",
+      "type": "Turn"
+    }
+  },
+  {
+    "ms": 6222.9209169745445,
+    "message": {
+      "turn_order": 0,
+      "turn_is_formatted": true,
+      "end_of_turn": false,
+      "transcript": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp.",
+      "end_of_turn_confidence": 0.0,
+      "words": [
+        {
+          "start": 0,
+          "end": 317,
+          "text": "Hej,",
+          "confidence": 0.905632,
+          "word_is_final": false
+        },
+        {
+          "start": 332,
+          "end": 570,
+          "text": "det",
+          "confidence": 0.999963,
+          "word_is_final": false
+        },
+        {
+          "start": 585,
+          "end": 823,
+          "text": "här",
+          "confidence": 0.999999,
+          "word_is_final": false
+        },
+        {
+          "start": 838,
+          "end": 996,
+          "text": "är",
+          "confidence": 0.999998,
+          "word_is_final": false
+        },
+        {
+          "start": 1011,
+          "end": 1249,
+          "text": "ett",
+          "confidence": 0.941294,
+          "word_is_final": false
+        },
+        {
+          "start": 1264,
+          "end": 1581,
+          "text": "test",
+          "confidence": 0.999945,
+          "word_is_final": false
+        },
+        {
+          "start": 1596,
+          "end": 1754,
+          "text": "av",
+          "confidence": 0.999474,
+          "word_is_final": false
+        },
+        {
+          "start": 1769,
+          "end": 2483,
+          "text": "diktering",
+          "confidence": 0.996724,
+          "word_is_final": false
+        },
+        {
+          "start": 2498,
+          "end": 2656,
+          "text": "på",
+          "confidence": 0.999997,
+          "word_is_final": false
+        },
+        {
+          "start": 2671,
+          "end": 3305,
+          "text": "svenska.",
+          "confidence": 0.998875,
+          "word_is_final": false
+        },
+        {
+          "start": 3320,
+          "end": 3478,
+          "text": "Vi",
+          "confidence": 0.999973,
+          "word_is_final": false
+        },
+        {
+          "start": 3493,
+          "end": 3889,
+          "text": "mäter",
+          "confidence": 0.997672,
+          "word_is_final": false
+        },
+        {
+          "start": 3904,
+          "end": 4142,
+          "text": "hur",
+          "confidence": 0.999991,
+          "word_is_final": false
+        },
+        {
+          "start": 4157,
+          "end": 4633,
+          "text": "snabbt",
+          "confidence": 0.999426,
+          "word_is_final": false
+        },
+        {
+          "start": 4648,
+          "end": 5124,
+          "text": "texten",
+          "confidence": 0.999971,
+          "word_is_final": false
+        },
+        {
+          "start": 5139,
+          "end": 5535,
+          "text": "dyker",
+          "confidence": 0.999908,
+          "word_is_final": false
+        },
+        {
+          "start": 5550,
+          "end": 5867,
+          "text": "upp.",
+          "confidence": 0.999418,
+          "word_is_final": false
+        }
+      ],
+      "utterance": "",
+      "type": "Turn"
+    }
+  },
+  {
+    "ms": 7423.850124934688,
+    "message": {
+      "turn_order": 0,
+      "turn_is_formatted": true,
+      "end_of_turn": false,
+      "transcript": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp.",
+      "end_of_turn_confidence": 0.0,
+      "words": [
+        {
+          "start": 0,
+          "end": 388,
+          "text": "Hej,",
+          "confidence": 0.872623,
+          "word_is_final": false
+        },
+        {
+          "start": 407,
+          "end": 698,
+          "text": "det",
+          "confidence": 0.999884,
+          "word_is_final": false
+        },
+        {
+          "start": 717,
+          "end": 1008,
+          "text": "här",
+          "confidence": 0.999995,
+          "word_is_final": false
+        },
+        {
+          "start": 1027,
+          "end": 1221,
+          "text": "är",
+          "confidence": 0.999996,
+          "word_is_final": false
+        },
+        {
+          "start": 1240,
+          "end": 1531,
+          "text": "ett",
+          "confidence": 0.958493,
+          "word_is_final": false
+        },
+        {
+          "start": 1550,
+          "end": 1938,
+          "text": "test",
+          "confidence": 0.999912,
+          "word_is_final": false
+        },
+        {
+          "start": 1957,
+          "end": 2151,
+          "text": "av",
+          "confidence": 0.998093,
+          "word_is_final": false
+        },
+        {
+          "start": 2170,
+          "end": 3043,
+          "text": "diktering",
+          "confidence": 0.99512,
+          "word_is_final": false
+        },
+        {
+          "start": 3062,
+          "end": 3256,
+          "text": "på",
+          "confidence": 0.999994,
+          "word_is_final": false
+        },
+        {
+          "start": 3275,
+          "end": 4051,
+          "text": "svenska.",
+          "confidence": 0.99965,
+          "word_is_final": false
+        },
+        {
+          "start": 4070,
+          "end": 4264,
+          "text": "Vi",
+          "confidence": 0.999934,
+          "word_is_final": false
+        },
+        {
+          "start": 4283,
+          "end": 4768,
+          "text": "mäter",
+          "confidence": 0.991245,
+          "word_is_final": false
+        },
+        {
+          "start": 4787,
+          "end": 5078,
+          "text": "hur",
+          "confidence": 0.999985,
+          "word_is_final": false
+        },
+        {
+          "start": 5097,
+          "end": 5679,
+          "text": "snabbt",
+          "confidence": 0.999031,
+          "word_is_final": false
+        },
+        {
+          "start": 5698,
+          "end": 6280,
+          "text": "texten",
+          "confidence": 0.999959,
+          "word_is_final": false
+        },
+        {
+          "start": 6299,
+          "end": 6784,
+          "text": "dyker",
+          "confidence": 0.999645,
+          "word_is_final": false
+        },
+        {
+          "start": 6803,
+          "end": 7191,
+          "text": "upp.",
+          "confidence": 0.999816,
+          "word_is_final": false
+        }
+      ],
+      "utterance": "",
+      "type": "Turn"
+    }
+  },
+  {
+    "ms": 8923.938958905637,
+    "message": {
+      "turn_order": 0,
+      "turn_is_formatted": true,
+      "end_of_turn": false,
+      "transcript": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English.",
+      "end_of_turn_confidence": 0.0,
+      "words": [
+        {
+          "start": 0,
+          "end": 294,
+          "text": "Hej,",
+          "confidence": 0.892067,
+          "word_is_final": false
+        },
+        {
+          "start": 308,
+          "end": 528,
+          "text": "det",
+          "confidence": 0.999691,
+          "word_is_final": false
+        },
+        {
+          "start": 542,
+          "end": 762,
+          "text": "här",
+          "confidence": 0.999987,
+          "word_is_final": false
+        },
+        {
+          "start": 776,
+          "end": 923,
+          "text": "är",
+          "confidence": 0.999993,
+          "word_is_final": false
+        },
+        {
+          "start": 937,
+          "end": 1157,
+          "text": "ett",
+          "confidence": 0.946874,
+          "word_is_final": false
+        },
+        {
+          "start": 1171,
+          "end": 1465,
+          "text": "test",
+          "confidence": 0.999943,
+          "word_is_final": false
+        },
+        {
+          "start": 1479,
+          "end": 1626,
+          "text": "av",
+          "confidence": 0.998993,
+          "word_is_final": false
+        },
+        {
+          "start": 1640,
+          "end": 2301,
+          "text": "diktering",
+          "confidence": 0.994323,
+          "word_is_final": false
+        },
+        {
+          "start": 2315,
+          "end": 2462,
+          "text": "på",
+          "confidence": 0.999984,
+          "word_is_final": false
+        },
+        {
+          "start": 2476,
+          "end": 3064,
+          "text": "svenska.",
+          "confidence": 0.999602,
+          "word_is_final": false
+        },
+        {
+          "start": 3078,
+          "end": 3225,
+          "text": "Vi",
+          "confidence": 0.99977,
+          "word_is_final": false
+        },
+        {
+          "start": 3239,
+          "end": 3606,
+          "text": "mäter",
+          "confidence": 0.992417,
+          "word_is_final": false
+        },
+        {
+          "start": 3620,
+          "end": 3840,
+          "text": "hur",
+          "confidence": 0.999968,
+          "word_is_final": false
+        },
+        {
+          "start": 3854,
+          "end": 4295,
+          "text": "snabbt",
+          "confidence": 0.998248,
+          "word_is_final": false
+        },
+        {
+          "start": 4309,
+          "end": 4750,
+          "text": "texten",
+          "confidence": 0.999939,
+          "word_is_final": false
+        },
+        {
+          "start": 4764,
+          "end": 5131,
+          "text": "dyker",
+          "confidence": 0.998836,
+          "word_is_final": false
+        },
+        {
+          "start": 5145,
+          "end": 5439,
+          "text": "upp.",
+          "confidence": 0.999731,
+          "word_is_final": false
+        },
+        {
+          "start": 5453,
+          "end": 5673,
+          "text": "Hi,",
+          "confidence": 0.72348,
+          "word_is_final": false
+        },
+        {
+          "start": 5687,
+          "end": 5981,
+          "text": "this",
+          "confidence": 0.998433,
+          "word_is_final": false
+        },
+        {
+          "start": 5995,
+          "end": 6142,
+          "text": "is",
+          "confidence": 0.999916,
+          "word_is_final": false
+        },
+        {
+          "start": 6156,
+          "end": 6229,
+          "text": "a",
+          "confidence": 0.999458,
+          "word_is_final": false
+        },
+        {
+          "start": 6243,
+          "end": 6610,
+          "text": "quick",
+          "confidence": 0.997949,
+          "word_is_final": false
+        },
+        {
+          "start": 6624,
+          "end": 7285,
+          "text": "dictation",
+          "confidence": 0.964294,
+          "word_is_final": false
+        },
+        {
+          "start": 7299,
+          "end": 7593,
+          "text": "test",
+          "confidence": 0.967897,
+          "word_is_final": false
+        },
+        {
+          "start": 7607,
+          "end": 7754,
+          "text": "in",
+          "confidence": 0.96,
+          "word_is_final": false
+        },
+        {
+          "start": 7768,
+          "end": 8356,
+          "text": "English.",
+          "confidence": 0.847277,
+          "word_is_final": false
+        }
+      ],
+      "utterance": "",
+      "type": "Turn"
+    }
+  },
+  {
+    "ms": 10324.860833934508,
+    "message": {
+      "turn_order": 0,
+      "turn_is_formatted": true,
+      "end_of_turn": false,
+      "transcript": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English. We are measuring how",
+      "end_of_turn_confidence": 0.0,
+      "words": [
+        {
+          "start": 0,
+          "end": 303,
+          "text": "Hej,",
+          "confidence": 0.899763,
+          "word_is_final": false
+        },
+        {
+          "start": 318,
+          "end": 545,
+          "text": "det",
+          "confidence": 0.997074,
+          "word_is_final": false
+        },
+        {
+          "start": 560,
+          "end": 787,
+          "text": "här",
+          "confidence": 0.999699,
+          "word_is_final": false
+        },
+        {
+          "start": 802,
+          "end": 953,
+          "text": "är",
+          "confidence": 0.999959,
+          "word_is_final": false
+        },
+        {
+          "start": 968,
+          "end": 1195,
+          "text": "ett",
+          "confidence": 0.853444,
+          "word_is_final": false
+        },
+        {
+          "start": 1210,
+          "end": 1513,
+          "text": "test",
+          "confidence": 0.999884,
+          "word_is_final": false
+        },
+        {
+          "start": 1528,
+          "end": 1679,
+          "text": "av",
+          "confidence": 0.998108,
+          "word_is_final": false
+        },
+        {
+          "start": 1694,
+          "end": 2375,
+          "text": "diktering",
+          "confidence": 0.988242,
+          "word_is_final": false
+        },
+        {
+          "start": 2390,
+          "end": 2541,
+          "text": "på",
+          "confidence": 0.999969,
+          "word_is_final": false
+        },
+        {
+          "start": 2556,
+          "end": 3162,
+          "text": "svenska.",
+          "confidence": 0.999397,
+          "word_is_final": false
+        },
+        {
+          "start": 3177,
+          "end": 3328,
+          "text": "Vi",
+          "confidence": 0.999742,
+          "word_is_final": false
+        },
+        {
+          "start": 3343,
+          "end": 3721,
+          "text": "mäter",
+          "confidence": 0.988331,
+          "word_is_final": false
+        },
+        {
+          "start": 3736,
+          "end": 3963,
+          "text": "hur",
+          "confidence": 0.999934,
+          "word_is_final": false
+        },
+        {
+          "start": 3978,
+          "end": 4432,
+          "text": "snabbt",
+          "confidence": 0.992876,
+          "word_is_final": false
+        },
+        {
+          "start": 4447,
+          "end": 4901,
+          "text": "texten",
+          "confidence": 0.999743,
+          "word_is_final": false
+        },
+        {
+          "start": 4916,
+          "end": 5294,
+          "text": "dyker",
+          "confidence": 0.99366,
+          "word_is_final": false
+        },
+        {
+          "start": 5309,
+          "end": 5612,
+          "text": "upp.",
+          "confidence": 0.999801,
+          "word_is_final": false
+        },
+        {
+          "start": 5627,
+          "end": 5854,
+          "text": "Hi,",
+          "confidence": 0.856945,
+          "word_is_final": false
+        },
+        {
+          "start": 5869,
+          "end": 6172,
+          "text": "this",
+          "confidence": 0.999484,
+          "word_is_final": false
+        },
+        {
+          "start": 6187,
+          "end": 6338,
+          "text": "is",
+          "confidence": 0.999969,
+          "word_is_final": false
+        },
+        {
+          "start": 6353,
+          "end": 6428,
+          "text": "a",
+          "confidence": 0.999888,
+          "word_is_final": false
+        },
+        {
+          "start": 6443,
+          "end": 6821,
+          "text": "quick",
+          "confidence": 0.999527,
+          "word_is_final": false
+        },
+        {
+          "start": 6836,
+          "end": 7517,
+          "text": "dictation",
+          "confidence": 0.994416,
+          "word_is_final": false
+        },
+        {
+          "start": 7532,
+          "end": 7835,
+          "text": "test",
+          "confidence": 0.999953,
+          "word_is_final": false
+        },
+        {
+          "start": 7850,
+          "end": 8001,
+          "text": "in",
+          "confidence": 0.999874,
+          "word_is_final": false
+        },
+        {
+          "start": 8016,
+          "end": 8622,
+          "text": "English.",
+          "confidence": 0.997742,
+          "word_is_final": false
+        },
+        {
+          "start": 8637,
+          "end": 8788,
+          "text": "We",
+          "confidence": 0.981636,
+          "word_is_final": false
+        },
+        {
+          "start": 8803,
+          "end": 9030,
+          "text": "are",
+          "confidence": 0.999516,
+          "word_is_final": false
+        },
+        {
+          "start": 9045,
+          "end": 9726,
+          "text": "measuring",
+          "confidence": 0.999915,
+          "word_is_final": false
+        },
+        {
+          "start": 9741,
+          "end": 9968,
+          "text": "how",
+          "confidence": 0.985731,
+          "word_is_final": false
+        }
+      ],
+      "utterance": "",
+      "type": "Turn"
+    }
+  },
+  {
+    "ms": 11832.414833945222,
+    "message": {
+      "turn_order": 0,
+      "turn_is_formatted": true,
+      "end_of_turn": true,
+      "transcript": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English. We are measuring how fast the text shows up.",
+      "end_of_turn_confidence": 1.0,
+      "words": [
+        {
+          "start": 0,
+          "end": 305,
+          "text": "Hej,",
+          "confidence": 0.885227,
+          "word_is_final": true
+        },
+        {
+          "start": 320,
+          "end": 549,
+          "text": "det",
+          "confidence": 0.998254,
+          "word_is_final": true
+        },
+        {
+          "start": 564,
+          "end": 793,
+          "text": "här",
+          "confidence": 0.999798,
+          "word_is_final": true
+        },
+        {
+          "start": 808,
+          "end": 960,
+          "text": "är",
+          "confidence": 0.999978,
+          "word_is_final": true
+        },
+        {
+          "start": 975,
+          "end": 1204,
+          "text": "ett",
+          "confidence": 0.843746,
+          "word_is_final": true
+        },
+        {
+          "start": 1219,
+          "end": 1524,
+          "text": "test",
+          "confidence": 0.999902,
+          "word_is_final": true
+        },
+        {
+          "start": 1539,
+          "end": 1691,
+          "text": "av",
+          "confidence": 0.997413,
+          "word_is_final": true
+        },
+        {
+          "start": 1706,
+          "end": 2393,
+          "text": "diktering",
+          "confidence": 0.988419,
+          "word_is_final": true
+        },
+        {
+          "start": 2408,
+          "end": 2560,
+          "text": "på",
+          "confidence": 0.999978,
+          "word_is_final": true
+        },
+        {
+          "start": 2575,
+          "end": 3186,
+          "text": "svenska.",
+          "confidence": 0.999381,
+          "word_is_final": true
+        },
+        {
+          "start": 3201,
+          "end": 3353,
+          "text": "Vi",
+          "confidence": 0.999895,
+          "word_is_final": true
+        },
+        {
+          "start": 3368,
+          "end": 3750,
+          "text": "mäter",
+          "confidence": 0.991343,
+          "word_is_final": true
+        },
+        {
+          "start": 3765,
+          "end": 3994,
+          "text": "hur",
+          "confidence": 0.999954,
+          "word_is_final": true
+        },
+        {
+          "start": 4009,
+          "end": 4467,
+          "text": "snabbt",
+          "confidence": 0.997088,
+          "word_is_final": true
+        },
+        {
+          "start": 4482,
+          "end": 4940,
+          "text": "texten",
+          "confidence": 0.999933,
+          "word_is_final": true
+        },
+        {
+          "start": 4955,
+          "end": 5337,
+          "text": "dyker",
+          "confidence": 0.998838,
+          "word_is_final": true
+        },
+        {
+          "start": 5352,
+          "end": 5657,
+          "text": "upp.",
+          "confidence": 0.999812,
+          "word_is_final": true
+        },
+        {
+          "start": 5672,
+          "end": 5901,
+          "text": "Hi,",
+          "confidence": 0.947843,
+          "word_is_final": true
+        },
+        {
+          "start": 5916,
+          "end": 6221,
+          "text": "this",
+          "confidence": 0.999695,
+          "word_is_final": true
+        },
+        {
+          "start": 6236,
+          "end": 6388,
+          "text": "is",
+          "confidence": 0.999974,
+          "word_is_final": true
+        },
+        {
+          "start": 6403,
+          "end": 6479,
+          "text": "a",
+          "confidence": 0.999885,
+          "word_is_final": true
+        },
+        {
+          "start": 6494,
+          "end": 6876,
+          "text": "quick",
+          "confidence": 0.999544,
+          "word_is_final": true
+        },
+        {
+          "start": 6891,
+          "end": 7578,
+          "text": "dictation",
+          "confidence": 0.995644,
+          "word_is_final": true
+        },
+        {
+          "start": 7593,
+          "end": 7898,
+          "text": "test",
+          "confidence": 0.999966,
+          "word_is_final": true
+        },
+        {
+          "start": 7913,
+          "end": 8065,
+          "text": "in",
+          "confidence": 0.999883,
+          "word_is_final": true
+        },
+        {
+          "start": 8080,
+          "end": 8691,
+          "text": "English.",
+          "confidence": 0.997744,
+          "word_is_final": true
+        },
+        {
+          "start": 8706,
+          "end": 8858,
+          "text": "We",
+          "confidence": 0.998166,
+          "word_is_final": true
+        },
+        {
+          "start": 8873,
+          "end": 9102,
+          "text": "are",
+          "confidence": 0.998941,
+          "word_is_final": true
+        },
+        {
+          "start": 9117,
+          "end": 9804,
+          "text": "measuring",
+          "confidence": 0.99993,
+          "word_is_final": true
+        },
+        {
+          "start": 9819,
+          "end": 10048,
+          "text": "how",
+          "confidence": 0.99998,
+          "word_is_final": true
+        },
+        {
+          "start": 10063,
+          "end": 10368,
+          "text": "fast",
+          "confidence": 0.999981,
+          "word_is_final": true
+        },
+        {
+          "start": 10383,
+          "end": 10612,
+          "text": "the",
+          "confidence": 0.999932,
+          "word_is_final": true
+        },
+        {
+          "start": 10627,
+          "end": 10932,
+          "text": "text",
+          "confidence": 0.999948,
+          "word_is_final": true
+        },
+        {
+          "start": 10947,
+          "end": 11329,
+          "text": "shows",
+          "confidence": 0.999926,
+          "word_is_final": true
+        },
+        {
+          "start": 11344,
+          "end": 11573,
+          "text": "up.",
+          "confidence": 0.999421,
+          "word_is_final": true
+        }
+      ],
+      "utterance": "Hej, det här är ett test av diktering på svenska. Vi mäter hur snabbt texten dyker upp. Hi, this is a quick dictation test in English. We are measuring how fast the text shows up.",
+      "type": "Turn"
+    }
+  }
+]

@@ -71,7 +71,7 @@
   #cx svg { width: 9px; height: 9px; }
   body.carded #cv, body.carded #pill { display: none; }
 </style>
-<canvas id="cv"></canvas>
+<canvas id="cv" role="img" aria-label="Dictation status"></canvas>
 <div id="pill"><span id="dot"></span><span id="text"></span></div>
 <div id="card"><div class="row" id="crow">
   <span class="cglyph" id="cglyph"></span><span id="cnote"></span><span id="csaid"></span>
@@ -140,7 +140,7 @@ const N = 24;
 const bandT = new Float32Array(N);
 let avgT = 0, lastLevels = 0;
 const fx = { flash: 0, shutter: 0 };
-const ACT_MAP = { listening: 'listen', locked: 'lock', transcribing: 'transcribe', recording: 'record', finalizing: 'save' };
+const ACT_MAP = { listening: 'listen', locked: 'lock', transcribing: 'transcribe', recording: 'record', 'recording-locked': 'record', finalizing: 'save' };
 /* A take is a take whether a finger is on the trigger or not: 'lock' sizes and
    draws like 'listen', and only the ring tells them apart. */
 const taking = s => s === 'listen' || s === 'record' || s === 'lock';
@@ -149,6 +149,9 @@ const pillEl = document.getElementById('pill'), textEl = document.getElementById
 function showText(cls, msg) { pillEl.className = 'on ' + cls; textEl.textContent = msg; }
 function clearText() { pillEl.className = ''; notice = null; }
 function applyActivity(p) {
+  cv.setAttribute('aria-label', p.activity === 'recording-locked'
+    ? 'Video and narration locked. Tap your dictation key to stop.'
+    : p.activity === 'locked' ? 'Dictation locked.' : p.activity);
   if (p.activity === 'preparing') {
     st = 'hidden';
     notice = true;
@@ -394,7 +397,7 @@ function draw(t, W, H, morph, pinch) {
   // thing that flashes is the thing that was listening.
   const lift = SHOT_FEEDBACK === 'bars' && fx.flash > 0 ? Math.pow(fx.flash, 0.55) : 0;
   const accent = mix(morphColor(morph), WHITE, lift);
-  bodyShell(cx, cy, W, H, Math.min(W, H) / 2, st === 'lock' ? accent : null);
+  bodyShell(cx, cy, W, H, Math.min(W, H) / 2, (st === 'lock' || activity?.activity === 'recording-locked') ? accent : null);
   const pad = Math.min(10, Math.max(4, W * 0.1)), innerW = Math.max(6, W - pad * 2);
   const maxBarH = H - 10, x0 = cx - innerW / 2, lineTh = 2.5;
   if (st === 'transcribe' || st === 'save') {

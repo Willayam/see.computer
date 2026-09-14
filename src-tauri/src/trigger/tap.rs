@@ -27,10 +27,13 @@ fn watcher_thread(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, gesture: Arc
         match run_tap(trigger.clone(), inbox.clone(), gesture.clone()) {
             TapExit::PermissionDenied => {
                 gesture.clear();
+                let _ = inbox.send(Msg::TriggerUnavailable);
                 std::thread::sleep(Duration::from_secs(5));
             }
             TapExit::Rebuild => {
                 gesture.clear();
+                let _ = inbox.send(Msg::TriggerReset);
+                let _ = inbox.send(Msg::MainReleased);
                 std::thread::sleep(Duration::from_millis(750));
             }
         }
@@ -64,6 +67,16 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, gesture: Arc<Gestur
         CGEventTapOptions::ListenOnly,
         vec![CGEventType::FlagsChanged, CGEventType::KeyDown],
         move |_proxy, event_type, event| {
+            if callback_gesture.take_unlock() {
+                with_decoder(
+                    &callback_decoder,
+                    current_trigger(&callback_trigger),
+                    |decoder| {
+                        decoder.unlock();
+                        Vec::new()
+                    },
+                );
+            }
             match event_type {
                 CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
                     callback_gesture.clear();
@@ -73,6 +86,15 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, gesture: Arc<Gestur
                 CGEventType::FlagsChanged => {
                     let selected = current_trigger(&callback_trigger);
                     let flags = event.get_flags().bits();
+                    if selected.held_in(flags) || callback_gesture.held() {
+                        let _ = callback_inbox.send(Msg::TriggerEdge {
+                            at: std::time::SystemTime::now(),
+                            held: selected.held_in(flags),
+                            shift: flags
+                                & (super::LEFT_SHIFT | super::RIGHT_SHIFT | super::ANY_SHIFT)
+                                != 0,
+                        });
+                    }
                     callback_gesture.set_held(selected.held_in(flags));
                     let message = with_decoder(&callback_decoder, selected, |decoder| {
                         decoder.step(Input::Flags(flags), Instant::now())
@@ -104,8 +126,12 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, gesture: Arc<Gestur
     runloop.add_source(&source, unsafe { kCFRunLoopCommonModes });
     tap.enable();
 
-    let mut reenable_failures = 0_u8;
+    let _ = inbox.send(Msg::TriggerReady);
     loop {
+        // Recreate the decoder before another tick can republish an interrupted lock.
+        if needs_reenable.swap(false, Ordering::SeqCst) || !event_tap_is_enabled(&tap) {
+            return TapExit::Rebuild;
+        }
         let selected = current_trigger(&trigger);
         // The event stream crosses the arm threshold and reports release; the
         // physical poll only feeds the session's release watchdog, which ends a
@@ -124,19 +150,6 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, gesture: Arc<Gestur
         });
         publish_lock(&decoder, &gesture);
         send_message(&inbox, message);
-
-        if needs_reenable.swap(false, Ordering::SeqCst) || !event_tap_is_enabled(&tap) {
-            tap.enable();
-            std::thread::sleep(Duration::from_millis(20));
-            if event_tap_is_enabled(&tap) {
-                reenable_failures = 0;
-            } else {
-                reenable_failures = reenable_failures.saturating_add(1);
-                if reenable_failures >= 2 {
-                    return TapExit::Rebuild;
-                }
-            }
-        }
 
         if matches!(
             CFRunLoop::run_in_mode(
