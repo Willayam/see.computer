@@ -17,12 +17,13 @@ Three gestures. That is the whole interface.
 | Gesture | What happens |
 |---|---|
 | Hold **Globe** (Fn), speak, release | The spoken text is pasted at your cursor, in any app. Plain dictation stays local. |
+| Double-tap **Globe** | Locks dictation open with nothing held. Tap Globe once to stop and paste. Esc cancels. |
 | Hold **Globe**, double-tap **Shift**, release both | Locks screen recording and narration. Tap Globe once to stop and paste. Esc cancels. |
 | Hold **Globe+Shift**, release to stop | Records the screen and microphone while held. On release, the recording is packaged into an agent-readable take folder. The paste contains the narration in quotes, a blank line, then a tail naming the captures and the path to `take.md`. Releasing before about 0.6 seconds discards the recording. |
 
-The Globe key is the default. Hold it to dictate. While holding it, tap Shift for a screenshot, hold Shift for a video clip, or double-tap Shift to lock video and narration. A single screenshot waits up to 300 ms for a possible second tap. After video locks, release both keys and use the computer normally. Tap the trigger once to stop, or press Esc to cancel. The pill shows a red ring while video is locked.
+The Globe key is the default. Hold it to dictate, or double-tap it to lock dictation open, shown with a blue ring. While holding it, tap Shift for a screenshot, hold Shift for a video clip, or double-tap Shift to lock video and narration. A single screenshot waits up to 300 ms for a possible second tap. After video locks, release both keys and use the computer normally. Tap the trigger once to stop, or press Esc to cancel. The pill shows a red ring while video is locked.
 
-Double-tap Globe is left to macOS, and the app does not change system keyboard shortcuts. Choose Left Option or Right Option in the tray to use a different trigger. Option triggers also support double-tap for locked dictation, shown with a blue ring. Holding that trigger and double-tapping Shift locks video. Right Option is AltGr on a Swedish keyboard.
+macOS can claim the same Globe taps. If Dictation is on with its "Press 🌐 twice" shortcut, or "Press 🌐 key to" is set to anything but "Do nothing", the tray shows a warning that opens the Keyboard settings. The app never changes system shortcuts itself. Choose Left Option or Right Option in the tray to use a different trigger; every trigger has the same gestures. Right Option is AltGr on a Swedish keyboard.
 
 If the keyboard listener is interrupted, the app finishes the current take and rebuilds the listener with fresh gesture state. Controller cancellations, rejected starts, and missed key releases also reset the gesture decoder.
 

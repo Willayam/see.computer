@@ -4,16 +4,19 @@
 //        press-mod opt-shot [ms]   -> Left Option held, one 100 ms Shift tap after 600 ms (a screenshot)
 //        press-mod opt-tap [ms]    -> Left Option tapped for ms (default 80); two within 300 ms lock a take
 //        press-mod opt-double-tap  -> two 80 ms Left Option taps 120 ms apart, in one process, so the 300 ms lock window is met
+//        press-mod fn-double-tap   -> the same two taps on Fn (Globe)
+//        press-mod fn-tap          -> one 80 ms Fn tap, which ends a locked take
 import Foundation
 import CoreGraphics
 
 let args = CommandLine.arguments
-guard args.count >= 2 else { FileHandle.standardError.write("usage: press-mod opt-hold|opt-shift|opt-shot|opt-tap|opt-double-tap|ropt-hold|ropt-shift [ms]\n".data(using:.utf8)!); exit(64) }
+guard args.count >= 2 else { FileHandle.standardError.write("usage: press-mod opt-hold|opt-shift|opt-shot|opt-tap|opt-double-tap|fn-double-tap|fn-tap|ropt-hold|ropt-shift [ms]\n".data(using:.utf8)!); exit(64) }
 let mode = args[1]
 let ms = args.count >= 3 ? (UInt32(args[2]) ?? 400) : 400
 let leftOption: CGKeyCode = 58
 let rightOption: CGKeyCode = 61
 let leftShift: CGKeyCode = 56
+let fnKey: CGKeyCode = 63
 guard let src = CGEventSource(stateID: .hidSystemState) else { exit(70) }
 func post(_ key: CGKeyCode, down: Bool, flags: CGEventFlags) {
     guard let e = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: down) else { exit(70) }
@@ -49,6 +52,13 @@ case "opt-double-tap":
         post(leftOption, down: true, flags: [.maskAlternate]); usleep(80_000); post(leftOption, down: false, flags: [])
         usleep(120_000)
     }
+case "fn-double-tap":
+    for _ in 0..<2 {
+        post(fnKey, down: true, flags: [.maskSecondaryFn]); usleep(80_000); post(fnKey, down: false, flags: [])
+        usleep(120_000)
+    }
+case "fn-tap":
+    post(fnKey, down: true, flags: [.maskSecondaryFn]); usleep(80_000); post(fnKey, down: false, flags: [])
 case "opt-tap":
     let tapMs = args.count >= 3 ? ms : 80
     post(leftOption, down: true, flags: [.maskAlternate]); usleep(tapMs*1000); post(leftOption, down: false, flags: [])

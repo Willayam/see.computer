@@ -51,7 +51,7 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, gesture: Arc<Gestur
     };
     use core_graphics::event::{
         CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
-        CallbackResult,
+        CallbackResult, EventField,
     };
 
     let decoder = Arc::new(Mutex::new(Decoder::new(current_trigger(&trigger))));
@@ -104,8 +104,9 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, gesture: Arc<Gestur
                 }
                 CGEventType::KeyDown => {
                     let selected = current_trigger(&callback_trigger);
+                    let key = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
                     let message = with_decoder(&callback_decoder, selected, |decoder| {
-                        decoder.step(Input::KeyDown, Instant::now())
+                        decoder.step(Input::KeyDown(key), Instant::now())
                     });
                     publish_lock(&callback_decoder, &callback_gesture);
                     send_message(&callback_inbox, message);

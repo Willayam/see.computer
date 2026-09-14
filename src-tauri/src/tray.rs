@@ -11,7 +11,7 @@ use crate::menu::{self, Row};
 use crate::pill::{Notice, PillEvent};
 use crate::recents::{self, Payload};
 use crate::session::{EngineStatus, Msg};
-use crate::trigger::Trigger;
+use crate::trigger::{self, Trigger};
 
 const TRIGGERS: [(&str, Trigger); 3] = [
     ("trigger-left-option", Trigger::LeftOption),
@@ -117,7 +117,7 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
 impl Panel {
     fn main_rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
-        rows.extend(self.problem_row());
+        rows.extend(self.problem_rows());
 
         let recents = recents::recent(&self.history, RECENT_IDS.len());
         if recents.is_empty() {
@@ -150,12 +150,19 @@ impl Panel {
         rows
     }
 
-    /// One row, highest priority wins: the permission that breaks the trigger,
-    /// then a broken model, then model loading.
+    /// One problem, highest priority wins: the permission that breaks the
+    /// trigger, then a macOS shortcut that answers the same Globe taps, then a
+    /// broken model, then model loading.
     /// Missing Accessibility deliberately has no row; history keeps the text.
-    fn problem_row(&self) -> Option<Row> {
+    fn problem_rows(&self) -> Vec<Row> {
         if let Some((id, label)) = alert() {
-            return Some(item(id, label, false, Some(WARNING)));
+            return vec![item(id, label, false, Some(WARNING))];
+        }
+        if let Some(claim) = self.globe_claim() {
+            return vec![
+                item("globe-claim", claim.label(), false, Some(WARNING)),
+                Row::Hint(claim.hint().to_owned()),
+            ];
         }
         let status = self
             .status
@@ -163,12 +170,12 @@ impl Panel {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         if status == EngineStatus::Broken {
-            return Some(item(
+            return vec![item(
                 "retry",
                 "Model unavailable — retry download",
                 false,
                 Some(WARNING),
-            ));
+            )];
         }
         if let EngineStatus::Loading { phase, pct } = status {
             let label = match (phase, pct) {
@@ -177,9 +184,17 @@ impl Panel {
                 }
                 _ => "Preparing model…".to_owned(),
             };
-            return Some(item("", &label, false, Some("arrow.down.circle")));
+            return vec![item("", &label, false, Some("arrow.down.circle"))];
         }
-        None
+        Vec::new()
+    }
+
+    /// Only Globe shares its taps with macOS; the Option keys have nothing
+    /// bound to a bare tap.
+    fn globe_claim(&self) -> Option<trigger::GlobeClaim> {
+        (current_trigger(&self.trigger) == Trigger::Fn)
+            .then(trigger::globe_claim)
+            .flatten()
     }
 
     fn settings_rows(&self) -> Vec<Row> {
@@ -253,9 +268,11 @@ impl Panel {
         if let Some((_, selected)) = TRIGGERS.iter().find(|(option_id, _)| *option_id == id) {
             *self.trigger.lock().unwrap_or_else(PoisonError::into_inner) = *selected;
             self.save_config();
-            let _ = self.pill.send(PillEvent::Flash(Notice::TriggerChanged(
-                selected.gestures(),
-            )));
+            let notice = match self.globe_claim() {
+                Some(claim) => Notice::Info(format!("{} · {}", claim.label(), claim.hint())),
+                None => Notice::TriggerChanged(selected.gestures()),
+            };
+            let _ = self.pill.send(PillEvent::Flash(notice));
             return Some(self.trigger_rows());
         }
         match id {
@@ -291,6 +308,12 @@ impl Panel {
                 Some(self.main_rows())
             }
             "trigger-settings" => Some(self.trigger_rows()),
+            "globe-claim" => {
+                if let Some(claim) = self.globe_claim() {
+                    open_path(claim.settings_url());
+                }
+                None
+            }
             "permission-settings" => Some(self.permission_rows()),
             "retry" => {
                 let _ = self.inbox.send(Msg::RetryEngine);

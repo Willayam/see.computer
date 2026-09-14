@@ -6,8 +6,10 @@ use std::time::{Duration, Instant};
 
 use crate::session::Msg;
 
+mod globe;
 mod tap;
 
+pub use globe::{claim as globe_claim, Claim as GlobeClaim};
 pub use tap::{listen_access_granted, spawn_watcher};
 
 pub const LEFT_OPTION: u64 = 0x0000_0020;
@@ -56,7 +58,7 @@ impl Trigger {
                 "Hold Right Option to talk · double tap to lock dictation · hold Right Option+Shift to record · double-tap Shift while holding Option to lock video"
                     .to_owned()
             }
-            Self::Fn => "Hold Fn to talk · hold Fn+Shift to record · hold Fn and double-tap Shift to lock video".to_owned(),
+            Self::Fn => "Hold Fn to talk · double tap to lock dictation · hold Fn+Shift to record · hold Fn and double-tap Shift to lock video".to_owned(),
         }
     }
 
@@ -135,9 +137,15 @@ pub struct Decoder {
     video_locked: bool,
 }
 
+/// The key code macOS posts as a key-down/key-up pair the moment a bare Fn tap
+/// ends, whatever "Press 🌐 key to" is set to. It is the tap itself echoed back,
+/// not a key typed with the trigger held, so it must not erase the tap.
+pub const GLOBE_TAP_KEY: i64 = 179;
+
 pub enum Input {
     Flags(u64),
-    KeyDown,
+    /// A key went down, with its virtual key code.
+    KeyDown(i64),
     Tick,
 }
 
@@ -174,7 +182,8 @@ impl Decoder {
     /// ends a clip is usually the same finger that ends the session.
     pub fn step(&mut self, input: Input, now: Instant) -> Vec<Msg> {
         match input {
-            Input::KeyDown => {
+            Input::KeyDown(GLOBE_TAP_KEY) => Vec::new(),
+            Input::KeyDown(_) => {
                 if !self.dictating() {
                     self.arming_since = None;
                     self.tapped_at = None;
@@ -329,10 +338,6 @@ impl Decoder {
     /// A bare tap close enough behind this press to be its other half. Consumed
     /// either way, so one tap cannot arm two locks.
     fn second_tap(&mut self, now: Instant) -> bool {
-        if self.trigger == Trigger::Fn {
-            self.tapped_at = None;
-            return false;
-        }
         self.tapped_at
             .take()
             .is_some_and(|at| now.saturating_duration_since(at) < DOUBLE_TAP_WINDOW)
@@ -613,7 +618,7 @@ mod tests {
             assert!(d.step(Input::Tick, after(start, 1000)).is_empty());
             // Typing and Shift alone cannot stop or split locked video.
             d.step(Input::Flags(LEFT_SHIFT), after(start, 1100));
-            d.step(Input::KeyDown, after(start, 1120));
+            d.step(Input::KeyDown(0), after(start, 1120));
             assert!(d.step(Input::Flags(0), after(start, 1200)).is_empty());
             d.step(Input::Flags(flag), after(start, 2000));
             assert!(d.step(Input::Tick, after(start, 2190)).is_empty());
@@ -660,16 +665,6 @@ mod tests {
             out(&d.step(Input::Tick, after(start, 2300))),
             ["MainPressed"]
         );
-    }
-
-    #[test]
-    fn fn_double_tap_is_reserved_for_macos() {
-        let start = Instant::now();
-        let mut d = Decoder::new(Trigger::Fn);
-        for (ms, flags) in [(0, FN), (90, 0), (200, FN), (290, 0)] {
-            assert!(d.step(Input::Flags(flags), after(start, ms)).is_empty());
-        }
-        assert!(!d.locked());
     }
 
     #[test]
@@ -760,7 +755,7 @@ mod tests {
         let start = Instant::now();
         let mut decoder = Decoder::new(Trigger::LeftOption);
         assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), start)).is_empty());
-        assert!(out(&decoder.step(Input::KeyDown, after(start, 50))).is_empty());
+        assert!(out(&decoder.step(Input::KeyDown(0), after(start, 50))).is_empty());
         assert!(out(&decoder.step(Input::Tick, after(start, 300))).is_empty());
     }
 
@@ -1196,7 +1191,7 @@ mod tests {
         let (mut decoder, start) = locked();
         decoder.step(Input::Flags(LEFT_OPTION), after(start, 1_000));
         // Option+E, not a stop and not a camera.
-        assert!(out(&decoder.step(Input::KeyDown, after(start, 1_040))).is_empty());
+        assert!(out(&decoder.step(Input::KeyDown(0), after(start, 1_040))).is_empty());
         assert!(out(&decoder.step(Input::Flags(0), after(start, 1_090))).is_empty());
         assert!(decoder.dictating());
         assert!(decoder.locked());
@@ -1240,10 +1235,43 @@ mod tests {
     }
 
     #[test]
-    fn option_triggers_can_be_double_tapped() {
+    fn a_physical_fn_tap_echoes_a_globe_key_that_does_not_erase_it() {
+        let start = Instant::now();
+        let mut decoder = Decoder::new(Trigger::Fn);
+        decoder.step(Input::Flags(FN), start);
+        decoder.step(Input::Flags(0), after(start, 106));
+        assert!(decoder
+            .step(Input::KeyDown(GLOBE_TAP_KEY), after(start, 107))
+            .is_empty());
+        decoder.step(Input::Flags(FN), after(start, 209));
+        assert!(decoder
+            .step(Input::KeyDown(GLOBE_TAP_KEY), after(start, 210))
+            .is_empty());
+        assert_eq!(
+            out(&decoder.step(Input::Flags(0), after(start, 338))),
+            ["MainPressed", "TakeLocked"]
+        );
+        assert!(decoder.locked());
+        // Ending the locked take with a tap echoes the key again, after the
+        // release that already ended it, and that echo must not open anything.
+        decoder.step(Input::Flags(FN), after(start, 2_000));
+        assert_eq!(
+            out(&decoder.step(Input::Flags(0), after(start, 2_090))),
+            ["MainReleased"]
+        );
+        assert!(decoder
+            .step(Input::KeyDown(GLOBE_TAP_KEY), after(start, 2_091))
+            .is_empty());
+        assert!(decoder.step(Input::Tick, after(start, 2_400)).is_empty());
+        assert!(!decoder.dictating());
+    }
+
+    #[test]
+    fn every_tap_trigger_can_be_double_tapped() {
         for (trigger, flag) in [
             (Trigger::LeftOption, LEFT_OPTION),
             (Trigger::RightOption, RIGHT_OPTION),
+            (Trigger::Fn, FN),
         ] {
             let start = Instant::now();
             let mut decoder = Decoder::new(trigger);
