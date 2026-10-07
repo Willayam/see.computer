@@ -1,6 +1,6 @@
 # R2 sharing beta
 
-This Worker accepts bounded screen-take uploads and serves unlisted public pages at `https://see-computer-shares.cocco.workers.dev/s/<share-id>/`. It uses one SQLite Durable Object for the beta. That object owns share state, quota decisions, and upload byte accounting. R2 stays private.
+This Worker accepts bounded screen-take uploads and serves unlisted public pages at `https://see.computer/s/<share-id>/`. It uses one SQLite Durable Object for the beta. That object owns share state, quota decisions, and upload byte accounting. R2 stays private.
 
 ## Limits and identity
 
@@ -27,14 +27,14 @@ Generate the installation secret locally. Keep it in app storage and never place
 openssl rand -hex 32
 ```
 
-The app generates a 32-character lowercase hexadecimal share ID. It sends an empty POST to create the share. The server returns the URL and a 30-day expiry. Empty POST retries reuse the original expiry. API clients may also choose an earlier expiry with this optional body.
+The app generates a 7-character share ID from the base62 alphabet. Shares from the first beta build keep their 32-character hexadecimal IDs. It sends an empty POST to create the share. The server returns the URL and a 30-day expiry. Empty POST retries reuse the original expiry. API clients may also choose an earlier expiry with this optional body.
 
 ```http
 POST /api/shares/<id>
 Authorization: Bearer <64 lowercase hexadecimal characters>
 Content-Type: application/json
 
-{"url":"https://see-computer-shares.cocco.workers.dev/s/<id>/","expiresAt":"2026-10-01T12:00:00.000Z"}
+{"url":"https://see.computer/s/<id>/","expiresAt":"2026-10-01T12:00:00.000Z"}
 ```
 
 Upload each file while the share is open.

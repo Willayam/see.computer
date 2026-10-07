@@ -21,7 +21,8 @@ export const CONTENT_TYPES = Object.freeze({
   md: "text/markdown; charset=utf-8",
 });
 
-const shareIdPattern = "([a-f0-9]{32})";
+// Seven base62 characters for new shares. Beta shares used 32 hex characters and still resolve.
+const shareIdPattern = "([A-Za-z0-9]{7}|[a-f0-9]{32})";
 const relativePattern = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*(?:\/[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)*\.([a-z0-9]+)$/;
 const pageCsp = (nonce) => `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src 'self'; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
 const staticPageCsp = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
@@ -335,7 +336,7 @@ export class ShareCoordinatorService {
     this.metadata = metadata;
     this.bucket = bucket;
     this.now = options.now ?? (() => Date.now());
-    this.publicOrigin = options.publicOrigin ?? "https://see-computer-shares.cocco.workers.dev";
+    this.publicOrigin = options.publicOrigin ?? "https://see.computer";
     this.mutationTail = Promise.resolve();
   }
 

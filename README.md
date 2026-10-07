@@ -41,7 +41,7 @@ In version 0.1.1, turn on **Make recordings shareable** in Settings. It applies 
 
 Anyone with the link can view the captures and transcript. The beta allows 10 shares per installation per month, keeps links for 30 days, and limits each share to 256 MiB and 1,500 files. Cancelled takes count toward the allowance. There is no paid plan yet.
 
-Turning sharing off pauses uploads. Connection failures retry automatically, including after an app restart. A pending link includes the local take path in the pasted text. If publishing fails, recent items copy the local path. **Remove last shared link** queues deletion of the latest share. Local originals stay in Documents.
+Turning sharing off pauses uploads. Connection failures retry automatically, including after an app restart. The paste carries the link alone, even while the upload is still running. If publishing fails, recent items copy the local path. **Remove last shared link** queues deletion of the latest share. Local originals stay in Documents.
 
 The service runs on private R2 storage in Cocco Ventures. See [the hosting instructions](services/shares/README.md) for limits and deployment, and [signed updates](docs/updates.md) for the release setup. Public distribution still needs Apple Developer ID signing and notarization.
 
