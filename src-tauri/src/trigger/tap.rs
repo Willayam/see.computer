@@ -205,6 +205,7 @@ fn send_message(inbox: &Sender<Msg>, messages: Vec<Msg>) {
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGPreflightListenEventAccess() -> bool;
+    fn CGRequestListenEventAccess() -> bool;
     fn CGEventSourceFlagsState(
         state: core_graphics::event_source::CGEventSourceStateID,
     ) -> core_graphics::event::CGEventFlags;
@@ -215,6 +216,15 @@ extern "C" {
 /// being silently dead.
 pub fn listen_access_granted() -> bool {
     unsafe { CGPreflightListenEventAccess() }
+}
+
+/// Shows the system prompt the first time and adds see.computer to the Input
+/// Monitoring list, so the user flips a toggle instead of hunting with `+`.
+/// Later calls do nothing; macOS asks once per app.
+pub fn request_listen_access() {
+    unsafe {
+        CGRequestListenEventAccess();
+    }
 }
 
 fn physical_modifier_held(trigger: Trigger) -> bool {

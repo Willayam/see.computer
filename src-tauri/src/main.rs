@@ -19,6 +19,7 @@ mod recents;
 mod recorder;
 mod rivals;
 mod session;
+mod setup;
 mod sharing;
 mod target;
 mod text;
@@ -130,7 +131,7 @@ fn main() {
                     updater,
                 },
             )?;
-            paste::accessibility_trusted(true);
+            setup::install(app.handle(), setup_trigger.clone());
             trigger::spawn_watcher(setup_trigger, setup_watcher_tx, setup_gesture);
             Ok(())
         })

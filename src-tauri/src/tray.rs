@@ -150,13 +150,17 @@ impl Panel {
         rows
     }
 
-    /// One problem, highest priority wins: the permission that breaks the
-    /// trigger, then a macOS shortcut that answers the same Globe taps, then a
-    /// broken model, then model loading.
-    /// Missing Accessibility deliberately has no row; history keeps the text.
+    /// One problem, highest priority wins: unfinished setup, then a macOS
+    /// shortcut that answers the same Globe taps, then a broken model, then
+    /// model loading.
     fn problem_rows(&self) -> Vec<Row> {
-        if let Some((id, label)) = alert() {
-            return vec![item(id, label, false, Some(WARNING))];
+        let missing = crate::setup::missing();
+        if missing > 0 {
+            let label = match missing {
+                1 => "Finish setup · 1 permission left".to_owned(),
+                count => format!("Finish setup · {count} permissions left"),
+            };
+            return vec![item("setup", &label, false, Some(WARNING))];
         }
         if let Some(claim) = self.globe_claim() {
             return vec![
@@ -251,7 +255,7 @@ impl Panel {
     }
 
     fn permission_rows(&self) -> Vec<Row> {
-        let mut rows = Vec::new();
+        let mut rows = vec![item("setup", "Open Setup…", false, None), Row::Separator];
         rows.extend(PANES.map(|(id, label, _)| item(id, &format!("{label}…"), false, None)));
         rows
     }
@@ -315,6 +319,10 @@ impl Panel {
                 None
             }
             "permission-settings" => Some(self.permission_rows()),
+            "setup" => {
+                crate::setup::show(&self.app);
+                None
+            }
             "retry" => {
                 let _ = self.inbox.send(Msg::RetryEngine);
                 None
@@ -402,16 +410,6 @@ fn disclosure(id: &'static str, label: &str, expanded: bool) -> Row {
         label: label.to_owned(),
         expanded,
     }
-}
-
-/// The one thing standing between the chosen trigger and hold-to-talk working,
-/// paired with the id of the row that fixes it. Queried live rather than
-/// stored, so granting the permission clears it on the next open.
-fn alert() -> Option<(&'static str, &'static str)> {
-    (!crate::trigger::listen_access_granted()).then_some((
-        "input-monitoring",
-        "Enable Input Monitoring for hold-to-talk",
-    ))
 }
 
 fn open_at_login(app: &AppHandle) -> bool {

@@ -27,5 +27,11 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=UniformTypeIdentifiers");
     println!("cargo:rustc-link-arg=-mmacosx-version-min=14.0");
     println!("cargo:rerun-if-changed=native/recording.m");
+    cc::Build::new()
+        .file("native/permissions.m")
+        .flag("-fobjc-arc")
+        .flag("-mmacosx-version-min=14.0")
+        .compile("seepermissions");
+    println!("cargo:rerun-if-changed=native/permissions.m");
     tauri_build::build();
 }
