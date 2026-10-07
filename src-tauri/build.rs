@@ -33,5 +33,12 @@ fn main() {
         .flag("-mmacosx-version-min=14.0")
         .compile("seepermissions");
     println!("cargo:rerun-if-changed=native/permissions.m");
+    cc::Build::new()
+        .file("native/tap.m")
+        .flag("-fobjc-arc")
+        .flag("-mmacosx-version-min=14.0")
+        .compile("seetap");
+    println!("cargo:rustc-link-lib=framework=CoreAudio");
+    println!("cargo:rerun-if-changed=native/tap.m");
     tauri_build::build();
 }

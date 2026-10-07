@@ -1,6 +1,10 @@
 //! Menu-bar icon, and the state the glass panel is drawn from.
 
-use std::sync::{mpsc::Sender, Arc, Mutex, PoisonError};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::Sender,
+    Arc, Mutex, PoisonError,
+};
 use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt;
@@ -56,6 +60,8 @@ struct Panel {
     history: History,
     sharing: crate::sharing::Sharing,
     updater: crate::updater::Updater,
+    meetings: crate::meeting::controller::Meetings,
+    meeting_autostart: Arc<AtomicBool>,
     status: Arc<Mutex<EngineStatus>>,
     settings_expanded: Arc<Mutex<bool>>,
     payloads: Arc<Mutex<Vec<Payload>>>,
@@ -69,6 +75,8 @@ pub struct Wiring {
     pub status: Arc<Mutex<EngineStatus>>,
     pub sharing: crate::sharing::Sharing,
     pub updater: crate::updater::Updater,
+    pub meetings: crate::meeting::controller::Meetings,
+    pub meeting_autostart: Arc<AtomicBool>,
 }
 
 pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
@@ -80,6 +88,8 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
         status,
         sharing,
         updater,
+        meetings,
+        meeting_autostart,
     } = wiring;
     let panel = Panel {
         app: app.clone(),
@@ -89,12 +99,21 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
         history,
         sharing,
         updater,
+        meetings,
+        meeting_autostart,
         status,
         settings_expanded: Arc::new(Mutex::new(false)),
         payloads: Arc::new(Mutex::new(Vec::new())),
     };
     let picked = panel.clone();
     menu::on_pick(move |id| picked.pick(id));
+    let watched = panel.clone();
+    panel.meetings.watch(move || {
+        let panel = watched.clone();
+        let _ = watched
+            .app
+            .run_on_main_thread(move || menu::refresh(&panel.main_rows()));
+    });
 
     let image = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
     TrayIconBuilder::with_id("main")
@@ -118,6 +137,29 @@ impl Panel {
     fn main_rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
         rows.extend(self.problem_rows());
+        let (label, symbol) = match self.meetings.status() {
+            crate::meeting::controller::Status::Idle => {
+                ("Record a meeting".to_owned(), "record.circle")
+            }
+            crate::meeting::controller::Status::Offered(app) => {
+                (format!("Record {} meeting", app.name), "record.circle")
+            }
+            crate::meeting::controller::Status::Recording { started_ms, .. } => {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                let minutes = now_ms.saturating_sub(started_ms) / 60_000;
+                let duration = if minutes == 0 {
+                    "under 1 min".to_owned()
+                } else {
+                    format!("{minutes} min")
+                };
+                (format!("Stop recording · {duration}"), "stop.circle")
+            }
+        };
+        rows.push(item("meeting", &label, false, Some(symbol)));
+        rows.push(Row::Separator);
 
         let recents = recents::recent(&self.history, RECENT_IDS.len());
         if recents.is_empty() {
@@ -131,7 +173,14 @@ impl Panel {
         let mut payloads = Vec::with_capacity(recents.len());
         for (index, recent) in recents.into_iter().enumerate() {
             let (label, symbol) = recent.row();
-            rows.push(item(RECENT_IDS[index], &label, false, Some(symbol)));
+            rows.push(match recent.payload {
+                Payload::Meeting(_) => Row::Line {
+                    id: RECENT_IDS[index],
+                    label,
+                    symbol,
+                },
+                _ => item(RECENT_IDS[index], &label, false, Some(symbol)),
+            });
             payloads.push(recent.payload);
         }
         *self.payloads.lock().unwrap_or_else(PoisonError::into_inner) = payloads;
@@ -146,6 +195,7 @@ impl Panel {
             rows.extend(self.settings_rows());
         }
         rows.push(Row::Separator);
+        rows.push(item("library", "Library", false, Some("books.vertical")));
         rows.push(item("quit", "Quit see.computer", false, None));
         rows
     }
@@ -227,6 +277,12 @@ impl Panel {
             None,
         ));
         rows.push(item(
+            "meeting-autostart",
+            "Auto-record meetings",
+            self.meeting_autostart.load(Ordering::Relaxed),
+            None,
+        ));
+        rows.push(item(
             "open-at-login",
             "Open at Login",
             open_at_login(&self.app),
@@ -262,7 +318,7 @@ impl Panel {
 
     fn pick(&self, id: &str) -> Option<Vec<Row>> {
         if let Some(index) = RECENT_IDS.iter().position(|recent_id| *recent_id == id) {
-            self.copy_recent(index);
+            self.pick_recent(index);
             return None;
         }
         if let Some((_, _, pane)) = PANES.iter().find(|(pane_id, _, _)| *pane_id == id) {
@@ -280,6 +336,15 @@ impl Panel {
             return Some(self.trigger_rows());
         }
         match id {
+            "meeting" => {
+                self.meetings.toggle();
+                None
+            }
+            "meeting-autostart" => {
+                self.meeting_autostart.fetch_xor(true, Ordering::Relaxed);
+                self.save_config();
+                Some(self.main_rows())
+            }
             "sharing-toggle" => {
                 self.sharing.set_enabled(!self.sharing.enabled());
                 self.save_config();
@@ -348,6 +413,10 @@ impl Panel {
                 }
                 Some(self.main_rows())
             }
+            "library" => {
+                crate::library::show(&self.app, None);
+                None
+            }
             "quit" => {
                 self.app.exit(0);
                 None
@@ -356,7 +425,7 @@ impl Panel {
         }
     }
 
-    fn copy_recent(&self, index: usize) {
+    fn pick_recent(&self, index: usize) {
         let Some(payload) = self
             .payloads
             .lock()
@@ -366,13 +435,18 @@ impl Panel {
         else {
             return;
         };
-        let text = payload.copy_text();
-        let result = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text));
-        match result {
-            Ok(()) => {
-                let _ = self.pill.send(PillEvent::Flash(Notice::Copied));
+        match payload.pick() {
+            recents::Pick::Copy(text) => {
+                let result =
+                    arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text));
+                match result {
+                    Ok(()) => {
+                        let _ = self.pill.send(PillEvent::Flash(Notice::Copied));
+                    }
+                    Err(error) => eprintln!("could not copy recent item: {error}"),
+                }
             }
-            Err(error) => eprintln!("could not copy recent item: {error}"),
+            recents::Pick::Library(id) => crate::library::show(&self.app, Some(id)),
         }
     }
 
@@ -381,6 +455,7 @@ impl Panel {
             trigger: current_trigger(&self.trigger),
             history: self.history.enabled(),
             sharing: self.sharing.enabled(),
+            meeting_autostart: self.meeting_autostart.load(Ordering::Relaxed),
         };
         if let Err(error) = config.save() {
             eprintln!("could not save preferences: {error}");

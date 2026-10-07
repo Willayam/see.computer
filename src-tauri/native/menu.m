@@ -15,6 +15,7 @@ typedef struct {
 
 enum {
     SeeRowItem = 0,
+    SeeRowLine = 1,
     SeeRowHint = 2,
     SeeRowSeparator = 3,
     SeeRowSubmenu = 4,
@@ -196,6 +197,7 @@ static CGFloat row_height(const SeeMenuRow *row, CGFloat width) {
     switch (row->kind) {
         case SeeRowSeparator: return kSeparatorHeight;
         case SeeRowHint: return kHintHeight;
+        case SeeRowLine: return kItemHeight;
         // A one-line item keeps the height it always had; a wrapped one grows
         // by what it wraps, and the panel is the sum either way.
         default:
@@ -238,7 +240,8 @@ static CGFloat fill_body(NSView *body, CGFloat width, const SeeMenuRow *rows, in
                                 [NSFont systemFontOfSize:11 weight:NSFontWeightRegular],
                                 NSColor.tertiaryLabelColor, 1);
         } else {
-            field = label_field(text, item_font(), NSColor.labelColor, kMaxItemLines);
+            field = label_field(text, item_font(), NSColor.labelColor,
+                                row->kind == SeeRowLine ? 1 : kMaxItemLines);
         }
         CGFloat lineHeight = wraps ? item_line_height() : kSingleLine;
         CGFloat textHeight = wraps ? item_text_height(text, width) : kSingleLine;
@@ -440,21 +443,19 @@ void see_menu_update(const SeeMenuRow *rows, int count) {
     [gPanel setFrameOrigin:NSMakePoint(NSMinX(frame), NSMaxY(frame) - height)];
 }
 
-void see_menu_show_submenu(const SeeMenuRow *rows, int count, const char *sourceId) {
-    if (!gPanel || !gPanel.isVisible || !sourceId) return;
-    ensure_submenu_panel();
-    CGFloat height = fill_body(gSubmenuBody, kSubmenuWidth, rows, count);
-    [gSubmenuPanel setContentSize:NSMakeSize(kSubmenuWidth, height)];
+static NSString *gSubmenuSource = nil;
 
+/// Beside the row that opened it, kept on screen.
+static void place_submenu(void) {
     SeeMenuRowView *source = nil;
-    NSString *wanted = @(sourceId);
     for (NSView *candidate in gBody.subviews) {
         if ([candidate isKindOfClass:SeeMenuRowView.class] &&
-            [((SeeMenuRowView *)candidate).rowId isEqualToString:wanted]) {
+            [((SeeMenuRowView *)candidate).rowId isEqualToString:gSubmenuSource]) {
             source = (SeeMenuRowView *)candidate;
             break;
         }
     }
+    CGFloat height = NSHeight(gSubmenuPanel.frame);
     NSRect anchor = source ? [source convertRect:source.bounds toView:nil] : gPanel.contentView.bounds;
     anchor = [gPanel convertRectToScreen:anchor];
     NSScreen *screen = gPanel.screen ?: NSScreen.mainScreen;
@@ -464,7 +465,27 @@ void see_menu_show_submenu(const SeeMenuRow *rows, int count, const char *source
     CGFloat y = NSMaxY(anchor) - height + kPadding;
     y = MAX(NSMinY(visible) + 8, MIN(y, NSMaxY(visible) - height - 8));
     [gSubmenuPanel setFrameOrigin:NSMakePoint(x, y)];
+}
+
+void see_menu_show_submenu(const SeeMenuRow *rows, int count, const char *sourceId) {
+    if (!gPanel || !gPanel.isVisible || !sourceId) return;
+    ensure_submenu_panel();
+    CGFloat height = fill_body(gSubmenuBody, kSubmenuWidth, rows, count);
+    [gSubmenuPanel setContentSize:NSMakeSize(kSubmenuWidth, height)];
+    gSubmenuSource = @(sourceId);
+    place_submenu();
     [gSubmenuPanel orderFrontRegardless];
+}
+
+// For changes the user did not click: the main rows redraw under an open
+// submenu, which stays open and follows its row.
+void see_menu_refresh(const SeeMenuRow *rows, int count) {
+    if (!gPanel || !gPanel.isVisible) return;
+    NSRect frame = gPanel.frame;
+    CGFloat height = fill_body(gBody, kPanelWidth, rows, count);
+    [gPanel setContentSize:NSMakeSize(kPanelWidth, height)];
+    [gPanel setFrameOrigin:NSMakePoint(NSMinX(frame), NSMaxY(frame) - height)];
+    if (gSubmenuPanel.isVisible) place_submenu();
 }
 
 void see_menu_update_submenu(const SeeMenuRow *rows, int count) {

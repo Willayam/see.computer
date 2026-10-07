@@ -8,6 +8,8 @@ mod engine;
 mod filler;
 mod history;
 mod hotkeys;
+mod library;
+mod meeting;
 mod menu;
 mod mic;
 mod numbers;
@@ -74,6 +76,10 @@ fn main() {
     let gesture = std::sync::Arc::new(trigger::Gesture::default());
     let history = history::History::start(config.history);
     let sharing = sharing::Sharing::start(config.sharing);
+    let meeting_autostart =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(config.meeting_autostart));
+    let (meetings, meetings_thread) =
+        meeting::controller::spawn(pill_tx.clone(), meeting_autostart.clone());
     let updater = updater::Updater::new(tx.clone(), pill_tx.clone());
     let status = std::sync::Arc::new(std::sync::Mutex::new(session::EngineStatus::Loading {
         phase: engine::Phase::Downloading,
@@ -103,6 +109,7 @@ fn main() {
     let setup_gesture = gesture;
     let setup_history = history;
     let setup_status = status;
+    let setup_meetings = meetings.clone();
     let app = tauri::Builder::default()
         .plugin(hotkeys::plugin(tx.clone()))
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -110,7 +117,14 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .invoke_handler(tauri::generate_handler![
+            library::library_items,
+            library::library_copy,
+            library::library_reveal
+        ])
         .setup(move |app| {
+            library::attach(app.handle());
+            tauri::Manager::manage(app, setup_history.clone());
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             updater.attach(app.handle());
             let cancel_app = app.handle().clone();
@@ -129,6 +143,8 @@ fn main() {
                     status: setup_status,
                     sharing,
                     updater,
+                    meetings: setup_meetings,
+                    meeting_autostart,
                 },
             )?;
             setup::install(app.handle(), setup_trigger.clone());
@@ -138,8 +154,13 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("see.computer failed to start");
     let mut controller = Some(controller);
+    let mut meetings_thread = Some(meetings_thread);
     app.run(move |_, event| {
         if matches!(event, tauri::RunEvent::Exit) {
+            meetings.quit();
+            if let Some(handle) = meetings_thread.take() {
+                let _ = handle.join();
+            }
             let _ = tx.send(session::Msg::Quit);
             if let Some(handle) = controller.take() {
                 let _ = handle.join();

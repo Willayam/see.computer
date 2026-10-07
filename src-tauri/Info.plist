@@ -8,5 +8,7 @@
   <string>see.computer transcribes your voice on this Mac. If you turn on sharing, recorded clips and their audio are uploaded with the transcript.</string>
   <key>NSScreenCaptureUsageDescription</key>
   <string>see.computer records your screen when you press the video hotkey.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>see.computer records the other side of your calls so meeting notes include what everyone said.</string>
 </dict>
 </plist>

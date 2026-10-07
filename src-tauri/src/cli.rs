@@ -1,8 +1,8 @@
-//! `see-computer transcribe <wav>` and `see-computer clip <mov>` use the same
-//! engine and model root as the app.
+//! `see-computer transcribe <wav>`, `clip <mov>`, `meetings`, `notes <meeting-folder>`, and `tap <seconds> <out.wav> [bundle-id]` are CLI commands.
+//! The first two use the same engine and model root as the app.
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::engine::{EngineError, Transcription};
 
@@ -10,6 +10,9 @@ pub enum Cmd {
     Transcribe(PathBuf),
     TranscribeLive(PathBuf),
     Clip(PathBuf),
+    Meetings,
+    Notes(PathBuf),
+    Tap(u64, PathBuf, Option<String>),
 }
 
 pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
@@ -20,6 +23,13 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
             None => None,
         },
         Some("clip") => args.next().map(PathBuf::from).map(Cmd::Clip),
+        Some("meetings") => Some(Cmd::Meetings),
+        Some("notes") => args.next().map(PathBuf::from).map(Cmd::Notes),
+        Some("tap") => {
+            let seconds = args.next()?.parse().ok()?;
+            let path = PathBuf::from(args.next()?);
+            Some(Cmd::Tap(seconds, path, args.next()))
+        }
         _ => None,
     }
 }
@@ -29,6 +39,128 @@ pub fn run(cmd: Cmd) -> i32 {
         Cmd::Transcribe(path) => transcribe(path),
         Cmd::TranscribeLive(path) => transcribe_live(path),
         Cmd::Clip(path) => clip(path),
+        Cmd::Meetings => meetings(),
+        Cmd::Notes(folder) => match crate::meeting::notes::transcribe(&folder) {
+            Ok(path) => {
+                println!("{}", path.display());
+                0
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                1
+            }
+        },
+        Cmd::Tap(seconds, path, bundle) => tap(seconds, path, bundle),
+    }
+}
+
+fn tap(seconds: u64, path: PathBuf, bundle: Option<String>) -> i32 {
+    let objects = if let Some(bundle) = bundle {
+        let processes = match crate::meeting::holders::processes() {
+            Ok(processes) => processes,
+            Err(error) => {
+                eprintln!("{error}");
+                return 1;
+            }
+        };
+        let objects = processes
+            .into_iter()
+            .filter(|process| {
+                process.bundle_id.as_deref().is_some_and(|id| {
+                    id == bundle
+                        || id
+                            .strip_prefix(&bundle)
+                            .is_some_and(|rest| rest.starts_with('.'))
+                })
+            })
+            .map(|process| process.object)
+            .collect::<Vec<_>>();
+        if objects.is_empty() {
+            eprintln!("no audio processes match {bundle}");
+            return 1;
+        }
+        objects
+    } else {
+        Vec::new()
+    };
+    let recording = match crate::meeting::tap::start(&objects, &path) {
+        Ok(recording) => recording,
+        Err(error) => {
+            eprintln!("{error}");
+            return 1;
+        }
+    };
+    std::thread::sleep(Duration::from_secs(seconds));
+    drop(recording);
+    match crate::mic::Audio16k::from_wav(&path) {
+        Ok(audio) => {
+            let peak = audio
+                .samples()
+                .iter()
+                .map(|sample| sample.abs())
+                .fold(0.0_f32, f32::max);
+            println!(
+                "wrote {}: {:.3}s, peak {:.4}",
+                path.display(),
+                audio.seconds(),
+                peak
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            1
+        }
+    }
+}
+
+fn meetings() -> i32 {
+    use crate::meeting::{holders, Detector, Event, Kind};
+
+    let mut detector = Detector::default();
+    let mut previous = None;
+    loop {
+        let current = match holders::mic_holders() {
+            Ok(current) => current,
+            Err(error) => {
+                eprintln!("{error}");
+                return 1;
+            }
+        };
+        let mut holder_set = current.clone();
+        holder_set.sort_by(|a, b| (a.pid, &a.bundle_id).cmp(&(b.pid, &b.bundle_id)));
+        if previous.as_ref() != Some(&holder_set) {
+            if current.is_empty() {
+                println!("holders: none");
+            } else {
+                let summary = current
+                    .iter()
+                    .map(|holder| {
+                        format!(
+                            "{} {}",
+                            holder.pid,
+                            holder.bundle_id.as_deref().unwrap_or("-")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("holders: {summary}");
+            }
+            previous = Some(holder_set);
+        }
+        let seen = crate::meeting::classify(&current).map(|(_, app)| app);
+        match detector.observe(seen, Instant::now()) {
+            Some(Event::Started(app)) => {
+                let kind = match app.kind {
+                    Kind::Native => "native",
+                    Kind::Browser => "browser",
+                };
+                println!("meeting started: {} ({kind})", app.name);
+            }
+            Some(Event::Ended(app)) => println!("meeting ended: {}", app.name),
+            None => {}
+        }
+        std::thread::sleep(Duration::from_secs(1));
     }
 }
 

@@ -15,7 +15,7 @@ tauri-build = { version = "2", features = [] }
 cc = "1"
 
 [dependencies]
-tauri = { version = "2.11", features = ["tray-icon", "macos-private-api", "image-png"] }
+tauri = { version = "2.11", features = ["tray-icon", "macos-private-api", "image-png", "protocol-asset"] }
 tauri-plugin-global-shortcut = "2.3"
 tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 serde = { version = "1", features = ["derive"] }
