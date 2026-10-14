@@ -7,6 +7,7 @@
 use std::ffi::{c_char, c_int, CString};
 use std::sync::OnceLock;
 
+#[derive(Debug, PartialEq)]
 pub enum Row {
     /// A footnote belonging to the group above it. No space of its own.
     Hint(String),
@@ -60,13 +61,18 @@ extern "C" fn picked(id: *const c_char) {
         return;
     };
     match handler(id) {
-        Some(rows) if matches!(id, "trigger-settings" | "permission-settings") => {
+        Some(rows)
+            if matches!(
+                id,
+                "trigger-settings" | "permission-settings" | "dictionary"
+            ) =>
+        {
             let source = CString::new(id).unwrap_or_default();
             native(&rows, |ptr, count| unsafe {
                 see_menu_show_submenu(ptr, count, source.as_ptr())
             });
         }
-        Some(rows) if id.starts_with("trigger-") => {
+        Some(rows) if id.starts_with("trigger-") || id.starts_with("dictionary-") => {
             native(&rows, |ptr, count| unsafe {
                 see_menu_update_submenu(ptr, count)
             });

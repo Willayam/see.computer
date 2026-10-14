@@ -191,6 +191,7 @@ impl Ledger {
         }
     }
 
+    #[cfg(test)]
     pub fn off() -> Ledger {
         let (tx, rx) = mpsc::channel();
         drop(rx);

@@ -7,6 +7,7 @@ mod config;
 mod engine;
 mod eval;
 mod filler;
+mod fix;
 mod history;
 mod hotkeys;
 mod learn;
@@ -95,7 +96,7 @@ fn main() {
             pill: pill_tx,
             trail: session::Trail::from_env(),
             history: history.clone(),
-            ledger,
+            ledger: ledger.clone(),
             sharing: sharing.clone(),
             status: status.clone(),
             gesture: gesture.clone(),
@@ -108,6 +109,7 @@ fn main() {
     let setup_trigger = trigger.clone();
     let setup_gesture = gesture;
     let setup_history = history;
+    let setup_ledger = ledger;
     let setup_status = status;
     let app = tauri::Builder::default()
         .plugin(hotkeys::plugin(tx.clone()))
@@ -132,6 +134,7 @@ fn main() {
                     trigger: setup_trigger.clone(),
                     pill: tray_pill_tx,
                     history: setup_history,
+                    ledger: setup_ledger,
                     status: setup_status,
                     sharing,
                     updater,

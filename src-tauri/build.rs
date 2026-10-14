@@ -6,6 +6,11 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=AppKit");
     println!("cargo:rerun-if-changed=native/menu.m");
     cc::Build::new()
+        .file("native/fix.m")
+        .flag("-fobjc-arc")
+        .compile("seefix");
+    println!("cargo:rerun-if-changed=native/fix.m");
+    cc::Build::new()
         .file("native/frame.m")
         .flag("-fobjc-arc")
         .compile("scframe");

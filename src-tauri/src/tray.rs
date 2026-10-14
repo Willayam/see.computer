@@ -7,6 +7,7 @@ use tauri_plugin_autostart::ManagerExt;
 
 use crate::config::Config;
 use crate::history::History;
+use crate::ledger::{Learning, Ledger, Source};
 use crate::menu::{self, Row};
 use crate::pill::{Notice, PillEvent};
 use crate::recents::{self, Payload};
@@ -43,6 +44,23 @@ const PANES: [(&str, &str, &str); 4] = [
 ];
 
 const RECENT_IDS: [&str; 5] = ["recent-0", "recent-1", "recent-2", "recent-3", "recent-4"];
+const WAIT_IDS: [&str; 5] = [
+    "dictionary-wait-0",
+    "dictionary-wait-1",
+    "dictionary-wait-2",
+    "dictionary-wait-3",
+    "dictionary-wait-4",
+];
+const LEARNED_IDS: [&str; 8] = [
+    "dictionary-learned-0",
+    "dictionary-learned-1",
+    "dictionary-learned-2",
+    "dictionary-learned-3",
+    "dictionary-learned-4",
+    "dictionary-learned-5",
+    "dictionary-learned-6",
+    "dictionary-learned-7",
+];
 const WARNING: &str = "exclamationmark.triangle.fill";
 /// Everything the panel is drawn from and everything a pick needs. Rust owns
 /// the whole menu state; the recent-row payloads live here so the native side
@@ -54,11 +72,14 @@ struct Panel {
     trigger: Arc<Mutex<Trigger>>,
     pill: Sender<PillEvent>,
     history: History,
+    ledger: Ledger,
     sharing: crate::sharing::Sharing,
     updater: crate::updater::Updater,
     status: Arc<Mutex<EngineStatus>>,
     settings_expanded: Arc<Mutex<bool>>,
     payloads: Arc<Mutex<Vec<Payload>>>,
+    waiting: Arc<Mutex<Vec<String>>>,
+    learned: Arc<Mutex<Vec<String>>>,
 }
 
 pub struct Wiring {
@@ -66,6 +87,7 @@ pub struct Wiring {
     pub trigger: Arc<Mutex<Trigger>>,
     pub pill: Sender<PillEvent>,
     pub history: History,
+    pub ledger: Ledger,
     pub status: Arc<Mutex<EngineStatus>>,
     pub sharing: crate::sharing::Sharing,
     pub updater: crate::updater::Updater,
@@ -77,6 +99,7 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
         trigger,
         pill,
         history,
+        ledger,
         status,
         sharing,
         updater,
@@ -87,11 +110,14 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
         trigger,
         pill,
         history,
+        ledger,
         sharing,
         updater,
         status,
         settings_expanded: Arc::new(Mutex::new(false)),
         payloads: Arc::new(Mutex::new(Vec::new())),
+        waiting: Arc::new(Mutex::new(Vec::new())),
+        learned: Arc::new(Mutex::new(Vec::new())),
     };
     let picked = panel.clone();
     menu::on_pick(move |id| picked.pick(id));
@@ -137,6 +163,7 @@ impl Panel {
         *self.payloads.lock().unwrap_or_else(PoisonError::into_inner) = payloads;
 
         rows.push(Row::Separator);
+        rows.push(submenu("dictionary", "Dictionary"));
         let settings_expanded = *self
             .settings_expanded
             .lock()
@@ -256,7 +283,43 @@ impl Panel {
         rows
     }
 
+    fn dictionary_rows(&self) -> Vec<Row> {
+        let (rows, waiting, learned) = dictionary_rows(&self.ledger.learning());
+        *self.waiting.lock().unwrap_or_else(PoisonError::into_inner) = waiting;
+        *self.learned.lock().unwrap_or_else(PoisonError::into_inner) = learned;
+        rows
+    }
+
     fn pick(&self, id: &str) -> Option<Vec<Row>> {
+        if let Some(index) = WAIT_IDS.iter().position(|row| *row == id) {
+            if let Some(term) = self
+                .waiting
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(index)
+                .cloned()
+            {
+                self.ledger.teach(&term);
+                self.ledger.flush();
+            }
+            return Some(self.dictionary_rows());
+        }
+        if let Some(index) = LEARNED_IDS.iter().position(|row| *row == id) {
+            if let Some(term) = self
+                .learned
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(index)
+                .cloned()
+            {
+                self.ledger.forget(&term);
+                self.ledger.flush();
+                let _ = self
+                    .pill
+                    .send(PillEvent::Flash(Notice::Info(format!("Forgot \"{term}\""))));
+            }
+            return Some(self.dictionary_rows());
+        }
         if let Some(index) = RECENT_IDS.iter().position(|recent_id| *recent_id == id) {
             self.copy_recent(index);
             return None;
@@ -276,6 +339,38 @@ impl Panel {
             return Some(self.trigger_rows());
         }
         match id {
+            "dictionary" => Some(self.dictionary_rows()),
+            "dictionary-fix" => {
+                if let Some((dictation, text)) = self.ledger.learning().last {
+                    let ledger = self.ledger.clone();
+                    let app = self.app.clone();
+                    std::thread::spawn(move || {
+                        let _ = app.run_on_main_thread(move || {
+                            if let Some(edited) = crate::fix::prompt(&text) {
+                                if edited.trim() != text.trim() {
+                                    ledger.corrected(&dictation, edited.trim(), Source::Manual);
+                                }
+                            }
+                        });
+                    });
+                }
+                None
+            }
+            "dictionary-open" => {
+                let path = crate::boost::Lexicon::default_path();
+                if !path.exists() {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if let Err(error) =
+                        std::fs::write(&path, "# see.computer vocabulary\n# One term per line\n")
+                    {
+                        eprintln!("could not create vocabulary: {error}");
+                    }
+                }
+                open_path(path);
+                None
+            }
             "sharing-toggle" => {
                 self.sharing.set_enabled(!self.sharing.enabled());
                 self.save_config();
@@ -389,6 +484,65 @@ fn item(id: &'static str, label: &str, checked: bool, symbol: Option<&'static st
     }
 }
 
+fn dictionary_rows(learning: &Learning) -> (Vec<Row>, Vec<String>, Vec<String>) {
+    let count = learning.learned.len();
+    let summary = match count {
+        0 => "Learns from words you fix".to_owned(),
+        1 => "Learned 1 word from your fixes".to_owned(),
+        _ => format!("Learned {count} words from your fixes"),
+    };
+    let mut rows = vec![
+        Row::Hint(summary),
+        item(
+            if learning.last.is_some() {
+                "dictionary-fix"
+            } else {
+                ""
+            },
+            "Fix Last Dictation…",
+            false,
+            Some("pencil"),
+        ),
+        item("dictionary-open", "Open Vocabulary", false, None),
+    ];
+    let waiting: Vec<_> = learning
+        .waiting
+        .iter()
+        .take(WAIT_IDS.len())
+        .map(|entry| entry.term.clone())
+        .collect();
+    if !waiting.is_empty() {
+        rows.push(Row::Separator);
+        rows.push(Row::Hint("Seen once. Click to learn now".to_owned()));
+        for (index, entry) in learning.waiting.iter().take(WAIT_IDS.len()).enumerate() {
+            let heard = entry
+                .heard
+                .first()
+                .map_or(String::new(), |heard| format!("  · heard \"{heard}\""));
+            rows.push(item(
+                WAIT_IDS[index],
+                &format!("{}{heard}", entry.term),
+                false,
+                None,
+            ));
+        }
+    }
+    let learned: Vec<_> = learning
+        .learned
+        .iter()
+        .take(LEARNED_IDS.len())
+        .cloned()
+        .collect();
+    if !learned.is_empty() {
+        rows.push(Row::Separator);
+        rows.push(Row::Hint("Learned. Click to forget".to_owned()));
+        for (index, term) in learned.iter().enumerate() {
+            rows.push(item(LEARNED_IDS[index], term, true, None));
+        }
+    }
+    (rows, waiting, learned)
+}
+
 fn submenu(id: &'static str, label: &str) -> Row {
     Row::Submenu {
         id,
@@ -427,4 +581,61 @@ fn current_trigger(trigger: &Mutex<Trigger>) -> Trigger {
 
 fn open_path(path: impl AsRef<std::ffi::OsStr>) {
     let _ = std::process::Command::new("open").arg(path).spawn();
+}
+
+#[cfg(test)]
+mod dictionary_tests {
+    use super::*;
+
+    #[test]
+    fn empty_learning() {
+        let (rows, waiting, learned) = dictionary_rows(&Learning::default());
+        assert_eq!(rows[0], Row::Hint("Learns from words you fix".into()));
+        assert_eq!(
+            rows[1],
+            item("", "Fix Last Dictation…", false, Some("pencil"))
+        );
+        assert!(waiting.is_empty() && learned.is_empty());
+    }
+
+    #[test]
+    fn learned_rows_are_checked_and_limited() {
+        let mut learning = Learning {
+            learned: vec!["Tauri".into()],
+            ..Default::default()
+        };
+        let (rows, _, payloads) = dictionary_rows(&learning);
+        assert_eq!(rows[0], Row::Hint("Learned 1 word from your fixes".into()));
+        assert!(rows.contains(&item(LEARNED_IDS[0], "Tauri", true, None)));
+        assert_eq!(payloads, ["Tauri"]);
+        learning.learned = (0..12).map(|n| format!("Term {n}")).collect();
+        let (rows, _, payloads) = dictionary_rows(&learning);
+        assert_eq!(payloads.len(), 8);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, Row::Item { checked: true, .. }))
+                .count(),
+            8
+        );
+    }
+
+    #[test]
+    fn waiting_row_shows_heard_form() {
+        let learning = Learning {
+            waiting: vec![crate::learn::Waiting {
+                term: "Supabase".into(),
+                heard: vec!["superbase".into()],
+                from: vec![],
+            }],
+            ..Default::default()
+        };
+        let (rows, waiting, _) = dictionary_rows(&learning);
+        assert!(rows.contains(&item(
+            WAIT_IDS[0],
+            "Supabase  · heard \"superbase\"",
+            false,
+            None
+        )));
+        assert_eq!(waiting, ["Supabase"]);
+    }
 }
