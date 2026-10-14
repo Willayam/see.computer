@@ -105,6 +105,7 @@ const TIMEOUT_SECONDS: f32 = 0.25;
 pub struct Observation {
     pub focus: Focus,
     pub app: String,
+    pub bundle: String,
 }
 
 /// Appends one line per dictation recording which app was frontmost and what was
@@ -143,7 +144,7 @@ pub fn log(observation: &Observation, held: bool) {
     );
 }
 
-fn frontmost() -> Option<(i32, String)> {
+fn frontmost() -> Option<(i32, String, String)> {
     unsafe {
         use objc2::msg_send;
         use objc2::runtime::{AnyClass, AnyObject};
@@ -161,30 +162,33 @@ fn frontmost() -> Option<(i32, String)> {
         if pid <= 0 {
             return None;
         }
-        let name: *mut AnyObject = msg_send![app, localizedName];
-        let label = if name.is_null() {
-            String::new()
-        } else {
-            let utf8: *const std::ffi::c_char = msg_send![name, UTF8String];
-            if utf8.is_null() {
-                String::new()
-            } else {
-                std::ffi::CStr::from_ptr(utf8)
-                    .to_string_lossy()
-                    .into_owned()
-            }
-        };
-        Some((pid, label))
+        let label = ns_string(msg_send![app, localizedName]);
+        let bundle = ns_string(msg_send![app, bundleIdentifier]);
+        Some((pid, label, bundle))
+    }
+}
+
+unsafe fn ns_string(string: *mut objc2::runtime::AnyObject) -> String {
+    use objc2::msg_send;
+    if string.is_null() {
+        return String::new();
+    }
+    let utf8: *const std::ffi::c_char = msg_send![string, UTF8String];
+    if utf8.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
     }
 }
 
 /// Reads no text. Only asks whether a caret could be placed, so nothing the
 /// user has written is ever pulled out of their app.
 pub fn observe() -> Observation {
-    let (pid, app) = frontmost().unwrap_or((0, "?".to_owned()));
+    let (pid, app, bundle) = frontmost().unwrap_or((0, "?".to_owned(), String::new()));
     Observation {
         focus: classify(pid),
         app,
+        bundle,
     }
 }
 

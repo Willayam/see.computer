@@ -70,6 +70,10 @@ impl History {
         self.enabled.load(Ordering::Relaxed)
     }
 
+    pub fn enabled_flag(&self) -> Arc<AtomicBool> {
+        self.enabled.clone()
+    }
+
     pub fn set_enabled(&self, on: bool) {
         self.enabled.store(on, Ordering::Relaxed);
     }

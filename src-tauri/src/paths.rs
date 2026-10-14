@@ -29,6 +29,10 @@ pub fn models() -> PathBuf {
     app_support().join("models/parakeet-tdt-0.6b-v3-onnx/int8")
 }
 
+pub fn ledger() -> PathBuf {
+    app_support().join("ledger")
+}
+
 /// One line per dictation recording what Accessibility said about the frontmost
 /// app. Written only while `SEE_COMPUTER_FOCUS_LOG` is set.
 pub fn focus_log() -> PathBuf {

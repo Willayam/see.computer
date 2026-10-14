@@ -83,6 +83,7 @@ fn test_controller_with_fixture(
         pill: pill_tx,
         trail: Trail::off(),
         history: crate::history::History::off(),
+        ledger: crate::ledger::Ledger::off(),
         status: std::sync::Arc::new(std::sync::Mutex::new(EngineStatus::Ready)),
         gesture: std::sync::Arc::default(),
     });
@@ -92,6 +93,41 @@ fn test_controller_with_fixture(
 
 fn test_controller() -> (Controller, Receiver<PillEvent>, std::path::PathBuf) {
     test_controller_with_audio(1.0)
+}
+
+#[test]
+fn canned_dictation_records_audio_in_ledger() {
+    let (mut controller, _pill, dir) = test_controller();
+    let root = dir.join("ledger");
+    controller.ledger = crate::ledger::Ledger::start_at(
+        root.clone(),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        500,
+    );
+    controller.step(Msg::MainPressed);
+    controller.step(Msg::MainReleased);
+    let job = match controller.session {
+        Session::Transcribing { job, .. } => job,
+        _ => panic!("expected transcription"),
+    };
+    controller.step(Msg::Engine(engine::Event::Done(
+        job,
+        Ok(engine::Transcription {
+            audio: Some(mic::Audio16k::from_samples(vec![0.1; 160])),
+            text: Text::parse("hello world"),
+            segments: Vec::new(),
+        }),
+    )));
+    let turn = match controller.session {
+        Session::Pasting { turn, .. } => turn,
+        _ => panic!("expected paste"),
+    };
+    controller.step(Msg::Paste(turn, paste::Outcome(Ok(paste::Landing::Pasted))));
+    controller.ledger.flush();
+    let events = crate::ledger::read(&root);
+    assert!(
+        matches!(&events[0], crate::ledger::Event::Dictated { text, audio: Some(path), .. } if text == "hello world" && root.join(path).exists())
+    );
 }
 
 #[test]
@@ -107,6 +143,7 @@ fn dictation_table_reaches_paste_and_idle() {
     controller.step(Msg::Engine(engine::Event::Done(
         job,
         Ok(engine::Transcription {
+            audio: None,
             text: Text::parse("hello world"),
             segments: Vec::new(),
         }),
@@ -133,6 +170,7 @@ fn nothing_focused_shows_the_words_instead_of_losing_them() {
     controller.step(Msg::Engine(engine::Event::Done(
         job,
         Ok(engine::Transcription {
+            audio: None,
             text: Text::parse("hello world"),
             segments: Vec::new(),
         }),
@@ -347,6 +385,7 @@ fn zero_capture_release_uses_the_unchanged_dictation_path() {
     controller.step(Msg::Engine(engine::Event::Done(
         job,
         Ok(engine::Transcription {
+            audio: None,
             text: Text::parse("hello world"),
             segments: Vec::new(),
         }),
@@ -379,6 +418,7 @@ fn shot_to_sentence_offset_includes_mic_preroll() {
     );
 
     let transcription = engine::Transcription {
+        audio: None,
         text: Text::parse("First sentence. Second sentence."),
         segments: vec![
             engine::Segment {

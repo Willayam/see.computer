@@ -203,6 +203,7 @@ fn shot_markdown_pairs_each_image_with_its_sentence() {
         }),
     ];
     let transcription = Transcription {
+        audio: None,
         text: Text::parse("First thing. Second thing."),
         segments: vec![
             segment(0, 4_000, "First thing."),
@@ -232,6 +233,7 @@ fn mixed_session_keeps_one_plain_paste_and_interleaves_captures() {
     let mov = dir.with_extension("mov");
     std::fs::write(&mov, b"not a movie").unwrap();
     let transcription = Transcription {
+        audio: None,
         text: Text::parse("First thing. Second thing."),
         segments: vec![
             segment(0, 4_000, "First thing."),
@@ -330,6 +332,7 @@ fn one_clip_without_shots_uses_the_nested_layout() {
     let mov = root.join("capture.mov");
     std::fs::write(&mov, b"not a movie").unwrap();
     let transcription = Transcription {
+        audio: None,
         text: Text::parse("Keep the common layout."),
         segments: vec![segment(0, 1_000, "Keep the common layout.")],
     };

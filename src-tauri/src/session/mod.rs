@@ -152,6 +152,7 @@ pub struct Wiring {
     pub pill: Sender<PillEvent>,
     pub trail: Trail,
     pub history: crate::history::History,
+    pub ledger: crate::ledger::Ledger,
     pub sharing: crate::sharing::Sharing,
     pub status: std::sync::Arc<std::sync::Mutex<EngineStatus>>,
     pub gesture: std::sync::Arc<trigger::Gesture>,
@@ -187,6 +188,7 @@ struct Controller {
     pill: Sender<PillEvent>,
     trail: Trail,
     history: crate::history::History,
+    ledger: crate::ledger::Ledger,
     sharing: crate::sharing::Sharing,
     updating: bool,
     share_take: bool,
@@ -219,6 +221,7 @@ impl Controller {
             pill: wiring.pill,
             trail: wiring.trail,
             history: wiring.history,
+            ledger: wiring.ledger,
             sharing: wiring.sharing,
             updating: false,
             share_take: false,
@@ -655,8 +658,16 @@ impl Controller {
                 Msg::Engine(engine::Event::Done(done, _result)),
             ) if job != done => state,
             (Session::Transcribing { .. }, Msg::Engine(engine::Event::Done(_, result))) => {
-                match result.map(|transcription| transcription.text) {
-                    Ok(Some(text)) => {
+                match result {
+                    Ok(engine::Transcription {
+                        text: Some(text),
+                        audio,
+                        ..
+                    }) => {
+                        let id = self.ledger.mint();
+                        if let Some(audio) = audio {
+                            self.ledger.dictated(&id, text.as_str(), audio);
+                        }
                         self.history.record(text.as_str());
                         {
                             let held = crate::pill::Held {
@@ -668,10 +679,11 @@ impl Controller {
                                 text.followed_by_space(),
                                 paste::Clipboard::RestorePrior,
                                 held,
+                                Some(id),
                             )
                         }
                     }
-                    Ok(None) => {
+                    Ok(_) => {
                         self.finish(Notice::NothingHeard);
                         Session::Idle
                     }
@@ -725,7 +737,12 @@ impl Controller {
                         note: packaged.note.clone(),
                         clipboard: packaged.paste.clone(),
                     };
-                    self.begin_paste(Text::literal(packaged.paste), paste::Clipboard::Keep, held)
+                    self.begin_paste(
+                        Text::literal(packaged.paste),
+                        paste::Clipboard::Keep,
+                        held,
+                        None,
+                    )
                 }
                 Err(error) => {
                     self.finish(Notice::ScreenRecordingFailed(error));
@@ -974,12 +991,14 @@ impl Controller {
         text: Text,
         clipboard: paste::Clipboard,
         held: crate::pill::Held,
+        dictation: Option<crate::ledger::Id>,
     ) -> Session {
         let turn = self.mint_turn();
         let tx = self.tx.clone();
-        self.paste.paste(text, clipboard, move |outcome| {
-            let _ = tx.send(Msg::Paste(turn, outcome));
-        });
+        self.paste
+            .paste(text, clipboard, dictation, move |outcome| {
+                let _ = tx.send(Msg::Paste(turn, outcome));
+            });
         Session::Pasting {
             turn,
             since: Instant::now(),

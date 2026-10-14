@@ -137,6 +137,7 @@ impl Engine for Parakeet {
                 self.boost.as_mut().map(|boost| boost as &mut dyn TokenBias),
             )
             .map(|result| Transcription {
+                audio: None,
                 segments: result
                     .tokens
                     .iter()
