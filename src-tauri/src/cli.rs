@@ -10,6 +10,9 @@ pub enum Cmd {
     Transcribe(PathBuf),
     TranscribeLive(PathBuf),
     Clip(PathBuf),
+    /// The manifest, and the vocabulary to score terms against when it should
+    /// differ from the one the decoder is boosting, as in a boost-off run.
+    Eval(PathBuf, Option<PathBuf>),
 }
 
 pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
@@ -20,6 +23,9 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
             None => None,
         },
         Some("clip") => args.next().map(PathBuf::from).map(Cmd::Clip),
+        Some("eval") => args
+            .next()
+            .map(|manifest| Cmd::Eval(manifest.into(), args.next().map(PathBuf::from))),
         _ => None,
     }
 }
@@ -29,6 +35,7 @@ pub fn run(cmd: Cmd) -> i32 {
         Cmd::Transcribe(path) => transcribe(path),
         Cmd::TranscribeLive(path) => transcribe_live(path),
         Cmd::Clip(path) => clip(path),
+        Cmd::Eval(path, terms) => eval(path, terms),
     }
 }
 
@@ -41,19 +48,9 @@ fn transcribe_live(path: PathBuf) -> i32 {
         }
     };
     eprintln!("audio: {:.3}s", audio.seconds());
-    let split = audio
-        .samples()
-        .len()
-        .saturating_sub(15 * crate::mic::RATE as usize);
-    let head = audio.samples()[..split].to_vec();
-    let tail = crate::mic::Audio16k::from_samples(audio.samples()[split..].to_vec());
     let (result, inference) = match on_engine_thread(move |engine| {
-        let mut utterance = crate::engine::Utterance::default();
-        for block in head.chunks(crate::mic::RATE as usize / 5) {
-            utterance.feed(engine, &crate::mic::Audio16k::from_samples(block.to_vec()));
-        }
         let inference_start = Instant::now();
-        let result = utterance.finish(engine, &tail);
+        let result = replay_live(engine, &audio);
         (result, inference_start.elapsed())
     }) {
         Ok(result) => result,
@@ -64,6 +61,106 @@ fn transcribe_live(path: PathBuf) -> i32 {
         inference.as_secs_f64() * 1_000.0
     );
     print_text(result)
+}
+
+fn replay_live(
+    engine: &mut dyn crate::engine::Engine,
+    audio: &crate::mic::Audio16k,
+) -> Result<Transcription, EngineError> {
+    let split = audio
+        .samples()
+        .len()
+        .saturating_sub(15 * crate::mic::RATE as usize);
+    let mut utterance = crate::engine::Utterance::default();
+    for block in audio.samples()[..split].chunks(crate::mic::RATE as usize / 5) {
+        utterance.feed(engine, &crate::mic::Audio16k::from_samples(block.to_vec()));
+    }
+    let tail = crate::mic::Audio16k::from_samples(audio.samples()[split..].to_vec());
+    utterance.finish(engine, &tail)
+}
+
+fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
+    let manifest = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("{}: {error}", path.display());
+            return 1;
+        }
+    };
+    let (clips, errors) = crate::eval::parse_manifest(&path, &manifest);
+    for error in errors {
+        eprintln!("{error}");
+    }
+    if clips.is_empty() {
+        return 1;
+    }
+    let lexicon =
+        crate::boost::Lexicon::load(terms.unwrap_or_else(crate::boost::Lexicon::default_path));
+    let terms: Vec<String> = lexicon
+        .terms()
+        .iter()
+        .map(|term| term.text.clone())
+        .collect();
+    let scored = match on_engine_thread(move |engine| {
+        let mut total = crate::eval::Score::default();
+        let mut count = 0;
+        for clip in clips {
+            let audio = match crate::mic::Audio16k::from_wav(&clip.path) {
+                Ok(audio) => audio,
+                Err(error) => {
+                    eprintln!("line {}: {error}", clip.line);
+                    continue;
+                }
+            };
+            let start = Instant::now();
+            let hypothesis = match replay_live(engine, &audio) {
+                Ok(transcription) => transcription
+                    .text
+                    .map(|text| text.as_str().to_owned())
+                    .unwrap_or_default(),
+                Err(error) => {
+                    eprintln!("line {}: {error}", clip.line);
+                    continue;
+                }
+            };
+            let score = crate::eval::score(&clip.reference, &hypothesis, &terms);
+            println!(
+                "{:.1}\t{}/{}\t{}\t{}",
+                score.wer() * 100.0,
+                score.hits,
+                score.occurrences,
+                clip.written_path,
+                hypothesis
+            );
+            eprintln!(
+                "clip {}: {:.3} ms",
+                clip.line,
+                start.elapsed().as_secs_f64() * 1_000.0
+            );
+            total.add(&score);
+            count += 1;
+        }
+        if count > 0 {
+            println!(
+                "clips={count} words={} errors={} wer={:.2} terms={}/{} insertions={}",
+                total.words,
+                total.errors,
+                total.wer() * 100.0,
+                total.hits,
+                total.occurrences,
+                total.insertions
+            );
+        }
+        count
+    }) {
+        Ok(count) => count,
+        Err(code) => return code,
+    };
+    if scored > 0 {
+        0
+    } else {
+        1
+    }
 }
 
 fn transcribe(path: PathBuf) -> i32 {
