@@ -17,6 +17,64 @@ use std::time::SystemTime;
 
 use parakeet_rs::TokenBias;
 
+pub(crate) fn occurrences(text: &str, term: &str, case_sensitive: bool) -> usize {
+    if term.is_empty() {
+        return 0;
+    }
+    let (haystack, needle) = if case_sensitive {
+        (text.to_owned(), term.to_owned())
+    } else {
+        (text.to_lowercase(), term.to_lowercase())
+    };
+    haystack
+        .match_indices(&needle)
+        .filter(|(start, matched)| {
+            let before = haystack[..*start].chars().next_back();
+            let after = haystack[start + matched.len()..].chars().next();
+            before.is_none_or(|ch| !ch.is_alphanumeric())
+                && after.is_none_or(|ch| !ch.is_alphanumeric())
+        })
+        .count()
+}
+
+pub fn merge(plain: &str, boosted: &str, terms: &[Term]) -> String {
+    let a: Vec<_> = plain.split_whitespace().collect();
+    let b: Vec<_> = boosted.split_whitespace().collect();
+    let gained = |left: &str, right: &str| {
+        terms
+            .iter()
+            .any(|term| occurrences(right, &term.text, true) > occurrences(left, &term.text, true))
+    };
+    let mut out = Vec::new();
+    let (mut ai, mut bi) = (0, 0);
+    let mut boosted_hunk = false;
+    for (x, y) in crate::learn::alignment(&a, &b)
+        .into_iter()
+        .chain(std::iter::once((a.len(), b.len())))
+    {
+        let left = a[ai..x].join(" ");
+        let right = b[bi..y].join(" ");
+        let gain = gained(&left, &right);
+        if !a[ai..x].is_empty() || !b[bi..y].is_empty() {
+            boosted_hunk = gain;
+        }
+        out.extend(if gain { &b[bi..y] } else { &a[ai..x] });
+        if x < a.len() {
+            out.push(if gained(a[x], b[y]) || (boosted_hunk && a[x] != b[y]) {
+                b[y]
+            } else {
+                a[x]
+            });
+            if a[x] == b[y] {
+                boosted_hunk = false;
+            }
+        }
+        ai = x + 1;
+        bi = y + 1;
+    }
+    out.join(" ")
+}
+
 /// How far below the model's own best token a candidate may sit and still be
 /// eligible for a bonus, in the units the joint logits happen to use.
 ///
@@ -481,6 +539,32 @@ mod tests {
             text: text.to_owned(),
             weight: 1.0,
         }
+    }
+
+    #[test]
+    fn merge_keeps_only_hunks_that_gain_a_term() {
+        assert_eq!(
+            merge("Run PNPM install", "Run pnpm install", &[term("pnpm")]),
+            "Run pnpm install"
+        );
+        assert_eq!(
+            merge(
+                "Track the signup funnel",
+                "Crack the signup funnel",
+                &[term("Claude")]
+            ),
+            "Track the signup funnel"
+        );
+        assert_eq!(
+            merge("same words", "same words", &[term("words")]),
+            "same words"
+        );
+        assert_eq!(merge("", "unrelated words", &[term("Claude")]), "");
+        // A changed hunk is selected as a whole when it gains a term.
+        assert_eq!(
+            merge("context clear your", "Convex Clear Your", &[term("Convex")]),
+            "Convex Clear Your"
+        );
     }
 
     #[test]

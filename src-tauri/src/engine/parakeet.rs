@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use parakeet_rs::{TimestampMode, TokenBias};
 
-use crate::boost::{Boost, Lexicon, Pieces};
+use crate::boost::{merge, Boost, Lexicon, Pieces};
 
 use super::{Engine, EngineError, ModelFiles, Segment, Transcription};
 use crate::mic::Audio16k;
@@ -128,30 +128,61 @@ impl Engine for Parakeet {
         if self.lexicon.refresh() {
             self.rebuild_boost();
         }
-        self.model
-            .transcribe_samples_with_bias(
-                audio.samples().to_vec(),
-                16_000,
-                1,
-                Some(TimestampMode::Sentences),
-                self.boost.as_mut().map(|boost| boost as &mut dyn TokenBias),
-            )
-            .map(|result| Transcription {
-                audio: None,
-                segments: result
-                    .tokens
-                    .iter()
-                    .filter_map(|token| {
-                        let text = self.lexicon.rewrite(&tidy(&token.text));
-                        (!text.is_empty()).then(|| Segment {
-                            start_ms: (token.start.max(0.0) * 1000.0).round() as u64,
-                            end_ms: (token.end.max(0.0) * 1000.0).round() as u64,
-                            text,
-                        })
+        let pair =
+            self.boost.is_some() && std::env::var("SEE_COMPUTER_BOOST_MERGE").as_deref() != Ok("0");
+        let (plain, result) = if pair {
+            let (plain, boosted) = self
+                .model
+                .transcribe_samples_with_bias_pair(
+                    audio.samples().to_vec(),
+                    16_000,
+                    1,
+                    Some(TimestampMode::Sentences),
+                    self.boost.as_mut().expect("checked boost") as &mut dyn TokenBias,
+                )
+                .map_err(|error| EngineError::Inference(error.to_string()))?;
+            (Some(plain), boosted)
+        } else {
+            let result = self
+                .model
+                .transcribe_samples_with_bias(
+                    audio.samples().to_vec(),
+                    16_000,
+                    1,
+                    Some(TimestampMode::Sentences),
+                    self.boost.as_mut().map(|boost| boost as &mut dyn TokenBias),
+                )
+                .map_err(|error| EngineError::Inference(error.to_string()))?;
+            (None, result)
+        };
+        let matched_segments = plain
+            .as_ref()
+            .filter(|p| p.tokens.len() == result.tokens.len());
+        let text = plain.as_ref().map_or_else(
+            || result.text.clone(),
+            |p| merge(&p.text, &result.text, self.lexicon.terms()),
+        );
+        Ok(Transcription {
+            audio: None,
+            segments: result
+                .tokens
+                .iter()
+                .enumerate()
+                .filter_map(|(index, token)| {
+                    let source = matched_segments.map_or(token, |p| &p.tokens[index]);
+                    let raw = matched_segments.map_or_else(
+                        || token.text.clone(),
+                        |p| merge(&p.tokens[index].text, &token.text, self.lexicon.terms()),
+                    );
+                    let text = self.lexicon.rewrite(&tidy(&raw));
+                    (!text.is_empty()).then(|| Segment {
+                        start_ms: (source.start.max(0.0) * 1000.0).round() as u64,
+                        end_ms: (source.end.max(0.0) * 1000.0).round() as u64,
+                        text,
                     })
-                    .collect(),
-                text: Text::parse(self.lexicon.rewrite(&tidy(&result.text))),
-            })
-            .map_err(|error| EngineError::Inference(error.to_string()))
+                })
+                .collect(),
+            text: Text::parse(self.lexicon.rewrite(&tidy(&text))),
+        })
     }
 }

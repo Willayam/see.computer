@@ -76,25 +76,7 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn occurrences(text: &str, term: &str, case_sensitive: bool) -> usize {
-    if term.is_empty() {
-        return 0;
-    }
-    let (haystack, needle) = if case_sensitive {
-        (text.to_owned(), term.to_owned())
-    } else {
-        (text.to_lowercase(), term.to_lowercase())
-    };
-    haystack
-        .match_indices(&needle)
-        .filter(|(start, matched)| {
-            let before = haystack[..*start].chars().next_back();
-            let after = haystack[start + matched.len()..].chars().next();
-            before.is_none_or(|ch| !ch.is_alphanumeric())
-                && after.is_none_or(|ch| !ch.is_alphanumeric())
-        })
-        .count()
-}
+use crate::boost::occurrences;
 
 pub fn score(reference: &str, hypothesis: &str, terms: &[String]) -> Score {
     let reference_words = words(reference);

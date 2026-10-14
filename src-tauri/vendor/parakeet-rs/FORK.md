@@ -13,6 +13,8 @@ So this is upstream 0.3.7 verbatim plus one addition:
   and call it on the vocab slice of the logits before the argmax, then report each
   emitted token.
 - `src/parakeet_tdt.rs` — `transcribe_samples_with_bias`, the public entry point.
+- `src/model_tdt.rs` and `src/parakeet_tdt.rs` — paired plain and biased decoding
+  shares one encoder output and applies the same timestamp processing to both.
 - `src/lib.rs` — re-exports `TokenBias`.
 
 Everything else is untouched, examples and dev-dependencies aside. Keep it that way:
