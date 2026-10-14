@@ -347,7 +347,13 @@ pub fn promotions(events: &[Event], known: &[String], words: &Words) -> Vec<Prom
         for heard in heard_forms {
             let same: Vec<_> = sightings.iter().filter(|s| s.heard == heard).collect();
             let learned = done.is_some_and(|done| done.rules.contains(heard));
-            if weight(same.iter().copied()) >= 2 && !learned {
+            let ordinary = heard.split_whitespace().all(|word| words.knows(word));
+            let supported = if ordinary {
+                same.iter().map(|s| &s.id).collect::<HashSet<_>>().len() >= 3
+            } else {
+                weight(same.iter().copied()) >= 2
+            };
+            if supported && !learned {
                 rules.push(Promotion {
                     term: term.clone(),
                     heard: Some(heard.to_owned()),
@@ -529,14 +535,34 @@ mod tests {
             correction("1", "use poteto mode", Source::ReadBack),
             event("2", "potato mode"),
             correction("2", "poteto mode", Source::ReadBack),
+            event("3", "potato mode"),
+            correction("3", "poteto mode", Source::ReadBack),
         ];
         assert_eq!(
             promotions(&events, &["poteto".into()], &words),
             vec![Promotion {
                 term: "poteto".into(),
                 heard: Some("potato".into()),
-                from: vec![Id::test("1"), Id::test("2")]
+                from: vec![Id::test("1"), Id::test("2"), Id::test("3")]
             }]
+        );
+    }
+
+    #[test]
+    fn ordinary_heard_words_need_three_dictations() {
+        let words = Words::from_list(&["we", "use", "potato"]);
+        let mut events = vec![
+            event("1", "we use potato"),
+            correction("1", "we use Poteto", Source::Manual),
+        ];
+        assert_eq!(promotions(&events, &[], &words)[0].heard, None);
+        for id in ["2", "3"] {
+            events.push(event(id, "we use potato"));
+            events.push(correction(id, "we use Poteto", Source::ReadBack));
+        }
+        assert_eq!(
+            promotions(&events, &[], &words)[0].heard.as_deref(),
+            Some("potato")
         );
     }
 

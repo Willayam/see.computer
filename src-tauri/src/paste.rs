@@ -173,8 +173,12 @@ fn paste_loop(
         // between transcription finishing and the keystroke going out. Two AX
         // round trips at a 0.25s timeout each, so an unresponsive app can delay
         // the paste by up to half a second before we give up and paste anyway.
-        let observation = crate::target::observe();
-        let hold = observation.focus.holds_instead_of_pasting();
+        let mut observation = crate::target::observe();
+        // SEE_COMPUTER_PASTE=hold lets a verification run with the screen locked
+        // exercise everything but the keystroke, which would otherwise land in
+        // the lock screen's password field.
+        let hold = observation.focus.holds_instead_of_pasting()
+            || std::env::var("SEE_COMPUTER_PASTE").is_ok_and(|value| value == "hold");
         if hold {
             // No Cmd+V, and the prior clipboard is not restored, so the words
             // survive for the user to place. This is the whole fix: today a
@@ -194,12 +198,13 @@ fn paste_loop(
                     ledger.landed(id, &observation, Landing::Pasted);
                 }
                 if let Some(id) = job.dictation {
-                    if observation.focus != crate::target::Focus::NotEditable {
+                    if ledger.enabled() && observation.focus != crate::target::Focus::NotEditable {
                         readback.watch(crate::readback::Watch {
                             id,
                             pid: observation.pid,
                             bundle: observation.bundle.clone(),
                             pasted: job.text.as_str().trim().to_owned(),
+                            element: observation.element.take(),
                         });
                     }
                 }

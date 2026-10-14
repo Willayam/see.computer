@@ -65,6 +65,7 @@ pub enum Event {
 enum Command {
     Dictated(Event, crate::mic::Audio16k),
     Event(Event),
+    #[cfg(test)]
     Flush(mpsc::Sender<()>),
     Forget(String),
     Teach(String),
@@ -131,7 +132,12 @@ impl Ledger {
                         }
                         if append(&root, &event).is_ok() {
                             events.push(event);
-                            update_learning(&snapshot, &events, &vocabulary, &words);
+                            if let Some(Event::Dictated { id, text, .. }) = events.last() {
+                                snapshot
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .last = Some((id.clone(), text.clone()));
+                            }
                         }
                         let protected = corrected.keys().cloned().collect();
                         prune(&root, keep_audio, 50, &protected);
@@ -155,10 +161,14 @@ impl Ledger {
                             at: Local::now().to_rfc3339(),
                             term: term.clone(),
                         };
-                        if append(&root, &event).is_ok() {
-                            events.push(event);
-                            let _ = remove_term(&vocabulary.with_file_name("learned.md"), &term);
-                            update_learning(&snapshot, &events, &vocabulary, &words);
+                        match remove_term(&vocabulary.with_file_name("learned.md"), &term) {
+                            Ok(()) => {
+                                if append(&root, &event).is_ok() {
+                                    events.push(event);
+                                    update_learning(&snapshot, &events, &vocabulary, &words);
+                                }
+                            }
+                            Err(error) => eprintln!("could not forget {term}: {error}"),
                         }
                     }
                     Command::Teach(term) => {
@@ -177,6 +187,7 @@ impl Ledger {
                             update_learning(&snapshot, &events, &vocabulary, &words);
                         }
                     }
+                    #[cfg(test)]
                     Command::Flush(reply) => {
                         let _ = reply.send(());
                     }
@@ -209,6 +220,10 @@ impl Ledger {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
     pub fn forget(&self, term: &str) {
         let _ = self.tx.send(Command::Forget(term.to_owned()));
     }
@@ -281,6 +296,7 @@ impl Ledger {
         }
     }
 
+    #[cfg(test)]
     pub fn flush(&self) {
         let (tx, rx) = mpsc::channel();
         if self.tx.send(Command::Flush(tx)).is_ok() {
@@ -391,6 +407,11 @@ fn save_promotion(
         Err(_) => return,
     };
     if file.metadata().is_ok_and(|m| m.len() == 0) && file.write_all(HEADER.as_bytes()).is_err() {
+        return;
+    }
+    if fs::read(&path).is_ok_and(|bytes| !bytes.is_empty() && bytes.last() != Some(&b'\n'))
+        && file.write_all(b"\n").is_err()
+    {
         return;
     }
     if file.write_all(line.as_bytes()).is_err() {
@@ -541,6 +562,7 @@ mod tests {
             app: "Notes".into(),
             bundle: "com.apple.Notes".into(),
             focus: crate::target::Focus::Editable,
+            element: None,
         };
         ledger.landed(&id, &observation, crate::paste::Landing::Pasted);
         ledger.corrected(&id, "Tauri!", Source::ReadBack);
@@ -651,6 +673,20 @@ mod tests {
             .lines()
             .all(|l| l.starts_with('#')));
         assert!(ledger.learning().learned.is_empty());
+    }
+
+    #[test]
+    fn promotion_appends_after_unterminated_line() {
+        let (ledger, root) = fixture(500);
+        fs::write(root.join("learned.md"), "- Tauri").unwrap();
+        let id = ledger.mint();
+        ledger.dictated(&id, "superbase", crate::mic::Audio16k::silence(0.01));
+        ledger.corrected(&id, "Supabase", Source::Manual);
+        ledger.flush();
+        assert_eq!(
+            fs::read_to_string(root.join("learned.md")).unwrap(),
+            "- Tauri\n- superbase -> Supabase\n"
+        );
     }
 
     #[test]

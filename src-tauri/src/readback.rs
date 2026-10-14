@@ -17,6 +17,7 @@ pub struct Watch {
     /// Only for the diagnostic log, which must name an app across restarts.
     pub bundle: String,
     pub pasted: String,
+    pub element: Option<crate::target::Element>,
 }
 
 #[derive(Clone)]
@@ -305,7 +306,16 @@ fn log(watch: &Watch, opened: bool, outcome: &str) {
     }
 }
 fn finish(watch: &Watch, ledger: &Ledger, opened: bool, outcome: &str, last: Option<String>) {
+    if !ledger.enabled() {
+        return;
+    }
     if let Some(last) = last {
+        let n = watch.pasted.split_whitespace().count();
+        let words = last.split_whitespace().count();
+        if words > n + 3.max(n / 4) || words < n.saturating_sub(3.max(n / 2)) {
+            log(watch, opened, "rewritten");
+            return;
+        }
         let normalized = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
         if normalized(&last) != normalized(&watch.pasted) {
             ledger.corrected(&watch.id, &last, Source::ReadBack);
@@ -317,6 +327,9 @@ fn finish(watch: &Watch, ledger: &Ledger, opened: bool, outcome: &str, last: Opt
 }
 fn run(watch: Watch, ledger: &Ledger, rx: &mpsc::Receiver<Watch>) -> Option<Watch> {
     let deadline = Instant::now() + Duration::from_secs(90);
+    if !ledger.enabled() {
+        return None;
+    }
     match rx.recv_timeout(Duration::from_millis(250)) {
         Ok(next) => {
             log(&watch, false, "not-found");
@@ -325,14 +338,19 @@ fn run(watch: Watch, ledger: &Ledger, rx: &mpsc::Receiver<Watch>) -> Option<Watc
         Err(mpsc::RecvTimeoutError::Disconnected) => return None,
         Err(_) => {}
     }
-    let app = Cf(unsafe { AXUIElementCreateApplication(watch.pid) });
-    if app.0.is_null() {
-        log(&watch, false, "no-element");
+    if !ledger.enabled() {
         return None;
     }
-    unsafe { AXUIElementSetMessagingTimeout(app.0, 0.25) };
-    let mut focused = copy(app.0, c"AXFocusedUIElement");
-    if matches!(&focused, Err(-25212 | -25211))
+    let app = Cf(unsafe { AXUIElementCreateApplication(watch.pid) });
+    if !app.0.is_null() {
+        unsafe { AXUIElementSetMessagingTimeout(app.0, 0.25) };
+    }
+    let mut focused = if watch.element.is_some() || app.0.is_null() {
+        None
+    } else {
+        Some(copy(app.0, c"AXFocusedUIElement"))
+    };
+    if matches!(&focused, Some(Err(-25212 | -25211)))
         && std::env::var("SEE_COMPUTER_READBACK_ELECTRON")
             .ok()
             .as_deref()
@@ -349,15 +367,21 @@ fn run(watch: Watch, ledger: &Ledger, rx: &mpsc::Receiver<Watch>) -> Option<Watc
                 .insert(watch.pid);
         }
         std::thread::sleep(Duration::from_millis(300));
-        focused = copy(app.0, c"AXFocusedUIElement");
+        focused = Some(copy(app.0, c"AXFocusedUIElement"));
     }
     let opened = opened_up(watch.pid);
-    let Ok(element) = focused else {
+    let fallback = focused.and_then(Result::ok);
+    let element = watch
+        .element
+        .as_ref()
+        .map(crate::target::Element::as_ptr)
+        .or_else(|| fallback.as_ref().map(|value| value.0));
+    let Some(element) = element else {
         log(&watch, opened, "no-element");
         return None;
     };
-    unsafe { AXUIElementSetMessagingTimeout(element.0, 0.25) };
-    let initial = match value(element.0) {
+    unsafe { AXUIElementSetMessagingTimeout(element, 0.25) };
+    let initial = match value(element) {
         Ok(Some(text)) => text,
         Ok(None) => {
             log(&watch, opened, "too-long");
@@ -368,13 +392,16 @@ fn run(watch: Watch, ledger: &Ledger, rx: &mpsc::Receiver<Watch>) -> Option<Watc
             return None;
         }
     };
-    let Some(anchor) = anchor(&initial, &watch.pasted, caret(element.0)) else {
+    let Some(anchor) = anchor(&initial, &watch.pasted, caret(element)) else {
         log(&watch, opened, "not-found");
         return None;
     };
     let mut last = Some(watch.pasted.clone());
     let mut misses = 0;
     while Instant::now() < deadline {
+        if !ledger.enabled() {
+            return None;
+        }
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(next) => {
                 finish(&watch, ledger, opened, "unchanged", last);
@@ -383,7 +410,10 @@ fn run(watch: Watch, ledger: &Ledger, rx: &mpsc::Receiver<Watch>) -> Option<Watc
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        match value(element.0) {
+        if !ledger.enabled() {
+            return None;
+        }
+        match value(element) {
             Err(-25202) => break,
             Ok(Some(text)) => {
                 if let Some(region) = region(&text, &anchor) {
@@ -409,6 +439,33 @@ fn run(watch: Watch, ledger: &Ledger, rx: &mpsc::Receiver<Watch>) -> Option<Watc
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rewritten_text_is_not_recorded() {
+        let root = std::env::temp_dir().join(format!("see-readback-{}", std::process::id()));
+        let ledger = Ledger::start_at(
+            root.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            500,
+            Some(root.join("vocabulary.md")),
+            None,
+        );
+        let watch = Watch {
+            id: Id::test("rewrite"),
+            pid: 0,
+            bundle: String::new(),
+            pasted: "we use superbase.".into(),
+            element: None,
+        };
+        finish(
+            &watch,
+            &ledger,
+            false,
+            "unchanged",
+            Some("we use Supabase and my password is secret.".into()),
+        );
+        ledger.flush();
+        assert!(crate::ledger::read(&root).is_empty());
+    }
     #[test]
     fn contexts_and_edits() {
         let a = anchor(

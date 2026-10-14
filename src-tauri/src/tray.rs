@@ -300,9 +300,8 @@ impl Panel {
                 .cloned()
             {
                 self.ledger.teach(&term);
-                self.ledger.flush();
             }
-            return Some(self.dictionary_rows());
+            return None;
         }
         if let Some(index) = LEARNED_IDS.iter().position(|row| *row == id) {
             if let Some(term) = self
@@ -313,12 +312,11 @@ impl Panel {
                 .cloned()
             {
                 self.ledger.forget(&term);
-                self.ledger.flush();
                 let _ = self
                     .pill
                     .send(PillEvent::Flash(Notice::Info(format!("Forgot \"{term}\""))));
             }
-            return Some(self.dictionary_rows());
+            return None;
         }
         if let Some(index) = RECENT_IDS.iter().position(|recent_id| *recent_id == id) {
             self.copy_recent(index);
@@ -369,6 +367,10 @@ impl Panel {
                     }
                 }
                 open_path(path);
+                None
+            }
+            "dictionary-open-learned" => {
+                open_path(crate::boost::Lexicon::default_path().with_file_name("learned.md"));
                 None
             }
             "sharing-toggle" => {
@@ -539,6 +541,14 @@ fn dictionary_rows(learning: &Learning) -> (Vec<Row>, Vec<String>, Vec<String>) 
         for (index, term) in learned.iter().enumerate() {
             rows.push(item(LEARNED_IDS[index], term, true, None));
         }
+        if count > LEARNED_IDS.len() {
+            rows.push(item(
+                "dictionary-open-learned",
+                "All Learned Words…",
+                false,
+                None,
+            ));
+        }
     }
     (rows, waiting, learned)
 }
@@ -611,6 +621,15 @@ mod dictionary_tests {
         learning.learned = (0..12).map(|n| format!("Term {n}")).collect();
         let (rows, _, payloads) = dictionary_rows(&learning);
         assert_eq!(payloads.len(), 8);
+        assert_eq!(
+            rows.last(),
+            Some(&item(
+                "dictionary-open-learned",
+                "All Learned Words…",
+                false,
+                None
+            ))
+        );
         assert_eq!(
             rows.iter()
                 .filter(|row| matches!(row, Row::Item { checked: true, .. }))

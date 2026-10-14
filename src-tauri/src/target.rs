@@ -104,9 +104,23 @@ const TIMEOUT_SECONDS: f32 = 0.25;
 /// can be read back and checked rather than argued about.
 pub struct Observation {
     pub focus: Focus,
+    pub element: Option<Element>,
     pub pid: i32,
     pub app: String,
     pub bundle: String,
+}
+
+pub struct Element(*mut c_void);
+unsafe impl Send for Element {}
+impl Element {
+    pub fn as_ptr(&self) -> *mut c_void {
+        self.0
+    }
+}
+impl Drop for Element {
+    fn drop(&mut self) {
+        unsafe { CFRelease(self.0) }
+    }
 }
 
 /// Appends one line per dictation recording which app was frontmost and what was
@@ -188,28 +202,30 @@ unsafe fn ns_string(string: *mut objc2::runtime::AnyObject) -> String {
 /// learner can see an in-place correction.
 pub fn observe() -> Observation {
     let (pid, app, bundle) = frontmost().unwrap_or((0, "?".to_owned(), String::new()));
+    let (focus, element) = classify(pid);
     Observation {
-        focus: classify(pid),
+        focus,
+        element,
         pid,
         app,
         bundle,
     }
 }
 
-fn classify(pid: i32) -> Focus {
+fn classify(pid: i32) -> (Focus, Option<Element>) {
     if pid <= 0 || !crate::paste::accessibility_trusted(false) {
-        return Focus::Unknown;
+        return (Focus::Unknown, None);
     }
     let (Some(focused), Some(range)) = (
         Attribute::new(c"AXFocusedUIElement"),
         Attribute::new(c"AXSelectedTextRange"),
     ) else {
-        return Focus::Unknown;
+        return (Focus::Unknown, None);
     };
     unsafe {
         let app = AXUIElementCreateApplication(pid);
         if app.is_null() {
-            return Focus::Unknown;
+            return (Focus::Unknown, None);
         }
         AXUIElementSetMessagingTimeout(app, TIMEOUT_SECONDS);
         let mut element: *mut c_void = std::ptr::null_mut();
@@ -218,20 +234,20 @@ fn classify(pid: i32) -> Focus {
         if status != AX_SUCCESS || element.is_null() {
             // kAXErrorNoValue (nothing focused, or an app that exposes nothing),
             // a timeout, or a denial. All of them mean "we cannot tell".
-            return Focus::Unknown;
+            return (Focus::Unknown, None);
         }
         AXUIElementSetMessagingTimeout(element, TIMEOUT_SECONDS);
         let mut settable: u8 = 0;
         let status = AXUIElementIsAttributeSettable(element, range.0, &mut settable);
-        CFRelease(element);
-        match (status, settable) {
+        let focus = match (status, settable) {
             (AX_SUCCESS, 1) => Focus::Editable,
             // A real element answered and said no. That is the confident
             // negative, and the only case that diverts the words to the pill.
             (AX_SUCCESS, _) if crate::readback::opened_up(pid) => Focus::Unknown,
             (AX_SUCCESS, _) => Focus::NotEditable,
             _ => Focus::Unknown,
-        }
+        };
+        (focus, Some(Element(element)))
     }
 }
 

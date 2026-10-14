@@ -40,34 +40,45 @@ pub(crate) fn occurrences(text: &str, term: &str, case_sensitive: bool) -> usize
 pub fn merge(plain: &str, boosted: &str, terms: &[Term]) -> String {
     let a: Vec<_> = plain.split_whitespace().collect();
     let b: Vec<_> = boosted.split_whitespace().collect();
-    let gained = |left: &str, right: &str| {
-        terms
-            .iter()
-            .any(|term| occurrences(right, &term.text, true) > occurrences(left, &term.text, true))
+    // A multi-word term can straddle a change and the words beside it, so each
+    // change is judged with that many neighbours either side, counting only
+    // the occurrences that touch the change itself.
+    let k = terms
+        .iter()
+        .map(|term| term.text.split_whitespace().count())
+        .max()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let touching = |side: &[&str], start: usize, end: usize, term: &str| {
+        let low = start.saturating_sub(k);
+        let high = (end + k).min(side.len());
+        let count = |range: &[&str]| occurrences(&range.join(" "), term, true);
+        count(&side[low..high])
+            .saturating_sub(count(&side[low..start]))
+            .saturating_sub(count(&side[end..high]))
+    };
+    let lands_a_term = |plain_span: (usize, usize), boosted_span: (usize, usize)| {
+        terms.iter().any(|term| {
+            touching(&b, boosted_span.0, boosted_span.1, &term.text)
+                > touching(&a, plain_span.0, plain_span.1, &term.text)
+        })
     };
     let mut out = Vec::new();
-    let (mut ai, mut bi) = (0, 0);
-    let mut boosted_hunk = false;
+    let (mut ai, mut bi) = (0usize, 0usize);
     for (x, y) in crate::learn::alignment(&a, &b)
         .into_iter()
         .chain(std::iter::once((a.len(), b.len())))
     {
-        let left = a[ai..x].join(" ");
-        let right = b[bi..y].join(" ");
-        let gain = gained(&left, &right);
-        if !a[ai..x].is_empty() || !b[bi..y].is_empty() {
-            boosted_hunk = gain;
-        }
-        out.extend(if gain { &b[bi..y] } else { &a[ai..x] });
-        if x < a.len() {
-            out.push(if gained(a[x], b[y]) || (boosted_hunk && a[x] != b[y]) {
-                b[y]
+        if ai < x || bi < y {
+            out.extend(if lands_a_term((ai, x), (bi, y)) {
+                &b[bi..y]
             } else {
-                a[x]
+                &a[ai..x]
             });
-            if a[x] == b[y] {
-                boosted_hunk = false;
-            }
+        }
+        if x < a.len() {
+            let take_boosted = a[x] != b[y] && lands_a_term((x, x + 1), (y, y + 1));
+            out.push(if take_boosted { b[y] } else { a[x] });
         }
         ai = x + 1;
         bi = y + 1;
@@ -542,7 +553,40 @@ mod tests {
     }
 
     #[test]
+    fn a_neighbouring_term_does_not_carry_collateral_damage_in() {
+        let terms = [term("Convex"), term("Codex"), term("Wispr Flow")];
+        assert_eq!(
+            merge(
+                "The convex query returns the user list.",
+                "The Convex querns the user list.",
+                &terms
+            ),
+            "The Convex query returns the user list."
+        );
+        assert_eq!(
+            merge(
+                "The context clear your terms the list.",
+                "The Convex Clear Your terms the list.",
+                &terms
+            ),
+            "The Convex clear your terms the list."
+        );
+        assert_eq!(
+            merge("Add codex to open it.", "Ask Codex to open it.", &terms),
+            "Add Codex to open it."
+        );
+    }
+
+    #[test]
     fn merge_keeps_only_hunks_that_gain_a_term() {
+        assert_eq!(
+            merge(
+                "use whisper Flow today",
+                "use Wispr Flow today",
+                &[term("Wispr Flow")]
+            ),
+            "use Wispr Flow today"
+        );
         assert_eq!(
             merge("Run PNPM install", "Run pnpm install", &[term("pnpm")]),
             "Run pnpm install"
@@ -560,10 +604,10 @@ mod tests {
             "same words"
         );
         assert_eq!(merge("", "unrelated words", &[term("Claude")]), "");
-        // A changed hunk is selected as a whole when it gains a term.
         assert_eq!(
             merge("context clear your", "Convex Clear Your", &[term("Convex")]),
-            "Convex Clear Your"
+            "Convex clear your",
+            "only the change that lands the term is taken"
         );
     }
 

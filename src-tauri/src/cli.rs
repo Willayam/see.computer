@@ -88,11 +88,15 @@ fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
         }
     };
     let (clips, errors) = crate::eval::parse_manifest(&path, &manifest);
+    let parse_skipped = errors.len();
     for error in errors {
         eprintln!("{error}");
     }
     if clips.is_empty() {
-        return 1;
+        println!(
+            "clips=0 words=0 errors=0 wer=0.00 terms=0/0 insertions=0 skipped={parse_skipped}"
+        );
+        return if parse_skipped > 0 { 2 } else { 1 };
     }
     let lexicon =
         crate::boost::Lexicon::load(terms.unwrap_or_else(crate::boost::Lexicon::default_path));
@@ -104,11 +108,13 @@ fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
     let scored = match on_engine_thread(move |engine| {
         let mut total = crate::eval::Score::default();
         let mut count = 0;
+        let mut skipped = parse_skipped;
         for clip in clips {
             let audio = match crate::mic::Audio16k::from_wav(&clip.path) {
                 Ok(audio) => audio,
                 Err(error) => {
                     eprintln!("line {}: {error}", clip.line);
+                    skipped += 1;
                     continue;
                 }
             };
@@ -120,6 +126,7 @@ fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
                     .unwrap_or_default(),
                 Err(error) => {
                     eprintln!("line {}: {error}", clip.line);
+                    skipped += 1;
                     continue;
                 }
             };
@@ -140,9 +147,8 @@ fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
             total.add(&score);
             count += 1;
         }
-        if count > 0 {
-            println!(
-                "clips={count} words={} errors={} wer={:.2} terms={}/{} insertions={}",
+        println!(
+                "clips={count} words={} errors={} wer={:.2} terms={}/{} insertions={} skipped={skipped}",
                 total.words,
                 total.errors,
                 total.wer() * 100.0,
@@ -150,13 +156,14 @@ fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
                 total.occurrences,
                 total.insertions
             );
-        }
-        count
+        (count, skipped)
     }) {
-        Ok(count) => count,
+        Ok(result) => result,
         Err(code) => return code,
     };
-    if scored > 0 {
+    if scored.1 > 0 {
+        2
+    } else if scored.0 > 0 {
         0
     } else {
         1
