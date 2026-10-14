@@ -177,7 +177,9 @@ unsafe fn ns_string(string: *mut objc2::runtime::AnyObject) -> String {
     if utf8.is_null() {
         String::new()
     } else {
-        std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+        std::ffi::CStr::from_ptr(utf8)
+            .to_string_lossy()
+            .into_owned()
     }
 }
 

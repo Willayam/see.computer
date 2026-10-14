@@ -142,7 +142,7 @@ impl Engine for Parakeet {
                     .tokens
                     .iter()
                     .filter_map(|token| {
-                        let text = tidy(&token.text);
+                        let text = self.lexicon.rewrite(&tidy(&token.text));
                         (!text.is_empty()).then(|| Segment {
                             start_ms: (token.start.max(0.0) * 1000.0).round() as u64,
                             end_ms: (token.end.max(0.0) * 1000.0).round() as u64,
@@ -150,7 +150,7 @@ impl Engine for Parakeet {
                         })
                     })
                     .collect(),
-                text: Text::parse(tidy(&result.text)),
+                text: Text::parse(self.lexicon.rewrite(&tidy(&result.text))),
             })
             .map_err(|error| EngineError::Inference(error.to_string()))
     }

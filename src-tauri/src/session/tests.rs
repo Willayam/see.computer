@@ -103,6 +103,8 @@ fn canned_dictation_records_audio_in_ledger() {
         root.clone(),
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         500,
+        Some(dir.join("vocabulary.md")),
+        None,
     );
     controller.step(Msg::MainPressed);
     controller.step(Msg::MainReleased);

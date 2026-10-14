@@ -9,6 +9,7 @@ mod eval;
 mod filler;
 mod history;
 mod hotkeys;
+mod learn;
 mod ledger;
 mod menu;
 mod mic;
@@ -74,7 +75,7 @@ fn main() {
     let trigger = std::sync::Arc::new(std::sync::Mutex::new(config.trigger));
     let gesture = std::sync::Arc::new(trigger::Gesture::default());
     let history = history::History::start(config.history);
-    let ledger = ledger::Ledger::start(history.enabled_flag());
+    let ledger = ledger::Ledger::start(history.enabled_flag(), Some(pill_tx.clone()));
     let sharing = sharing::Sharing::start(config.sharing);
     let updater = updater::Updater::new(tx.clone(), pill_tx.clone());
     let status = std::sync::Arc::new(std::sync::Mutex::new(session::EngineStatus::Loading {

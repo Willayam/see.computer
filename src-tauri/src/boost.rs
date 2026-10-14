@@ -127,19 +127,28 @@ pub struct Term {
     pub weight: f32,
 }
 
+/// A phrase the model keeps hearing in place of a term, and the term.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rule {
+    pub heard: String,
+    pub term: String,
+}
+
 /// The terms the user cares about, and where they were read from.
 ///
 /// A plain file in the same folder as the dictation history, in keeping with
 /// the rest of the app: something to open and edit, not a settings pane.
 pub struct Lexicon {
     path: PathBuf,
-    stamp: Option<SystemTime>,
+    stamps: [Option<SystemTime>; 2],
     terms: Vec<Term>,
+    rules: Vec<Rule>,
 }
 
 impl Lexicon {
     /// `~/Documents/see.computer/vocabulary.md`, beside the dictation history,
-    /// unless `SEE_COMPUTER_VOCABULARY` names a file directly.
+    /// unless `SEE_COMPUTER_VOCABULARY` names a file directly. The learned
+    /// words live in `learned.md` beside whichever file this names.
     ///
     /// Falls back to the history's own fallback location when Documents holds
     /// no vocabulary but Application Support does, so a machine that denied
@@ -161,8 +170,9 @@ impl Lexicon {
     pub fn load(path: PathBuf) -> Lexicon {
         let mut lexicon = Lexicon {
             path,
-            stamp: None,
+            stamps: [None, None],
             terms: Vec::new(),
+            rules: Vec::new(),
         };
         lexicon.refresh();
         lexicon
@@ -172,54 +182,128 @@ impl Lexicon {
         &self.terms
     }
 
-    /// Re-read the file when it has changed on disk. Returns whether the terms
-    /// moved, so a caller can avoid rebuilding a trie that would come out the
-    /// same. A missing file is not an error; it means no custom vocabulary yet.
+    pub fn rules(&self) -> &[Rule] {
+        &self.rules
+    }
+
+    /// Re-read the files when either has changed on disk. Returns whether the
+    /// terms or rules moved, so a caller can avoid rebuilding a trie that would
+    /// come out the same. A missing file is not an error; it means no custom
+    /// vocabulary, or nothing learned, yet.
     pub fn refresh(&mut self) -> bool {
-        let stamp = fs::metadata(&self.path)
-            .and_then(|meta| meta.modified())
-            .ok();
-        if stamp == self.stamp && (stamp.is_some() || self.terms.is_empty()) {
+        let paths = [self.path.clone(), self.path.with_file_name("learned.md")];
+        let stamps = paths
+            .clone()
+            .map(|p| fs::metadata(p).and_then(|m| m.modified()).ok());
+        if stamps == self.stamps
+            && (stamps.iter().any(Option::is_some)
+                || (self.terms.is_empty() && self.rules.is_empty()))
+        {
             return false;
         }
-        self.stamp = stamp;
-        let parsed = fs::read_to_string(&self.path)
-            .map(|text| parse(&text))
-            .unwrap_or_default();
-        let changed = parsed != self.terms;
-        self.terms = parsed;
+        self.stamps = stamps;
+        let mut terms: Vec<Term> = Vec::new();
+        let mut rules = Vec::new();
+        for path in paths {
+            let (parsed, found) = fs::read_to_string(path)
+                .map(|s| parse(&s))
+                .unwrap_or_default();
+            for term in parsed {
+                if let Some(old) = terms.iter_mut().find(|old| old.text == term.text) {
+                    old.weight = old.weight.max(term.weight);
+                } else {
+                    terms.push(term);
+                }
+            }
+            rules.extend(found);
+        }
+        rules.sort_by_key(|r| std::cmp::Reverse(r.heard.len()));
+        let changed = terms != self.terms || rules != self.rules;
+        self.terms = terms;
+        self.rules = rules;
         changed
+    }
+
+    /// Applies every `heard -> Term` rule, longest first, to whole words.
+    /// Case-insensitive for ASCII only; a rule whose heard form differs from the
+    /// text in non-ASCII case simply does not fire.
+    pub fn rewrite(&self, text: &str) -> String {
+        if self.rules.is_empty() {
+            return text.to_owned();
+        }
+        let mut result = text.to_owned();
+        for rule in &self.rules {
+            if rule.heard.is_empty() {
+                continue;
+            }
+            let mut next = String::with_capacity(result.len());
+            let mut offset = 0;
+            while offset < result.len() {
+                let candidate = result[offset..].char_indices().find_map(|(i, _)| {
+                    let start = offset + i;
+                    let end = start.checked_add(rule.heard.len())?;
+                    let found = result.get(start..end)?;
+                    let before = result[..start].chars().next_back();
+                    let after = result[end..].chars().next();
+                    (found.eq_ignore_ascii_case(&rule.heard)
+                        && before.is_none_or(|c| !c.is_alphanumeric())
+                        && after.is_none_or(|c| !c.is_alphanumeric()))
+                    .then_some((start, end))
+                });
+                let Some((start, end)) = candidate else {
+                    break;
+                };
+                next.push_str(&result[offset..start]);
+                next.push_str(&rule.term);
+                offset = end;
+            }
+            next.push_str(&result[offset..]);
+            result = next;
+        }
+        result
     }
 }
 
 /// One term per line. `#` comments and blank lines are skipped, a leading `-`
 /// is allowed so the file reads as a markdown list, and a tab-separated number
-/// overrides the weight — which is how the correction capture will record that
-/// a term has been confirmed several times.
-fn parse(text: &str) -> Vec<Term> {
+/// overrides the weight. `heard -> Term` boosts `Term` and also rewrites the
+/// phrase the model keeps hearing instead, which is what boosting cannot fix
+/// when the model is confident in the wrong word.
+fn parse(text: &str) -> (Vec<Term>, Vec<Rule>) {
     let mut terms = Vec::new();
+    let mut rules = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         let line = line.strip_prefix("- ").unwrap_or(line);
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (text, weight) = match line.split_once('\t') {
-            Some((text, weight)) => (
-                text.trim(),
-                weight.trim().parse::<f32>().ok().unwrap_or(1.0),
-            ),
+        let (body, weight) = match line.split_once('\t') {
+            Some((body, weight)) => (body.trim(), weight.trim().parse::<f32>().unwrap_or(1.0)),
             None => (line, 1.0),
         };
-        if text.is_empty() || !weight.is_finite() || weight <= 0.0 {
+        if !weight.is_finite() || weight <= 0.0 {
+            continue;
+        }
+        let (heard, term) = match body.split_once(" -> ") {
+            Some((heard, term)) if !heard.is_empty() && !term.is_empty() => (Some(heard), term),
+            _ => (None, body),
+        };
+        if term.is_empty() {
             continue;
         }
         terms.push(Term {
-            text: text.to_owned(),
+            text: term.to_owned(),
             weight,
         });
+        if let Some(heard) = heard {
+            rules.push(Rule {
+                heard: heard.to_owned(),
+                term: term.to_owned(),
+            });
+        }
     }
-    terms
+    (terms, rules)
 }
 
 /// Trie node, in a flat arena so the active set can be plain indices instead of
@@ -525,7 +609,7 @@ mod tests {
 
     #[test]
     fn the_file_is_a_readable_list() {
-        let parsed = parse(
+        let (parsed, _) = parse(
             "# see.computer vocabulary\n\
              \n\
              - Tauri\n\
@@ -544,6 +628,52 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn rules_and_learned_file() {
+        let (terms, rules) = parse("- superbase -> Supabase\t2\n");
+        assert_eq!(
+            terms,
+            vec![Term {
+                text: "Supabase".into(),
+                weight: 2.0
+            }]
+        );
+        assert_eq!(
+            rules,
+            vec![Rule {
+                heard: "superbase".into(),
+                term: "Supabase".into()
+            }]
+        );
+        let root = std::env::temp_dir().join(format!("lexicon-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("vocabulary.md"), "- Supabase\n- Tauri\n").unwrap();
+        fs::write(
+            root.join("learned.md"),
+            "- superbase -> Supabase\t2\n- potato mode -> poteto mode\n",
+        )
+        .unwrap();
+        let lexicon = Lexicon::load(root.join("vocabulary.md"));
+        assert_eq!(
+            lexicon.terms(),
+            [term("Supabase"), term("Tauri"), term("poteto mode")].map(|mut t| {
+                if t.text == "Supabase" {
+                    t.weight = 2.0;
+                }
+                t
+            })
+        );
+        assert_eq!(
+            lexicon.rewrite("I use Superbase, superbase and superbases"),
+            "I use Supabase, Supabase and superbases"
+        );
+        assert_eq!(
+            lexicon.rewrite("potato mode or potato  mode"),
+            "poteto mode or potato  mode"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
