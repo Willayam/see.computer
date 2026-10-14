@@ -21,12 +21,7 @@ fn form(token: &str) -> String {
     strip(token).to_lowercase()
 }
 
-pub fn swaps(pasted: &str, edited: &str) -> Vec<Swap> {
-    let a: Vec<_> = pasted.split_whitespace().collect();
-    let b: Vec<_> = edited.split_whitespace().collect();
-    if a.len() > 400 || b.len() > 400 {
-        return Vec::new();
-    }
+pub(crate) fn alignment(a: &[&str], b: &[&str]) -> Vec<(usize, usize)> {
     let af: Vec<_> = a.iter().map(|s| form(s)).collect();
     let bf: Vec<_> = b.iter().map(|s| form(s)).collect();
     let mut dp = vec![vec![0usize; b.len() + 1]; a.len() + 1];
@@ -52,6 +47,16 @@ pub fn swaps(pasted: &str, edited: &str) -> Vec<Swap> {
             j += 1;
         }
     }
+    anchors
+}
+
+pub fn swaps(pasted: &str, edited: &str) -> Vec<Swap> {
+    let a: Vec<_> = pasted.split_whitespace().collect();
+    let b: Vec<_> = edited.split_whitespace().collect();
+    if a.len() > 400 || b.len() > 400 {
+        return Vec::new();
+    }
+    let anchors = alignment(&a, &b);
     let mut changed = 0usize;
     let mut out = Vec::new();
     let (mut ai, mut bj) = (0, 0);
@@ -117,6 +122,7 @@ impl Words {
         Words(std::sync::OnceLock::new())
     }
 
+    #[cfg(test)]
     pub fn from_list(words: &[&str]) -> Words {
         Words(std::sync::OnceLock::from(
             words

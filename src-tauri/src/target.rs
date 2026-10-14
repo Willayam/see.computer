@@ -104,6 +104,7 @@ const TIMEOUT_SECONDS: f32 = 0.25;
 /// can be read back and checked rather than argued about.
 pub struct Observation {
     pub focus: Focus,
+    pub pid: i32,
     pub app: String,
     pub bundle: String,
 }
@@ -183,12 +184,13 @@ unsafe fn ns_string(string: *mut objc2::runtime::AnyObject) -> String {
     }
 }
 
-/// Reads no text. Only asks whether a caret could be placed, so nothing the
-/// user has written is ever pulled out of their app.
+/// Reads no text. Readback alone reads the focused text after a paste so the
+/// learner can see an in-place correction.
 pub fn observe() -> Observation {
     let (pid, app, bundle) = frontmost().unwrap_or((0, "?".to_owned(), String::new()));
     Observation {
         focus: classify(pid),
+        pid,
         app,
         bundle,
     }
@@ -226,6 +228,7 @@ fn classify(pid: i32) -> Focus {
             (AX_SUCCESS, 1) => Focus::Editable,
             // A real element answered and said no. That is the confident
             // negative, and the only case that diverts the words to the pill.
+            (AX_SUCCESS, _) if crate::readback::opened_up(pid) => Focus::Unknown,
             (AX_SUCCESS, _) => Focus::NotEditable,
             _ => Focus::Unknown,
         }

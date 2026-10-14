@@ -182,10 +182,6 @@ impl Lexicon {
         &self.terms
     }
 
-    pub fn rules(&self) -> &[Rule] {
-        &self.rules
-    }
-
     /// Re-read the files when either has changed on disk. Returns whether the
     /// terms or rules moved, so a caller can avoid rebuilding a trie that would
     /// come out the same. A missing file is not an error; it means no custom

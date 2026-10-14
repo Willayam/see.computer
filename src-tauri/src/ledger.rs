@@ -536,6 +536,7 @@ mod tests {
             crate::mic::Audio16k::from_samples(vec![0.1; 320]),
         );
         let observation = crate::target::Observation {
+            pid: 1,
             app: "Notes".into(),
             bundle: "com.apple.Notes".into(),
             focus: crate::target::Focus::Editable,

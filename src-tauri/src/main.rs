@@ -18,6 +18,7 @@ mod paste;
 mod paths;
 mod pill;
 mod qos;
+mod readback;
 mod recents;
 mod recorder;
 mod rivals;
@@ -76,6 +77,7 @@ fn main() {
     let gesture = std::sync::Arc::new(trigger::Gesture::default());
     let history = history::History::start(config.history);
     let ledger = ledger::Ledger::start(history.enabled_flag(), Some(pill_tx.clone()));
+    let readback = readback::Readback::start(ledger.clone());
     let sharing = sharing::Sharing::start(config.sharing);
     let updater = updater::Updater::new(tx.clone(), pill_tx.clone());
     let status = std::sync::Arc::new(std::sync::Mutex::new(session::EngineStatus::Loading {
@@ -89,7 +91,7 @@ fn main() {
             mic,
             engine: engine::Loader::Models(engine::Models::default_root()),
             recorder: recorder::Recorder::screencapture(paths::documents()),
-            paste: paste::Paste::system(ledger.clone()),
+            paste: paste::Paste::system(ledger.clone(), readback),
             pill: pill_tx,
             trail: session::Trail::from_env(),
             history: history.clone(),

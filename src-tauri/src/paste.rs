@@ -33,10 +33,10 @@ struct Job {
 }
 
 impl Paste {
-    pub fn system(ledger: crate::ledger::Ledger) -> Paste {
+    pub fn system(ledger: crate::ledger::Ledger, readback: crate::readback::Readback) -> Paste {
         let (tx, rx) = std::sync::mpsc::channel();
         crate::qos::spawn("see-paste", crate::qos::Class::Keystroke, move || {
-            paste_loop(rx, ledger)
+            paste_loop(rx, ledger, readback)
         });
         Paste {
             mode: Mode::System(tx),
@@ -98,7 +98,11 @@ struct PendingRestore {
     at: Instant,
 }
 
-fn paste_loop(rx: Receiver<Job>, ledger: crate::ledger::Ledger) {
+fn paste_loop(
+    rx: Receiver<Job>,
+    ledger: crate::ledger::Ledger,
+    readback: crate::readback::Readback,
+) {
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(clipboard) => clipboard,
         Err(error) => {
@@ -188,6 +192,16 @@ fn paste_loop(rx: Receiver<Job>, ledger: crate::ledger::Ledger) {
                 last = Some((job.text.as_str().to_owned(), Instant::now()));
                 if let Some(id) = &job.dictation {
                     ledger.landed(id, &observation, Landing::Pasted);
+                }
+                if let Some(id) = job.dictation {
+                    if observation.focus != crate::target::Focus::NotEditable {
+                        readback.watch(crate::readback::Watch {
+                            id,
+                            pid: observation.pid,
+                            bundle: observation.bundle.clone(),
+                            pasted: job.text.as_str().trim().to_owned(),
+                        });
+                    }
                 }
                 (job.done)(Outcome(Ok(Landing::Pasted)));
                 crate::target::log(&observation, false);
