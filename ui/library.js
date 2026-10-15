@@ -10,6 +10,7 @@
     dictation: '<svg viewBox="0 0 16 16"><path d="M2 8v1M5 5v6M8 3v10M11 5v6M14 7v2"/></svg>',
     take: '<svg viewBox="0 0 16 16"><rect x="1.5" y="3.5" width="9" height="9" rx="2"/><path d="M10.5 7 14.5 5v6l-4-2"/></svg>',
     meeting: '<svg viewBox="0 0 16 16"><circle cx="5.5" cy="5.5" r="2.5"/><circle cx="11" cy="6" r="2"/><path d="M1.5 13.5c.4-2.6 2-4 4-4s3.6 1.4 4 4M9.5 9.8c1.9 0 3.6 1 4.5 3.7"/></svg>',
+    dictionary: '<svg viewBox="0 0 16 16"><path d="M3 2.5h8.5a1.5 1.5 0 0 1 1.5 1.5v9.5H4.5A1.5 1.5 0 0 1 3 12z"/><path d="M3 12a1.5 1.5 0 0 1 1.5-1.5H13M6 5.5h4"/></svg>',
   };
   const ICON = {
     copy: '<svg viewBox="0 0 16 16"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"/></svg>',
@@ -19,12 +20,20 @@
     rec: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="3" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r="6"/></svg>',
     spin: '<svg viewBox="0 0 16 16"><path d="M8 2a6 6 0 1 1-4.2 1.7"/></svg>',
     warn: '<svg viewBox="0 0 16 16"><path d="M8 2.5 14 13H2z"/><path d="M8 6.5v3M8 11.3v.2"/></svg>',
+    edit: '<svg viewBox="0 0 16 16"><path d="M10.5 3 13 5.5 6 12.5H3.5V10z"/><path d="M9 4.5 11.5 7"/></svg>',
+    plus: '<svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>',
+    minus: '<svg viewBox="0 0 16 16"><path d="M3 8h10"/></svg>',
   };
   const NOUN = { dictation: "Dictations", take: "Screen take", meeting: "Meeting" };
 
   let kind = "all";
   let query = "";
   let currentId = null;
+  // The transcript line being fixed, and the text typed so far, which a
+  // reload must not throw away.
+  let editing = null; // { id, idx, draft, error }
+  let target = null; // { id, startMs }: a line opened from the Dictionary
+  const dictionary = () => (kind === "dictionary" ? window.seeDictionary : null);
 
   const fmt = {
     day(ms) {
@@ -72,6 +81,7 @@
   }
 
   function renderList() {
+    if (dictionary()) return dictionary().renderList();
     const list = $("#list");
     const rows = visible();
     list.innerHTML = "";
@@ -179,15 +189,34 @@
     return "";
   }
 
+  const fixable = (i) => i.kind === "dictation" || (i.kind === "meeting" && i.state === "done");
+
   function lineEl(i, l, idx) {
     const cls = ["line", `is-${i.kind}`];
     if (l.speaker) cls.push(`is-${l.speaker}`);
+    if (target && target.id === i.id && target.startMs === l.startMs) cls.push("is-target");
     const time = i.kind === "dictation" ? fmt.clock(l.startMs) : fmt.offset(l.startMs);
     const speaker = l.speaker ? `<span class="speaker">${l.speaker === "you" ? "You" : "Them"}</span>` : "";
+    if (editing && editing.id === i.id && editing.idx === idx) {
+      cls.push("is-editing");
+      return `<div class="${cls.join(" ")}" data-idx="${idx}">
+        <span class="line-time">${time}</span>
+        <div class="line-body">${speaker}
+          <textarea class="fix" rows="3" spellcheck="true" aria-label="Fix this line">${esc(editing.draft)}</textarea>
+          ${editing.error ? `<p class="fix-error" role="alert">${esc(editing.error)}</p>` : ""}
+          <div class="fix-bar">
+            <button class="act is-primary" data-act="fix-save">${ICON.check}<span>Save fix</span></button>
+            <button class="act" data-act="fix-cancel"><span>Cancel</span></button>
+            <span class="fix-hint">⌘↩ to save. see.computer learns the spellings you fix.</span>
+          </div>
+        </div>
+      </div>`;
+    }
+    const edit = fixable(i) ? `<button class="line-edit" data-act="fix" data-idx="${idx}" title="Fix this line">${ICON.edit}</button>` : "";
     return `<div class="${cls.join(" ")}" data-idx="${idx}">
       <span class="line-time" title="${i.kind === "dictation" ? fmt.clockS(l.startMs) : ""}">${time}</span>
       <div class="line-body">${speaker}${esc(l.text)}</div>
-      <button class="line-copy" data-act="copy-line" data-idx="${idx}" title="Copy this line">${ICON.copy}</button>
+      <div class="line-tools">${edit}<button class="line-copy" data-act="copy-line" data-idx="${idx}" title="Copy this line">${ICON.copy}</button></div>
     </div>`;
   }
 
@@ -222,6 +251,7 @@
   }
 
   function renderDetail() {
+    if (dictionary()) return dictionary().renderDetail();
     const d = $("#detail");
     const i = items.find((x) => x.id === currentId);
     if (!i) { d.innerHTML = '<div class="blank">Pick something on the left.</div>'; return; }
@@ -235,6 +265,18 @@
       ${lines(i)}
       ${files(i)}
     </article>`;
+    const fix = $(".fix", d);
+    if (fix) {
+      fix.addEventListener("input", () => { editing.draft = fix.value; });
+      fix.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveFix(); }
+        if (e.key === "Escape") { e.preventDefault(); editing = null; renderDetail(); }
+      });
+      fix.focus();
+      fix.setSelectionRange(fix.value.length, fix.value.length);
+    }
+    const line = $(".line.is-editing, .line.is-target", d);
+    if (line) line.scrollIntoView({ block: "center" });
   }
   $("#detail").addEventListener("click", onDetailClick);
 
@@ -246,6 +288,33 @@
     if (btn.dataset.act === "copy-line") copy(i.lines[+btn.dataset.idx].text, btn, "Line copied");
     if (btn.dataset.act === "link") copy(i.share.url, btn, "Share link copied");
     if (btn.dataset.act === "finder") reveal(i.files.markdown || i.files.folder);
+    if (btn.dataset.act === "fix") startFix(i.id, +btn.dataset.idx);
+    if (btn.dataset.act === "fix-save") saveFix();
+    if (btn.dataset.act === "fix-cancel") { editing = null; renderDetail(); }
+  }
+
+  function startFix(id, idx) {
+    const i = items.find((x) => x.id === id);
+    if (!i || !i.lines[idx]) return;
+    editing = { id, idx, draft: i.lines[idx].text, error: null };
+    target = null;
+    renderDetail();
+  }
+
+  async function saveFix() {
+    const i = items.find((x) => x.id === editing?.id);
+    const line = i?.lines[editing.idx];
+    if (!line) { editing = null; renderDetail(); return; }
+    try {
+      await tauri.core.invoke("library_fix", { id: i.id, startMs: line.startMs, original: line.text, edited: editing.draft });
+      editing = null;
+      target = { id: i.id, startMs: line.startMs };
+      toast("Fixed. see.computer learns from it.");
+      await reload();
+    } catch (error) {
+      editing.error = String(error);
+      await reload();
+    }
   }
 
   async function copy(text, btn, msg) {
@@ -273,21 +342,29 @@
   }
 
   // Filters, search, keyboard
-  for (const chip of document.querySelectorAll(".chip")) {
-    chip.addEventListener("click", () => {
-      kind = chip.dataset.kind;
-      document.querySelectorAll(".chip").forEach((c) => c.classList.toggle("is-on", c === chip));
-      const rows = visible();
-      if (!rows.some((r) => r.id === currentId)) currentId = rows[0]?.id;
-      renderList(); renderDetail();
+  function setKind(next) {
+    if (kind === "dictionary" && next !== "dictionary") window.seeDictionary.deactivate();
+    kind = next;
+    document.querySelectorAll(".chip").forEach((c) => {
+      c.classList.toggle("is-on", c.dataset.kind === kind);
+      c.setAttribute("aria-selected", String(c.dataset.kind === kind));
     });
+    $("#search").placeholder = kind === "dictionary" ? "Search words" : "Search everything";
+    if (dictionary()) { dictionary().activate(); return; }
+    const rows = visible();
+    if (!rows.some((r) => r.id === currentId)) currentId = rows[0]?.id;
+    renderList(); renderDetail();
+  }
+  for (const chip of document.querySelectorAll(".chip")) {
+    chip.addEventListener("click", () => setKind(chip.dataset.kind));
   }
   $("#search").addEventListener("input", (e) => { query = e.target.value; renderList(); });
   document.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") { e.preventDefault(); $("#search").focus(); $("#search").select(); return; }
     if (e.key === "Escape" && document.activeElement === $("#search")) { e.preventDefault(); $("#search").value = ""; query = ""; renderList(); return; }
-    if (e.target.tagName === "INPUT" || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (["INPUT", "TEXTAREA"].includes(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "j" && e.key !== "k") return;
+    if (dictionary()) { e.preventDefault(); dictionary().move(e.key === "ArrowDown" || e.key === "j" ? 1 : -1); return; }
     const rows = visible(); const idx = rows.findIndex((r) => r.id === currentId);
     const next = rows[idx + (e.key === "ArrowDown" || e.key === "j" ? 1 : -1)];
     if (next) { e.preventDefault(); select(next.id); $(`.row[data-id="${CSS.escape(next.id)}"]`)?.scrollIntoView({ block: "nearest" }); }
@@ -313,17 +390,59 @@
       if (version !== loadVersion) return;
       items = next.sort((a, b) => b.at - a.at);
       if (!currentId || !items.some((i) => i.id === currentId)) currentId = items[0]?.id ?? null;
+      if (dictionary()) { dictionary().reload(); return; }
       renderList();
-      renderDetail();
+      // A fix being typed survives a reload unless its line is gone.
+      const fix = $(".fix");
+      const kept = editing && items.find((i) => i.id === editing.id)?.lines[editing.idx];
+      if (editing && !kept) editing = null;
+      if (!(fix && kept && !editing.error && document.activeElement === fix)) renderDetail();
       $("#list").scrollTop = scroll;
     } catch (error) { toast(`Library could not load: ${error}`); }
   }
 
-  if (params.get("kind")) document.querySelector(`.chip[data-kind="${params.get("kind")}"]`)?.click();
-  applyTheme();
-  try { currentId = decodeURIComponent(location.hash.slice(1)) || null; } catch { currentId = null; }
-  reload();
-  tauri.event.listen("library-changed", reload);
-  tauri.event.listen("library-select", ({ payload }) => select(payload));
-  window.addEventListener("focus", reload);
+  /* Routes the menu and the Dictionary open the Library on:
+     "dictionary" or "dictionary:<term>", "edit:<item>@<startMs>" to fix a
+     line, "<item>@<startMs>" to show one, or a bare item id. */
+  async function route(path) {
+    if (!path) return;
+    if (path === "dictionary" || path.startsWith("dictionary:")) {
+      setKind("dictionary");
+      if (path.startsWith("dictionary:")) window.seeDictionary.select(path.slice(11));
+      return;
+    }
+    const edit = path.startsWith("edit:");
+    const [id, at] = (edit ? path.slice(5) : path).split("@");
+    if (kind === "dictionary" || (kind !== "all" && !id.startsWith(kind))) setKind("all");
+    if (!items.some((i) => i.id === id)) await reload();
+    const i = items.find((x) => x.id === id);
+    if (!i) return;
+    currentId = id;
+    const idx = at == null ? -1 : i.lines.findIndex((l) => l.startMs === +at);
+    editing = null;
+    target = idx >= 0 ? { id, startMs: i.lines[idx].startMs } : null;
+    if (edit && idx >= 0 && fixable(i)) editing = { id, idx, draft: i.lines[idx].text, error: null };
+    renderList();
+    renderDetail();
+    $(`.row[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" });
+  }
+
+  window.seeLibrary = {
+    $, esc, fmt, toast, ICON, GLYPH,
+    query: () => query,
+    count: (text) => { $("#count").textContent = text; },
+    open: (id, startMs) => route(startMs == null ? id : `${id}@${startMs}`),
+  };
+
+  document.addEventListener("DOMContentLoaded", async () => {
+    applyTheme();
+    let start = null;
+    try { start = decodeURIComponent(location.hash.slice(1)) || null; } catch { start = null; }
+    if (params.get("kind")) setKind(params.get("kind"));
+    await reload();
+    await route(start);
+    tauri.event.listen("library-changed", reload);
+    tauri.event.listen("library-select", ({ payload }) => route(payload));
+    window.addEventListener("focus", reload);
+  });
 })();
