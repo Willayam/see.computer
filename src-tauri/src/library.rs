@@ -110,6 +110,12 @@ pub fn show(app: &AppHandle, select: Option<String>) {
     }
 }
 
+/// The app the user was in when the Library came forward, by process id.
+/// `[NSApp deactivate]` alone leaves see.computer as the workspace's
+/// frontmost app after the window closes, and the next dictation would then
+/// paste into nothing, so closing hands activation back to this app.
+static CAME_FROM: std::sync::Mutex<Option<i32>> = std::sync::Mutex::new(None);
+
 fn activate(app: &AppHandle) {
     set_active(app, true);
 }
@@ -118,15 +124,40 @@ fn set_active(app: &AppHandle, active: bool) {
     let _ = app.run_on_main_thread(move || unsafe {
         use objc2::msg_send;
         use objc2::runtime::{AnyClass, AnyObject};
-        let Some(class) = AnyClass::get(c"NSApplication") else {
+        let (Some(application), Some(workspace), Some(running)) = (
+            AnyClass::get(c"NSApplication"),
+            AnyClass::get(c"NSWorkspace"),
+            AnyClass::get(c"NSRunningApplication"),
+        ) else {
             return;
         };
-        let application: *mut AnyObject = msg_send![class, sharedApplication];
+        let application: *mut AnyObject = msg_send![application, sharedApplication];
+        let ours = std::process::id() as i32;
+        let mut came_from = CAME_FROM
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if active {
+            let shared: *mut AnyObject = msg_send![workspace, sharedWorkspace];
+            let front: *mut AnyObject = msg_send![shared, frontmostApplication];
+            if !front.is_null() {
+                let pid: i32 = msg_send![front, processIdentifier];
+                if pid != ours {
+                    *came_from = Some(pid);
+                }
+            }
             let _: () = msg_send![application, activate];
-        } else {
-            let _: () = msg_send![application, deactivate];
+            return;
         }
+        let previous: *mut AnyObject = match came_from.take() {
+            Some(pid) => msg_send![running, runningApplicationWithProcessIdentifier: pid],
+            None => std::ptr::null_mut(),
+        };
+        if previous.is_null() {
+            let _: () = msg_send![application, deactivate];
+            return;
+        }
+        let current: *mut AnyObject = msg_send![running, currentApplication];
+        let _: bool = msg_send![previous, activateFromApplication: current, options: 0usize];
     });
 }
 
