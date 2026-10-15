@@ -202,25 +202,28 @@ the learned spelling and points the term's rules at it (`Lexicon::refresh`).
 
 ## What is verified
 
-- Unit and controller tests: 213 pass. They cover the ledger, the learner and
-  its filter, rules, the merge, read-back's text matching and trimming, eval
-  scoring, the menu rows, the vocabulary line edits and their byte
-  preservation, and the window's per-term counts.
+- Unit and controller tests: 236 pass, meetings included. They cover the
+  ledger, the learner and its filter, rules, the merge, read-back's text
+  matching and trimming, eval scoring, the menu rows, the vocabulary line
+  edits and their byte preservation, the per-term counts and recent lines,
+  and fixing a day-file entry, a meeting line, and the ledger entry behind
+  either.
 - The eval numbers above come from the release build on the synthetic corpus.
-- In the real app, signed and run with the screen locked, a dictation from a
-  replayed wav wrote its ledger events and wav, and `see-computer eval`
-  replayed that wav to the same transcript.
-- The Dictionary window, run on 2026-10-15 against copies of the real files:
-  add, casing rename, boost, adding, editing and removing a heard form, park,
-  turn on, and delete each changed only their own lines, and after the round
-  trip `vocabulary.md` was byte-identical to the original. A line added from
-  outside appeared in the open window, an edit to a word deleted on disk was
-  refused with a message, Learn wrote `learned.md` and a `learned` event, and
-  Ignore wrote a `forgotten` event. The app is a regular app while the window
-  is open and an accessory again after it closes.
+- The Library, run on 2026-10-15 against copies of the real files through
+  `SEE_COMPUTER_DOCUMENTS_DIR`, `SEE_COMPUTER_HISTORY_DIR` and
+  `SEE_COMPUTER_LEDGER_DIR`: in the Dictionary section, Learn wrote
+  `learned.md` and a `learned` event, Ignore a `forgotten` event, and adding
+  then deleting a word left `vocabulary.md` byte-identical. A term's recent
+  line opened its dictation in the Library. Fixing "Use potato mode" in a
+  dictation changed that one line of its day file and logged a dictation
+  entry and a manual correction; fixing a meeting line changed that one line
+  of `meeting.md` and logged the same pair at the meeting's start plus the
+  line's offset.
 - Not yet seen running: read-back against a live text field (in Electron or
-  anywhere else) and the Fix dialog. Both need an unlocked screen. To check read-back, launch with `SEE_COMPUTER_READBACK_LOG=1`,
-  dictate into TextEdit and into an Electron app, fix a word, and read
+  anywhere else), and whether focus returns to the previous app when the
+  Library is closed while frontmost. To check read-back, launch with
+  `SEE_COMPUTER_READBACK_LOG=1`, dictate into TextEdit and into an Electron
+  app, fix a word, and read
   `~/Library/Application Support/see.computer/readback-log.tsv`.
 
 ## Roadmap
