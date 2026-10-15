@@ -299,7 +299,7 @@ impl Panel {
                 .get(index)
                 .cloned()
             {
-                self.ledger.teach(&term);
+                let _ = self.ledger.edit(crate::vocabulary::Edit::Learn { term });
             }
             return None;
         }
@@ -354,23 +354,8 @@ impl Panel {
                 }
                 None
             }
-            "dictionary-open" => {
-                let path = crate::boost::Lexicon::default_path();
-                if !path.exists() {
-                    if let Some(parent) = path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    if let Err(error) =
-                        std::fs::write(&path, "# see.computer vocabulary\n# One term per line\n")
-                    {
-                        eprintln!("could not create vocabulary: {error}");
-                    }
-                }
-                open_path(path);
-                None
-            }
-            "dictionary-open-learned" => {
-                open_path(crate::boost::Lexicon::default_path().with_file_name("learned.md"));
+            "dictionary-edit" => {
+                crate::dictionary::open(&self.app);
                 None
             }
             "sharing-toggle" => {
@@ -505,7 +490,12 @@ fn dictionary_rows(learning: &Learning) -> (Vec<Row>, Vec<String>, Vec<String>) 
             false,
             Some("pencil"),
         ),
-        item("dictionary-open", "Open Vocabulary", false, None),
+        item(
+            "dictionary-edit",
+            "Edit Dictionary…",
+            false,
+            Some("character.book.closed"),
+        ),
     ];
     let waiting: Vec<_> = learning
         .waiting
@@ -542,12 +532,7 @@ fn dictionary_rows(learning: &Learning) -> (Vec<Row>, Vec<String>, Vec<String>) 
             rows.push(item(LEARNED_IDS[index], term, true, None));
         }
         if count > LEARNED_IDS.len() {
-            rows.push(item(
-                "dictionary-open-learned",
-                "All Learned Words…",
-                false,
-                None,
-            ));
+            rows.push(item("dictionary-edit", "All Learned Words…", false, None));
         }
     }
     (rows, waiting, learned)
@@ -623,12 +608,7 @@ mod dictionary_tests {
         assert_eq!(payloads.len(), 8);
         assert_eq!(
             rows.last(),
-            Some(&item(
-                "dictionary-open-learned",
-                "All Learned Words…",
-                false,
-                None
-            ))
+            Some(&item("dictionary-edit", "All Learned Words…", false, None))
         );
         assert_eq!(
             rows.iter()

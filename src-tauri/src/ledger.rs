@@ -68,7 +68,7 @@ enum Command {
     #[cfg(test)]
     Flush(mpsc::Sender<()>),
     Forget(String),
-    Teach(String),
+    Edit(crate::vocabulary::Edit, mpsc::Sender<Result<(), String>>),
 }
 
 #[derive(Clone)]
@@ -84,6 +84,8 @@ pub struct Learning {
     pub learned: Vec<String>,
     pub waiting: Vec<crate::learn::Waiting>,
     pub last: Option<(Id, String)>,
+    /// What the model wrote in place of each term the user corrected.
+    pub heard: Vec<(String, Vec<String>)>,
 }
 
 impl Ledger {
@@ -157,35 +159,27 @@ impl Ledger {
                         }
                     }
                     Command::Forget(term) => {
-                        let event = Event::Forgotten {
-                            at: Local::now().to_rfc3339(),
-                            term: term.clone(),
-                        };
                         match remove_term(&vocabulary.with_file_name("learned.md"), &term) {
-                            Ok(()) => {
-                                if append(&root, &event).is_ok() {
-                                    events.push(event);
-                                    update_learning(&snapshot, &events, &vocabulary, &words);
+                            Ok(spellings) => {
+                                for spelling in spellings {
+                                    let event = Event::Forgotten {
+                                        at: Local::now().to_rfc3339(),
+                                        term: spelling,
+                                    };
+                                    if append(&root, &event).is_ok() {
+                                        events.push(event);
+                                    }
                                 }
+                                update_learning(&snapshot, &events, &vocabulary, &words);
                             }
                             Err(error) => eprintln!("could not forget {term}: {error}"),
                         }
                     }
-                    Command::Teach(term) => {
-                        let known = known_terms(&vocabulary);
-                        let taught = crate::learn::waiting(&events, &known, &words)
-                            .into_iter()
-                            .find(|waiting| waiting.term == term);
-                        if let Some(waiting) = taught {
-                            let promotion = crate::learn::Promotion {
-                                term: waiting.term,
-                                heard: waiting.heard.into_iter().next(),
-                                from: waiting.from,
-                            };
-                            announce(&pill, std::slice::from_ref(&promotion.term));
-                            save_promotion(&root, &vocabulary, &mut events, promotion);
-                            update_learning(&snapshot, &events, &vocabulary, &words);
-                        }
+                    Command::Edit(edit, reply) => {
+                        let result =
+                            apply_edit(&root, &vocabulary, &words, &mut events, &pill, edit);
+                        update_learning(&snapshot, &events, &vocabulary, &words);
+                        let _ = reply.send(result);
                     }
                     #[cfg(test)]
                     Command::Flush(reply) => {
@@ -227,8 +221,19 @@ impl Ledger {
     pub fn forget(&self, term: &str) {
         let _ = self.tx.send(Command::Forget(term.to_owned()));
     }
-    pub fn teach(&self, term: &str) {
-        let _ = self.tx.send(Command::Teach(term.to_owned()));
+    /// Hands an edit of the vocabulary files to the ledger thread, which is
+    /// the only writer of `learned.md` in this process. The receiver gets the
+    /// outcome once the files and the log agree; dropping it is fine.
+    pub fn edit(&self, edit: crate::vocabulary::Edit) -> mpsc::Receiver<Result<(), String>> {
+        let (reply, outcome) = mpsc::channel();
+        if let Err(mpsc::SendError(Command::Edit(_, reply))) =
+            self.tx.send(Command::Edit(edit, reply))
+        {
+            let _ = reply.send(Err(
+                "Unable to save. Quit and reopen see.computer, then try again.".to_owned(),
+            ));
+        }
+        outcome
     }
 
     pub fn mint(&self) -> Id {
@@ -444,11 +449,19 @@ fn promote(
     announce(pill, &names);
 }
 
+/// Every spelling either file holds, so a casing the user already has is
+/// known even where the decoder prefers the other one.
 fn known_terms(vocabulary: &Path) -> Vec<String> {
-    crate::boost::Lexicon::load(vocabulary.to_owned())
-        .terms()
-        .iter()
-        .map(|term| term.text.clone())
+    let (vocabulary, learned) = crate::vocabulary::Files::beside(vocabulary)
+        .read()
+        .unwrap_or_default();
+    vocabulary
+        .lines()
+        .chain(learned.lines())
+        .filter_map(|line| match line {
+            crate::vocabulary::Line::Active(entry) => Some(entry.term),
+            _ => None,
+        })
         .collect()
 }
 
@@ -471,13 +484,20 @@ fn update_learning(
     words: &crate::learn::Words,
 ) {
     let known = known_terms(vocabulary);
-    let forgotten: HashSet<_> = events
-        .iter()
-        .filter_map(|e| match e {
-            Event::Forgotten { term, .. } => Some(term.as_str()),
-            _ => None,
-        })
-        .collect();
+    // The latest decision about a spelling stands: a term renamed away and
+    // back is learned again.
+    let mut forgotten = HashSet::new();
+    for event in events {
+        match event {
+            Event::Forgotten { term, .. } => {
+                forgotten.insert(term.as_str());
+            }
+            Event::Learned { term, .. } => {
+                forgotten.remove(term.as_str());
+            }
+            _ => {}
+        }
+    }
     let mut learning = Learning::default();
     for event in events.iter().rev() {
         match event {
@@ -493,31 +513,98 @@ fn update_learning(
         }
     }
     learning.waiting = crate::learn::waiting(events, &known, words);
+    learning.heard = crate::learn::heard_forms(events, words);
     *snapshot
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = learning;
 }
 
-fn remove_term(path: &Path, term: &str) -> std::io::Result<()> {
+/// Removes every casing of `term` from `learned.md` and returns the
+/// spellings removed, each of which the learner must not bring back.
+fn remove_term(path: &Path, term: &str) -> std::io::Result<Vec<String>> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![term.to_owned()]),
         Err(e) => return Err(e),
     };
-    let kept = text
-        .lines()
-        .filter(|line| {
-            let body = line.trim().strip_prefix("- ").unwrap_or(line.trim());
-            let body = body.split_once('\t').map_or(body, |(body, _)| body);
-            let body = body.split_once(" -> ").map_or(body, |(_, term)| term);
-            body != term
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
+    let mut document = crate::vocabulary::Document::parse(&text);
+    let mut spellings = vec![term.to_owned()];
+    for line in document.lines() {
+        if let crate::vocabulary::Line::Active(entry) = line {
+            if crate::vocabulary::same(&entry.term, term) && !spellings.contains(&entry.term) {
+                spellings.push(entry.term);
+            }
+        }
+    }
+    if !document.delete(term) {
+        return Ok(spellings);
+    }
     let temp = path.with_extension("md.tmp");
-    fs::write(&temp, kept)?;
-    fs::rename(temp, path)
+    fs::write(&temp, document.render())?;
+    fs::rename(temp, path)?;
+    Ok(spellings)
+}
+
+/// Learning a waiting word and ignoring one change only the log; every other
+/// edit changes the files first and then records what the learner must know.
+fn apply_edit(
+    root: &Path,
+    vocabulary: &Path,
+    words: &crate::learn::Words,
+    events: &mut Vec<Event>,
+    pill: &Option<mpsc::Sender<PillEvent>>,
+    edit: crate::vocabulary::Edit,
+) -> Result<(), String> {
+    use crate::vocabulary::{Edit, Files, Note};
+    const GONE: &str = "That word is no longer waiting, so the list has been reloaded.";
+    let now = || Local::now().to_rfc3339();
+    let record = |events: &mut Vec<Event>, event: Event| {
+        append(root, &event).map_err(|error| format!("Unable to save: {error}."))?;
+        events.push(event);
+        Ok::<(), String>(())
+    };
+    match edit {
+        Edit::Learn { term } => {
+            let known = known_terms(vocabulary);
+            let waiting = crate::learn::waiting(events, &known, words)
+                .into_iter()
+                .find(|waiting| waiting.term == term)
+                .ok_or(GONE)?;
+            let promotion = crate::learn::Promotion {
+                term: waiting.term,
+                heard: waiting.heard.into_iter().next(),
+                from: waiting.from,
+            };
+            announce(pill, std::slice::from_ref(&promotion.term));
+            save_promotion(root, vocabulary, events, promotion);
+            Ok(())
+        }
+        Edit::Ignore { term } => {
+            let known = known_terms(vocabulary);
+            if !crate::learn::waiting(events, &known, words)
+                .iter()
+                .any(|waiting| waiting.term == term)
+            {
+                return Err(GONE.to_owned());
+            }
+            record(events, Event::Forgotten { at: now(), term })
+        }
+        edit => {
+            for note in Files::beside(vocabulary).edit(&edit)? {
+                let event = match note {
+                    Note::Forgot(term) => Event::Forgotten { at: now(), term },
+                    Note::Learned(term) => Event::Learned {
+                        at: now(),
+                        term,
+                        heard: None,
+                        from: Vec::new(),
+                    },
+                };
+                record(events, event)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

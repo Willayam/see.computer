@@ -4,6 +4,7 @@ mod boost;
 mod cli;
 mod clip;
 mod config;
+mod dictionary;
 mod engine;
 mod eval;
 mod filler;
@@ -112,7 +113,15 @@ fn main() {
     let setup_history = history;
     let setup_ledger = ledger;
     let setup_status = status;
+    let dictionary = dictionary::Dictionary::new(setup_ledger.clone(), setup_history.clone());
     let app = tauri::Builder::default()
+        .manage(dictionary)
+        .invoke_handler(tauri::generate_handler![
+            dictionary::dictionary_load,
+            dictionary::dictionary_stamp,
+            dictionary::dictionary_edit,
+            dictionary::dictionary_reveal,
+        ])
         .plugin(hotkeys::plugin(tx.clone()))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
@@ -142,6 +151,9 @@ fn main() {
                 },
             )?;
             paste::accessibility_trusted(true);
+            if std::env::var_os("SEE_COMPUTER_OPEN_DICTIONARY").is_some() {
+                dictionary::open(app.handle());
+            }
             trigger::spawn_watcher(setup_trigger, setup_watcher_tx, setup_gesture);
             Ok(())
         })

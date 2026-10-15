@@ -265,6 +265,7 @@ fn decisions(events: &[Event]) -> HashMap<&str, Decided> {
             Event::Learned { term, heard, .. } => {
                 let entry = decided.entry(term.as_str()).or_default();
                 entry.term_learned = true;
+                entry.forgotten = false;
                 if let Some(heard) = heard {
                     entry.rules.insert(heard.clone());
                 }
@@ -373,6 +374,23 @@ pub fn promotions(events: &[Event], known: &[String], words: &Words) -> Vec<Prom
         }
     }
     out
+}
+
+/// Every spelling the user wrote in a correction, with the forms the model
+/// had written instead, whether or not the evidence was enough to learn it.
+pub fn heard_forms(events: &[Event], words: &Words) -> Vec<(String, Vec<String>)> {
+    candidates(events, words)
+        .into_iter()
+        .map(|(term, sightings)| {
+            let mut heard: Vec<String> = Vec::new();
+            for sighting in sightings {
+                if !heard.contains(&sighting.heard) {
+                    heard.push(sighting.heard);
+                }
+            }
+            (term, heard)
+        })
+        .collect()
 }
 
 /// Terms seen once, newest first: the review queue the menu offers.
@@ -517,6 +535,24 @@ mod tests {
             term: "Supabase".into(),
         });
         assert!(promotions(&events, &[], &words).is_empty());
+        events.extend([
+            Event::Learned {
+                at: String::new(),
+                term: "Supabase".into(),
+                heard: None,
+                from: vec![],
+            },
+            event("6", "superbass"),
+            correction("6", "Supabase", Source::ReadBack),
+            event("7", "superbass"),
+            correction("7", "Supabase", Source::ReadBack),
+        ]);
+        assert!(
+            promotions(&events, &[], &words)
+                .iter()
+                .any(|p| p.heard.as_deref() == Some("superbass")),
+            "a term learned again after it was forgotten is live again"
+        );
         let manual = vec![
             event("3", "superbase"),
             correction("3", "Supabase", Source::Manual),

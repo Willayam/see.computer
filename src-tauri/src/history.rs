@@ -66,6 +66,11 @@ impl History {
         locked_root(&self.root)
     }
 
+    /// Every day file, newest first.
+    pub fn days(&self) -> Vec<(NaiveDate, PathBuf)> {
+        day_files(&self.root())
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
     }
@@ -117,6 +122,22 @@ fn read_recent(root: &Path, limit: usize) -> Vec<Entry> {
     if limit == 0 {
         return Vec::new();
     }
+    let days = day_files(root);
+    let mut entries = Vec::new();
+    for (date, path) in days.into_iter().take(14) {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        entries.extend(parse_day(date, &content));
+        if entries.len() >= limit {
+            entries.truncate(limit);
+            break;
+        }
+    }
+    entries
+}
+
+fn day_files(root: &Path) -> Vec<(NaiveDate, PathBuf)> {
     let mut days = std::fs::read_dir(root)
         .into_iter()
         .flatten()
@@ -134,22 +155,10 @@ fn read_recent(root: &Path, limit: usize) -> Vec<Entry> {
         })
         .collect::<Vec<_>>();
     days.sort_by_key(|(date, _)| std::cmp::Reverse(*date));
-
-    let mut entries = Vec::new();
-    for (date, path) in days.into_iter().take(14) {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        entries.extend(parse_day(date, &content));
-        if entries.len() >= limit {
-            entries.truncate(limit);
-            break;
-        }
-    }
-    entries
+    days
 }
 
-fn parse_day(date: NaiveDate, content: &str) -> Vec<Entry> {
+pub fn parse_day(date: NaiveDate, content: &str) -> Vec<Entry> {
     let mut headings = Vec::new();
     for (start, _) in content.match_indices("## ") {
         if start > 0 && content.as_bytes().get(start - 1) != Some(&b'\n') {

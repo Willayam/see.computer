@@ -32,5 +32,15 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=UniformTypeIdentifiers");
     println!("cargo:rustc-link-arg=-mmacosx-version-min=14.0");
     println!("cargo:rerun-if-changed=native/recording.m");
-    tauri_build::build();
+    // Only the windows a capability names may call these, so the pill keeps
+    // no invoke surface at all.
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
+        tauri_build::AppManifest::new().commands(&[
+            "dictionary_load",
+            "dictionary_stamp",
+            "dictionary_edit",
+            "dictionary_reveal",
+        ]),
+    ))
+    .expect("failed to run tauri-build");
 }
