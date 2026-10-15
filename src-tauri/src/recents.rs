@@ -1,14 +1,27 @@
 //! The five most recent dictations and takes, merged by time.
 
-use chrono::{DateTime, Local, NaiveDateTime};
+use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use std::path::{Path, PathBuf};
 
 use crate::history::{Entry, History};
+use crate::meeting::folder;
 
 /// Both kinds of recent name themselves, so the glyph column reads as a pair
 /// rather than as one row being the exception: spoken words, or a screen.
 const DICTATION: &str = "waveform";
 const CLIP: &str = "video.fill";
+const MEETING: &str = "person.2.fill";
+
+#[derive(Clone)]
+pub(crate) struct Meeting {
+    pub folder: PathBuf,
+    pub manifest: folder::Manifest,
+}
+
+pub(crate) enum Pick {
+    Copy(String),
+    Library(String),
+}
 
 #[derive(Clone)]
 pub(crate) enum Payload {
@@ -19,14 +32,23 @@ pub(crate) enum Payload {
     /// A recording with no clip folder beside it — packaging failed, or the
     /// movie predates the folder. The plain `file://` link is all there is.
     Recording(PathBuf),
+    Meeting(Meeting),
 }
 
 impl Payload {
-    pub fn copy_text(self) -> String {
+    pub fn pick(self) -> Pick {
         match self {
-            Payload::Transcript(text) => text,
-            Payload::Clip(summary) => summary.paste(),
-            Payload::Recording(path) => file_link(&path),
+            Payload::Transcript(text) => Pick::Copy(text),
+            Payload::Clip(summary) => Pick::Copy(summary.paste()),
+            Payload::Recording(path) => Pick::Copy(file_link(&path)),
+            Payload::Meeting(meeting) => Pick::Library(format!(
+                "meeting:{}",
+                meeting
+                    .folder
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            )),
         }
     }
 }
@@ -61,6 +83,10 @@ impl Recent {
                 CLIP,
             ),
             Payload::Recording(_) => (recording_label(self.at), CLIP),
+            Payload::Meeting(meeting) => (
+                meeting_label(&meeting.folder, &meeting.manifest, self.at),
+                MEETING,
+            ),
         }
     }
 }
@@ -87,10 +113,19 @@ fn recent_recordings(dir: &Path, limit: usize) -> Vec<(DateTime<Local>, PathBuf)
                     metadata.is_file()
                         && path.extension().is_some_and(|extension| extension == "mov")
                         || metadata.is_dir()
-                            && (path.join("take.md").is_file() || path.join("clip.md").is_file())
+                            && (path.join("take.md").is_file()
+                                || path.join("clip.md").is_file()
+                                || path.join(folder::MANIFEST).is_file())
                 })
                 .and_then(|metadata| metadata.modified().ok())
-                .map(|modified| (DateTime::<Local>::from(modified), path))
+                .map(|modified| {
+                    let at = folder::read(&path)
+                        .and_then(|manifest| {
+                            Local.timestamp_millis_opt(manifest.started_ms).single()
+                        })
+                        .unwrap_or_else(|| DateTime::<Local>::from(modified));
+                    (at, path)
+                })
         })
         .collect::<Vec<_>>();
     recordings.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
@@ -122,9 +157,39 @@ fn merge_recents(
 /// The take folder is what the recording pasted, so the row follows it when
 /// it is there and falls back to the movie when it is not.
 fn recording_payload(path: PathBuf) -> Payload {
+    if let Some(manifest) = folder::read(&path) {
+        return Payload::Meeting(Meeting {
+            folder: path,
+            manifest,
+        });
+    }
     match crate::clip::summary(&path) {
         Some(summary) => Payload::Clip(summary),
         None => Payload::Recording(path),
+    }
+}
+
+fn meeting_label(path: &Path, manifest: &folder::Manifest, at: NaiveDateTime) -> String {
+    let title = folder::title(path, manifest);
+    match manifest.state {
+        folder::State::Recording => format!("{title} · recording"),
+        folder::State::Transcribing => format!("{title} · transcribing"),
+        folder::State::Failed => format!("{title} · failed"),
+        folder::State::Done => {
+            let time = if at.date() == Local::now().date_naive() {
+                at.format("%H:%M").to_string()
+            } else {
+                at.format("%b %-d, %H:%M").to_string()
+            };
+            let minutes = manifest.duration_ms().unwrap_or(0) / 60_000;
+            let duration = match (minutes / 60, minutes % 60) {
+                (0, 0) => "<1 min".to_owned(),
+                (0, minutes) => format!("{minutes} min"),
+                (hours, 0) => format!("{hours} h"),
+                (hours, minutes) => format!("{hours} h {minutes} min"),
+            };
+            format!("{title} · {time} · {duration}")
+        }
     }
 }
 
@@ -325,5 +390,64 @@ mod tests {
             &merged[2].payload,
             Payload::Transcript(text) if text == "oldest"
         ));
+    }
+
+    #[test]
+    fn meetings_use_manifest_time_state_and_open_target() {
+        let dir = temp_dir();
+        let started = local("2026-08-20", "14:32:00").timestamp_millis();
+        let meeting = folder::create(&dir, Some("Zoom"), started).unwrap();
+        let movie = dir.join("later.mov");
+        std::fs::write(&movie, b"movie").unwrap();
+        let mut manifest = folder::read(&meeting).unwrap();
+        for (state, label) in [
+            (folder::State::Recording, "Zoom meeting · recording"),
+            (folder::State::Transcribing, "Zoom meeting · transcribing"),
+            (folder::State::Failed, "Zoom meeting · failed"),
+            (folder::State::Done, "Zoom meeting · Aug 20, 14:32 · 42 min"),
+        ] {
+            manifest.state = state;
+            manifest.ended_ms = Some(started + 42 * 60_000);
+            folder::write(&meeting, &manifest).unwrap();
+            let rows = merge_recents(Vec::new(), recent_recordings(&dir, 2), 2);
+            let row = rows
+                .iter()
+                .find(|row| matches!(row.payload, Payload::Meeting(_)))
+                .unwrap();
+            assert_eq!(row.row(), (label.to_owned(), MEETING));
+        }
+        let rows = merge_recents(Vec::new(), recent_recordings(&dir, 2), 2);
+        assert!(matches!(rows[0].payload, Payload::Recording(_)));
+        let id = format!("meeting:{}", meeting.file_name().unwrap().to_string_lossy());
+        assert!(
+            matches!(recording_payload(meeting.clone()).pick(), Pick::Library(value) if value == id)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn meeting_order_uses_start_time_even_after_folder_changes() {
+        let dir = temp_dir();
+        let older = folder::create(
+            &dir,
+            Some("Zoom"),
+            local("2026-08-20", "10:00:00").timestamp_millis(),
+        )
+        .unwrap();
+        let newer = folder::create(
+            &dir,
+            Some("Zoom"),
+            local("2026-08-20", "11:00:00").timestamp_millis(),
+        )
+        .unwrap();
+        let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+        std::fs::File::open(&older)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
+        let rows = merge_recents(Vec::new(), recent_recordings(&dir, 2), 2);
+        assert!(matches!(&rows[0].payload, Payload::Meeting(meeting) if meeting.folder == newer));
+        assert!(matches!(&rows[1].payload, Payload::Meeting(meeting) if meeting.folder == older));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

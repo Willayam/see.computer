@@ -156,6 +156,15 @@ fn cancel_revokes_even_when_create_response_was_lost_and_sharing_is_paused() {
 }
 
 #[test]
+fn share_ids_are_seven_base62_characters() {
+    for _ in 0..50 {
+        let id = random_id().unwrap();
+        assert_eq!(id.len(), 7);
+        assert!(id.bytes().all(|b| b.is_ascii_alphanumeric()), "{id}");
+    }
+}
+
+#[test]
 fn playlist_waits_for_init_and_every_referenced_chunk() {
     let playlist = b"#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\nsegment-000.m4s\n";
     let mut sent = BTreeMap::new();
@@ -211,10 +220,13 @@ fn finalized_manifest_uses_remote_media_and_keeps_local_originals() {
         std::fs::read_to_string(dir.join("transcript.json")).unwrap(),
         source
     );
+    let local = format!("Capture: {}", dir.join("take.md").display());
+    let link = format!("Capture: {HOST}/s/{}/", job(&service).id);
+    // Still uploading: the paste is the link alone, without the local path.
+    assert_eq!(paste_link(&dir.join("take.md"), local.clone()), link);
     service
         .update(&job(&service).id, |j| j.error = Some("quota".into()))
         .unwrap();
-    let local = format!("Capture: {}", dir.join("take.md").display());
     assert_eq!(paste_link(&dir.join("take.md"), local.clone()), local);
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }

@@ -22,6 +22,13 @@ pub enum Row {
     /// An item whose choices open in an adjacent panel. AppKit supplies the
     /// trailing disclosure symbol so it matches the system menu treatment.
     Submenu { id: &'static str, label: String },
+    /// An item that stays on one line and ends in an ellipsis when it runs out
+    /// of room, for labels whose shape matters more than their full text.
+    Line {
+        id: &'static str,
+        label: String,
+        symbol: &'static str,
+    },
     /// A row that reveals more rows in the current panel.
     Disclosure {
         id: &'static str,
@@ -44,6 +51,7 @@ extern "C" {
     fn see_menu_toggle(rows: *const NativeRow, count: c_int);
     fn see_menu_hide();
     fn see_menu_update(rows: *const NativeRow, count: c_int);
+    fn see_menu_refresh(rows: *const NativeRow, count: c_int);
     fn see_menu_show_submenu(rows: *const NativeRow, count: c_int, source_id: *const c_char);
     fn see_menu_update_submenu(rows: *const NativeRow, count: c_int);
     fn see_menu_set_callback(pick: extern "C" fn(*const c_char));
@@ -94,6 +102,12 @@ pub fn toggle(rows: &[Row]) {
     native(rows, |ptr, count| unsafe { see_menu_toggle(ptr, count) });
 }
 
+/// Redraws the panel with `rows` if it is open, leaving an open submenu open;
+/// a closed panel draws fresh rows the next time it opens. Main thread only.
+pub fn refresh(rows: &[Row]) {
+    native(rows, |ptr, count| unsafe { see_menu_refresh(ptr, count) });
+}
+
 fn native<T>(rows: &[Row], call: impl FnOnce(*const NativeRow, c_int) -> T) -> T {
     let mut text = Vec::with_capacity(rows.len() * 2);
     let native_rows: Vec<NativeRow> = rows
@@ -130,6 +144,12 @@ fn native<T>(rows: &[Row], call: impl FnOnce(*const NativeRow, c_int) -> T) -> T
                         symbol: symbol.map_or(std::ptr::null(), &mut keep),
                     }
                 }
+                Row::Line { id, label, symbol } => NativeRow {
+                    id: keep(id),
+                    label: keep(label),
+                    kind: 1,
+                    symbol: keep(symbol),
+                },
                 Row::Submenu { id, label } => NativeRow {
                     id: keep(id),
                     label: keep(label),

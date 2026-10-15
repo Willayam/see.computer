@@ -1,0 +1,141 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Set up see.computer</title>
+<style>
+  /* No style attributes anywhere: Tauri's CSP nonce makes 'unsafe-inline'
+     inert, so only this stylesheet and class switches apply. */
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f7; --card: #fff; --text: #1d1d1f; --muted: #6e6e73; --line: rgba(0,0,0,.08);
+    --accent: #0a84ff; --accent-text: #fff; --soft: rgba(0,0,0,.05); --ok: #248a3d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1e; --card: #2c2c2e; --text: #f5f5f7; --muted: #98989d; --line: rgba(255,255,255,.08);
+      --soft: rgba(255,255,255,.08); --ok: #30d158;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text); padding: 28px 24px 20px;
+    font: 400 13px/1.4 -apple-system, system-ui, sans-serif; -webkit-font-smoothing: antialiased;
+    display: flex; flex-direction: column; user-select: none; cursor: default;
+  }
+  h1 { font-size: 20px; font-weight: 650; letter-spacing: -.01em; margin: 0 0 4px; }
+  .lede { color: var(--muted); margin: 0 0 20px; }
+  ol { list-style: none; margin: 0; padding: 0; background: var(--card); border-radius: 12px;
+       box-shadow: 0 0 0 .5px var(--line), 0 1px 2px rgba(0,0,0,.04); }
+  li { display: flex; align-items: center; gap: 12px; padding: 13px 14px; }
+  li + li { border-top: .5px solid var(--line); }
+  .mark { flex: 0 0 22px; height: 22px; border-radius: 50%; display: flex; align-items: center;
+          justify-content: center; font: 600 11px/1 -apple-system, system-ui; font-variant-numeric: tabular-nums;
+          background: var(--soft); color: var(--muted); }
+  .mark svg { width: 11px; height: 11px; display: none; }
+  li.done .mark { background: var(--ok); color: #fff; }
+  li.done .mark span { display: none; }
+  li.done .mark svg { display: block; }
+  .copy { flex: 1; min-width: 0; }
+  .name { font-weight: 590; }
+  .name .optional { font-weight: 400; color: var(--muted); }
+  .why { color: var(--muted); font-size: 12px; margin-top: 1px; }
+  button {
+    flex: 0 0 auto; height: 26px; padding: 0 12px; border: 0; border-radius: 7px; cursor: pointer;
+    font: 500 12.5px -apple-system, system-ui, sans-serif; background: var(--soft); color: var(--text);
+  }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.primary { background: var(--accent); color: var(--accent-text); }
+  li.done button { display: none; }
+  .state { flex: 0 0 auto; color: var(--ok); font-size: 12px; font-weight: 500; display: none; }
+  li.done .state { display: block; }
+  #try.waiting .state { display: block; color: var(--muted); font-weight: 400; }
+  footer { margin-top: auto; padding-top: 16px; display: flex; align-items: center; gap: 12px; }
+  footer p { flex: 1; margin: 0; color: var(--muted); font-size: 11.5px; }
+  footer button { height: 30px; padding: 0 18px; font-size: 13px; }
+</style>
+
+<h1>Set up see.computer</h1>
+<p class="lede">macOS asks for each of these separately. Click Allow, answer the dialog, and the row
+  ticks off by itself.</p>
+
+<ol>
+  <li id="microphone">
+    <div class="mark"><span>1</span><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"
+      stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5l2.2 2.2 4.8-5"/></svg></div>
+    <div class="copy"><div class="name">Microphone</div>
+      <div class="why">Hears you while you hold the key.</div></div>
+    <button>Allow</button><span class="state">Allowed</span>
+  </li>
+  <li id="input-monitoring">
+    <div class="mark"><span>2</span><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"
+      stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5l2.2 2.2 4.8-5"/></svg></div>
+    <div class="copy"><div class="name">Input Monitoring</div>
+      <div class="why">Notices when you hold <span class="trigger">Fn (Globe)</span>. It reads no other keys.</div></div>
+    <button>Allow</button><span class="state">Allowed</span>
+  </li>
+  <li id="accessibility">
+    <div class="mark"><span>3</span><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"
+      stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5l2.2 2.2 4.8-5"/></svg></div>
+    <div class="copy"><div class="name">Accessibility</div>
+      <div class="why">Types your words where the cursor is.</div></div>
+    <button>Allow</button><span class="state">Allowed</span>
+  </li>
+  <li id="screen">
+    <div class="mark"><span>4</span><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"
+      stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5l2.2 2.2 4.8-5"/></svg></div>
+    <div class="copy"><div class="name">Screen Recording <span class="optional">· optional</span></div>
+      <div class="why">Only for screenshots and clips. Dictation works without it.</div></div>
+    <button>Allow</button><span class="state">Allowed</span>
+  </li>
+  <li id="try" class="waiting">
+    <div class="mark"><span>5</span><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"
+      stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.5l2.2 2.2 4.8-5"/></svg></div>
+    <div class="copy"><div class="name">Try it</div>
+      <div class="why">Click into any text field, hold <span class="trigger">Fn (Globe)</span>, say
+        something, and let go.</div></div>
+    <span class="state" id="try-state">Waiting</span>
+  </li>
+</ol>
+
+<footer>
+  <p>If a row stays unticked after you allow it, quit see.computer from the menu bar and open it
+    again. macOS applies some of these only on relaunch.</p>
+  <button id="done">Finish later</button>
+</footer>
+
+<script>
+const PERMISSIONS = ['microphone', 'input-monitoring', 'accessibility', 'screen'];
+const emit = (id) => window.__TAURI__.event.emit('setup-action', id);
+
+for (const id of PERMISSIONS) {
+  document.querySelector(`#${id} button`).addEventListener('click', () => emit(id));
+}
+document.getElementById('done').addEventListener('click', () => emit('done'));
+
+window.__TAURI__.event.listen('setup', ({ payload: p }) => {
+  // The first unfinished row carries the blue button, so there is always one
+  // obvious next click.
+  let next = null;
+  for (const row of p.rows) {
+    const li = document.getElementById(row.id);
+    li.classList.toggle('done', row.granted);
+    li.querySelector('button').textContent = row.asked ? 'Open Settings' : 'Allow';
+    if (!row.granted && !next) next = row.id;
+  }
+  for (const row of p.rows) {
+    document.querySelector(`#${row.id} button`).classList.toggle('primary', row.id === next);
+  }
+  for (const el of document.querySelectorAll('.trigger')) el.textContent = p.trigger;
+
+  const ready = p.rows.every((row) => row.granted || !row.required);
+  const tried = document.getElementById('try');
+  tried.classList.toggle('done', p.dictated);
+  tried.classList.toggle('waiting', !p.dictated);
+  document.getElementById('try-state').textContent =
+    p.dictated ? 'It worked' : ready ? 'Waiting' : 'After steps 1 to 3';
+
+  const done = document.getElementById('done');
+  done.textContent = ready ? 'Done' : 'Finish later';
+  done.classList.toggle('primary', ready && !next);
+});
+</script>

@@ -250,8 +250,8 @@ pub enum Error {
     Event(String),
 }
 
-/// `prompt` is only passed as `true` once, at launch: a consent dialog during a
-/// paste would steal the focus we are about to paste into.
+/// `prompt` is only passed as `true` from the setup window: a consent dialog
+/// during a paste would steal the focus we are about to paste into.
 pub fn accessibility_trusted(prompt: bool) -> bool {
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {

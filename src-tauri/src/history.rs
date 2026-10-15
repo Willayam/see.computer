@@ -44,8 +44,12 @@ impl History {
                     if can_fallback && error.raw_os_error() == Some(libc::EPERM) {
                         let _ = std::fs::create_dir_all(&fallback);
                         set_root(&writer_root, fallback.clone());
-                        let _ = append_entry(&fallback, at, &text);
+                        if append_entry(&fallback, at, &text).is_ok() {
+                            crate::library::changed();
+                        }
                     }
+                } else {
+                    crate::library::changed();
                 }
             }
         });

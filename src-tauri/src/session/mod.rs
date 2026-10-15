@@ -202,7 +202,12 @@ struct Controller {
 impl Controller {
     fn new(wiring: Wiring, inbox: (Sender<Msg>, Receiver<Msg>)) -> Controller {
         let mic_source = wiring.mic.clone();
-        let mic = Mic::open(wiring.mic).ok();
+        // Without consent, opening now would raise the system prompt at launch.
+        // The first press opens it instead, or the setup window asks first.
+        let mic = match wiring.mic {
+            mic::Source::Default if !crate::setup::microphone_granted() => None,
+            source => Mic::open(source).ok(),
+        };
         let engine_loader = wiring.engine.clone();
         let engine = engine::Worker::spawn(wiring.engine, inbox.0.clone());
         Controller {
@@ -669,6 +674,7 @@ impl Controller {
                             self.ledger.dictated(&id, text.as_str(), audio);
                         }
                         self.history.record(text.as_str());
+                        crate::setup::note_dictation();
                         {
                             let held = crate::pill::Held {
                                 text: text.as_str().to_owned(),

@@ -13,6 +13,8 @@ mod history;
 mod hotkeys;
 mod learn;
 mod ledger;
+mod library;
+mod meeting;
 mod menu;
 mod mic;
 mod numbers;
@@ -25,6 +27,7 @@ mod recents;
 mod recorder;
 mod rivals;
 mod session;
+mod setup;
 mod sharing;
 mod target;
 mod text;
@@ -82,6 +85,10 @@ fn main() {
     let ledger = ledger::Ledger::start(history.enabled_flag(), Some(pill_tx.clone()));
     let readback = readback::Readback::start(ledger.clone());
     let sharing = sharing::Sharing::start(config.sharing);
+    let meeting_autostart =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(config.meeting_autostart));
+    let (meetings, meetings_thread) =
+        meeting::controller::spawn(pill_tx.clone(), meeting_autostart.clone());
     let updater = updater::Updater::new(tx.clone(), pill_tx.clone());
     let status = std::sync::Arc::new(std::sync::Mutex::new(session::EngineStatus::Loading {
         phase: engine::Phase::Downloading,
@@ -114,21 +121,29 @@ fn main() {
     let setup_ledger = ledger;
     let setup_status = status;
     let dictionary = dictionary::Dictionary::new(setup_ledger.clone(), setup_history.clone());
+    let setup_meetings = meetings.clone();
     let app = tauri::Builder::default()
         .manage(dictionary)
-        .invoke_handler(tauri::generate_handler![
-            dictionary::dictionary_load,
-            dictionary::dictionary_stamp,
-            dictionary::dictionary_edit,
-            dictionary::dictionary_reveal,
-        ])
         .plugin(hotkeys::plugin(tx.clone()))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        // One handler for every window: a second invoke_handler call would
+        // replace the first.
+        .invoke_handler(tauri::generate_handler![
+            library::library_items,
+            library::library_copy,
+            library::library_reveal,
+            dictionary::dictionary_load,
+            dictionary::dictionary_stamp,
+            dictionary::dictionary_edit,
+            dictionary::dictionary_reveal,
+        ])
         .setup(move |app| {
+            library::attach(app.handle());
+            tauri::Manager::manage(app, setup_history.clone());
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             updater.attach(app.handle());
             let cancel_app = app.handle().clone();
@@ -148,9 +163,11 @@ fn main() {
                     status: setup_status,
                     sharing,
                     updater,
+                    meetings: setup_meetings,
+                    meeting_autostart,
                 },
             )?;
-            paste::accessibility_trusted(true);
+            setup::install(app.handle(), setup_trigger.clone());
             if std::env::var_os("SEE_COMPUTER_OPEN_DICTIONARY").is_some() {
                 dictionary::open(app.handle());
             }
@@ -160,8 +177,13 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("see.computer failed to start");
     let mut controller = Some(controller);
+    let mut meetings_thread = Some(meetings_thread);
     app.run(move |_, event| {
         if matches!(event, tauri::RunEvent::Exit) {
+            meetings.quit();
+            if let Some(handle) = meetings_thread.take() {
+                let _ = handle.join();
+            }
             let _ = tx.send(session::Msg::Quit);
             if let Some(handle) = controller.take() {
                 let _ = handle.join();

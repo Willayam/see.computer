@@ -10,7 +10,7 @@ mod globe;
 mod tap;
 
 pub use globe::{claim as globe_claim, Claim as GlobeClaim};
-pub use tap::{listen_access_granted, spawn_watcher};
+pub use tap::{listen_access_granted, request_listen_access, spawn_watcher};
 
 pub const LEFT_OPTION: u64 = 0x0000_0020;
 pub const RIGHT_OPTION: u64 = 0x0000_0040;
