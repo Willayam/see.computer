@@ -85,7 +85,7 @@ see.computer itself.
 ```
 dictate ─► ledger: id, text, audio, app ─► paste
                                             │
-             read-back (AX) or Fix dialog ◄─┘
+            read-back (AX) or Library fix ◄─┘
                          │
                          ▼
                   Corrected event ─► learner ─► learned.md ─► decoder
@@ -113,8 +113,14 @@ as a rewrite and not recorded. In Electron apps it sets
 `AXManualAccessibility`, the same switch screen readers use, so the field
 becomes readable. It stops when "Save Dictation History" is off.
 
-**The Fix dialog** (menu, Dictionary, Fix Last Dictation…) is the explicit
-path for text that was already sent or an app that exposes nothing.
+**Fixing a line in the Library** is the explicit path for text that was
+already sent or an app that exposes nothing. Every dictation and finished
+meeting line in the Library has a fix button. The fixed text replaces the
+line in its file (the history thread rewrites day files, since it is their
+only writer), and the ledger records the fix as a manual correction under the
+line's own dictation. A line the ledger never saw, such as a dictation from
+before the ledger or a meeting, gets a dictation entry of its own first. Fix
+Last Dictation… in the menu opens the newest dictation this way.
 
 **The learner** (`learn.rs`) aligns each correction against what was pasted
 and keeps only swaps the model could not have written unprompted: a capital
@@ -163,27 +169,31 @@ Margin 3 stays the default: with the merge it has the fewest errors.
 terms seen once (click to learn now), Fix Last Dictation…, and Edit
 Dictionary….
 
-**The window.** Edit Dictionary… opens `ui/dictionary.html`, the app's one
-ordinary window (`dictionary.rs`). It lists every term in `vocabulary.md` and
-`learned.md` as one row, with the words seen once above them and the parked
-ones (`# - Term` lines) below. For each term it shows how often the exact
-spelling appears in the saved history and how often a misheard form does:
-another casing that is not just a sentence opening, a rule's heard form, or
-a form the user corrected in the ledger. From there the user adds, renames,
-deletes, parks and turns terms back on, edits a term's heard forms, sets its
-boost (the tab-separated weight), and learns or ignores a word seen once.
+**The Dictionary in the Library.** Edit Dictionary… opens the Library window
+on its Dictionary destination, beside All, Dictations, Takes and Meetings
+(`ui/dictionary.js`, `dictionary.rs`). It lists every term in `vocabulary.md`
+and `learned.md` as one row, with the words seen once above them and the
+parked ones (`# - Term` lines) below. For each term it shows how often the
+exact spelling appears in saved dictations and meetings and how often a
+misheard form does: another casing that is not just a sentence opening, a
+rule's heard form, or a form the user corrected. It also lists the newest
+lines the term came up in, each of which opens in the Library, where it can
+be fixed. From there the user adds, renames, deletes, parks and turns terms
+back on, edits a term's heard forms, sets its boost (the tab-separated
+weight), and learns or ignores a word seen once.
 
 The files stay the source of truth. `vocabulary.rs` reads each file as its
 own lines, and an edit re-reads the bytes, changes only the lines that hold
 the term it names, and writes the result through a temp file. If a file
 changed between that read and the write, the edit is applied again to the new
-bytes. An edit to a term that is no longer there is refused and the window
-reloads, so a stale window cannot overwrite a sync from another Mac. Writes go
-through the ledger thread, which already appends to `learned.md`, so the
-learner and the window never write it at once. Deleting or renaming a learned
-term records it as forgotten, so the learner does not bring the old spelling
-back. The window polls a cheap stamp of both files, the learner's queue and the
-newest day file, and reloads unless the user is mid-edit.
+bytes. An edit to a term that is no longer there is refused and the section
+reloads, so a stale Library cannot overwrite a sync from another Mac. Writes
+go through the ledger thread, which already appends to `learned.md`, so the
+learner and the Library never write it at once. Deleting or renaming a
+learned term records it as forgotten, so the learner does not bring the old
+spelling back. The section polls a cheap stamp of both files and the
+learner's queue, reloads on the Library's own change event, and holds a
+reload while the user is mid-edit.
 
 Spellings that differ only in case are one term. Renaming a term rewrites
 its lines in both files instead of adding a second entry, and when
@@ -223,7 +233,7 @@ Ranked by expected gain per unit of work. Built items are in this branch.
 | 2 | Learner with review queue and rules | ledger events | none | local | rules: held-out term recall 15/58 → 26/58 | built |
 | 3 | Personal eval corpus and regression score | ledger audio + corrections | none | audio stays local | turns "feels worse" into a number per change | built (`corpus.tsv`, `see-computer eval`) |
 | 4 | Dual decode, keep only boosted hunks that land a term | second greedy pass over the same encoder output | +10.7 ms median per clip | none | errors 187 → 182 at margin 3; margin 4 no longer ends up worse than boost-off (188 vs 190 errors) | built |
-| 5 | Fix dialog and Dictionary menu | native panel rows, NSAlert | none | none | covers apps read-back cannot see | built, not yet seen on screen |
+| 5 | Fixing lines in the Library, and the Dictionary menu | the Library window, native panel rows | none | none | covers apps read-back cannot see | built |
 | 6 | Screen-context terms per dictation | AX text of the focused window read while the user speaks, filtered by the learner's shape test, boosted at low weight for that utterance only | none if read during recording | on-screen text held in memory, never written | names and identifiers visible on screen; also the only lever for "scale" vs "skill" | next |
 | 7 | Daybook feed | read `daybook.db` read-only, last two hours of non-private descriptions | none | already local; skip private rows | project and client names, about 6 minutes stale | next, cheap |
 | 8 | Background miner | nightly job over ledger, history, Daybook, git repos, Wispr's dictionary; optional Haiku pass to judge candidates via the Claude CLI | none | only candidate strings and short contexts leave the machine, and only with Haiku on | fills the review queue before the user corrects anything | later |
@@ -257,8 +267,11 @@ Fixes the audit or the review found that this branch does not make:
 - Env seams: `SEE_COMPUTER_BOOST_MARGIN`, `_SCALE`, `_DEPTH`, `_MERGE=0`,
   `SEE_COMPUTER_VOCABULARY`, `SEE_COMPUTER_LEDGER_DIR`,
   `SEE_COMPUTER_READBACK=0`, `SEE_COMPUTER_READBACK_ELECTRON=0`,
-  `SEE_COMPUTER_OPEN_DICTIONARY=1` (opens the Dictionary window at launch, so
-  a check can drive it without clicking the menu bar), and
+  `SEE_COMPUTER_OPEN_LIBRARY=<route>` (opens the Library at launch on a route
+  such as `dictionary` or `edit:dictation:2026-10-15@<ms>`, so a check can
+  drive it without clicking the menu bar), `SEE_COMPUTER_DOCUMENTS_DIR` (moves
+  the see.computer folder, meetings and takes included, for a check that must
+  not touch the real one), and
   `SEE_COMPUTER_READBACK_LOG` (one line per watch with the app and outcome,
   never the text), and `SEE_COMPUTER_PASTE=hold`, which holds the words
   instead of pasting. Use it with the screen locked: the lock screen reports
