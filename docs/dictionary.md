@@ -219,9 +219,15 @@ the learned spelling and points the term's rules at it (`Lexicon::refresh`).
   entry and a manual correction; fixing a meeting line changed that one line
   of `meeting.md` and logged the same pair at the meeting's start plus the
   line's offset.
+- Focus after the Library closes, run on 2026-10-15 with a scratch TextEdit
+  document frontmost: with only `[NSApp deactivate]`, the workspace still
+  named see.computer frontmost after the close, and the next dictation was
+  logged as landing in see.computer and never reached TextEdit. With the
+  Library handing activation back to the app it opened over, the workspace
+  named TextEdit within half a second, and a dictation replayed from
+  `fixtures/en.wav` was pasted into the document.
 - Not yet seen running: read-back against a live text field (in Electron or
-  anywhere else), and whether focus returns to the previous app when the
-  Library is closed while frontmost. To check read-back, launch with
+  anywhere else). To check read-back, launch with
   `SEE_COMPUTER_READBACK_LOG=1`, dictate into TextEdit and into an Electron
   app, fix a word, and read
   `~/Library/Application Support/see.computer/readback-log.tsv`.
