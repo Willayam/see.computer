@@ -159,22 +159,57 @@ offline simulation exactly.
 
 Margin 3 stays the default: with the merge it has the fewest errors.
 
-**The menu.** Dictionary shows up to eight learned words (click to forget)
-with a link to all of them in `learned.md`, terms seen once (click to learn
-now), Fix Last Dictation…, and Open Vocabulary.
+**The menu.** Dictionary shows up to eight learned words (click to forget),
+terms seen once (click to learn now), Fix Last Dictation…, and Edit
+Dictionary….
+
+**The window.** Edit Dictionary… opens `ui/dictionary.html`, the app's one
+ordinary window (`dictionary.rs`). It lists every term in `vocabulary.md` and
+`learned.md` as one row, with the words seen once above them and the parked
+ones (`# - Term` lines) below. For each term it shows how often the exact
+spelling appears in the saved history and how often a misheard form does:
+another casing that is not just a sentence opening, a rule's heard form, or
+a form the user corrected in the ledger. From there the user adds, renames,
+deletes, parks and turns terms back on, edits a term's heard forms, sets its
+boost (the tab-separated weight), and learns or ignores a word seen once.
+
+The files stay the source of truth. `vocabulary.rs` reads each file as its
+own lines, and an edit re-reads the bytes, changes only the lines that hold
+the term it names, and writes the result through a temp file. If a file
+changed between that read and the write, the edit is applied again to the new
+bytes. An edit to a term that is no longer there is refused and the window
+reloads, so a stale window cannot overwrite a sync from another Mac. Writes go
+through the ledger thread, which already appends to `learned.md`, so the
+learner and the window never write it at once. Deleting or renaming a learned
+term records it as forgotten, so the learner does not bring the old spelling
+back. The window polls a cheap stamp of both files, the learner's queue and the
+newest day file, and reloads unless the user is mid-edit.
+
+Spellings that differ only in case are one term. Renaming a term rewrites
+its lines in both files instead of adding a second entry, and when
+`learned.md` holds a new casing of a `vocabulary.md` term, the decoder uses
+the learned spelling and points the term's rules at it (`Lexicon::refresh`).
 
 ## What is verified
 
-- Unit and controller tests: 196 pass. They cover the ledger, the learner and
+- Unit and controller tests: 213 pass. They cover the ledger, the learner and
   its filter, rules, the merge, read-back's text matching and trimming, eval
-  scoring, and the menu rows.
+  scoring, the menu rows, the vocabulary line edits and their byte
+  preservation, and the window's per-term counts.
 - The eval numbers above come from the release build on the synthetic corpus.
 - In the real app, signed and run with the screen locked, a dictation from a
   replayed wav wrote its ledger events and wav, and `see-computer eval`
   replayed that wav to the same transcript.
+- The Dictionary window, run on 2026-10-15 against copies of the real files:
+  add, casing rename, boost, adding, editing and removing a heard form, park,
+  turn on, and delete each changed only their own lines, and after the round
+  trip `vocabulary.md` was byte-identical to the original. A line added from
+  outside appeared in the open window, an edit to a word deleted on disk was
+  refused with a message, Learn wrote `learned.md` and a `learned` event, and
+  Ignore wrote a `forgotten` event. The app is a regular app while the window
+  is open and an accessory again after it closes.
 - Not yet seen running: read-back against a live text field (in Electron or
-  anywhere else), the Dictionary panel, and the Fix dialog. All three need an
-  unlocked screen. To check read-back, launch with `SEE_COMPUTER_READBACK_LOG=1`,
+  anywhere else) and the Fix dialog. Both need an unlocked screen. To check read-back, launch with `SEE_COMPUTER_READBACK_LOG=1`,
   dictate into TextEdit and into an Electron app, fix a word, and read
   `~/Library/Application Support/see.computer/readback-log.tsv`.
 
@@ -200,8 +235,6 @@ Fixes the audit or the review found that this branch does not make:
 
 - Treat a one-letter transcript as nothing heard.
 - Read iCloud conflict copies of day files.
-- When `learned.md` holds a new casing of a term in `vocabulary.md`, let the
-  learned spelling replace the old one instead of sitting beside it.
 - Forget which apps had their Accessibility tree opened when the app quits,
   so a reused process id does not inherit the paste guard.
 - Compact the ledger. Its events stay in memory and on disk without bound,
@@ -223,7 +256,9 @@ Fixes the audit or the review found that this branch does not make:
   to boosting or the vocabulary.
 - Env seams: `SEE_COMPUTER_BOOST_MARGIN`, `_SCALE`, `_DEPTH`, `_MERGE=0`,
   `SEE_COMPUTER_VOCABULARY`, `SEE_COMPUTER_LEDGER_DIR`,
-  `SEE_COMPUTER_READBACK=0`, `SEE_COMPUTER_READBACK_ELECTRON=0`, and
+  `SEE_COMPUTER_READBACK=0`, `SEE_COMPUTER_READBACK_ELECTRON=0`,
+  `SEE_COMPUTER_OPEN_DICTIONARY=1` (opens the Dictionary window at launch, so
+  a check can drive it without clicking the menu bar), and
   `SEE_COMPUTER_READBACK_LOG` (one line per watch with the app and outcome,
   never the text), and `SEE_COMPUTER_PASTE=hold`, which holds the words
   instead of pasting. Use it with the screen locked: the lock screen reports

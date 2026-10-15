@@ -66,7 +66,7 @@ Parakeet has never heard `Tauri` or `pnpm`, so it writes down the nearest thing 
 - pnpm
 ```
 
-Blank lines and `#` comments are skipped, a leading `- ` is allowed so the file reads as a list, and a tab-separated number after a term pushes that one harder. The file is re-read whenever it changes, so an edit takes effect on the next dictation with no restart. Case matters: the model capitalises, so write terms the way you want them written.
+Blank lines and `#` comments are skipped, a leading `- ` is allowed so the file reads as a list, and a tab-separated number after a term pushes that one harder. The file is re-read whenever it changes, so an edit takes effect on the next dictation with no restart. Case matters: the model capitalises, so write terms the way you want them written. Two spellings that differ only in case count as one term, and the one in `learned.md` wins.
 
 Terms are matched against the model's own tokens, so a word it has no way to spell — one in a script the model does not cover — is reported on stderr and skipped rather than silently ignored.
 
@@ -76,7 +76,7 @@ A term only gets its bonus when the model was already considering it: within `SE
 
 A bonus can win a close call, not overturn a confident one. For a word the model is sure it heard differently, write a rule: `- potato mode -> poteto mode` boosts the right side and also replaces the left side, as whole words, in every transcript.
 
-The app also learns. When you fix a dictated word in place, or with **Dictionary > Fix Last Dictation…** in the tray, it notices spellings the model could not have written on its own. After two sightings (or one fix in the dialog) it adds the term, and a rule for what the model heard instead, to `learned.md` beside `vocabulary.md`. The pill says what it learned, and **Dictionary** lists the words so you can forget one. [docs/dictionary.md](docs/dictionary.md) has the measurements, the rules for what gets learned, and `see-computer eval`, which scores the engine against your own corrected dictations.
+The app also learns. When you fix a dictated word in place, or with **Dictionary > Fix Last Dictation…** in the tray, it notices spellings the model could not have written on its own. After two sightings (or one fix in the dialog) it adds the term, and a rule for what the model heard instead, to `learned.md` beside `vocabulary.md`. The pill says what it learned, and **Dictionary** lists the words so you can forget one. **Dictionary > Edit Dictionary…** opens a window with every term from both files, how often each came out right or misheard in your saved dictations, and its heard forms, boost, and parked state, all editable. It writes the same files and changes only the lines you edit. [docs/dictionary.md](docs/dictionary.md) has the measurements, the rules for what gets learned, and `see-computer eval`, which scores the engine against your own corrected dictations.
 
 ## Build and run
 
