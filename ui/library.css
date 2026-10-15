@@ -118,12 +118,22 @@ svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1
    transition in a window that is not frontmost and leave it half switched. */
 :root.is-switching *, :root.is-switching *::before, :root.is-switching *::after { transition: none !important; }
 
-.list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px 12px; scroll-padding-top: 32px; }
+/* No top padding: a sticky header stops at the padding edge, and rows
+   scrolled past would show through the gap above it. */
+.list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 8px 12px; scroll-padding-top: 36px; }
 .day {
   position: sticky; top: 0; z-index: 1;
-  padding: 10px 6px 4px;
+  padding: 12px 6px 7px;
   font: 500 11px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--faint);
   background: var(--paper-2);
+}
+/* Rows fade out as they pass under a stuck header instead of being cut off
+   right below its label. Only the stuck one: at rest the fade would wash
+   out the row below it. */
+.day.is-stuck::after {
+  content: ""; position: absolute; left: 0; right: 0; top: 100%; height: 16px;
+  background: linear-gradient(var(--paper-2) 35%, color-mix(in srgb, var(--paper-2) 0%, transparent));
+  pointer-events: none;
 }
 .row {
   display: grid; grid-template-columns: 18px 1fr auto; align-items: start; gap: 9px;

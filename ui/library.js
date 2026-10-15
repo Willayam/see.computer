@@ -427,6 +427,17 @@
     $(`.row[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" });
   }
 
+  // Marks the day header that is pinned over scrolled rows, for its fade.
+  function markStuck() {
+    const list = $("#list");
+    const top = list.getBoundingClientRect().top;
+    list.querySelectorAll(".day").forEach((h) => {
+      h.classList.toggle("is-stuck", list.scrollTop > 0 && h.getBoundingClientRect().top - top < 1);
+    });
+  }
+  $("#list").addEventListener("scroll", markStuck, { passive: true });
+  new MutationObserver(markStuck).observe($("#list"), { childList: true });
+
   window.seeLibrary = {
     $, esc, fmt, toast, ICON, GLYPH,
     query: () => query,
