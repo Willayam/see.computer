@@ -11,7 +11,7 @@ use tauri_plugin_autostart::ManagerExt;
 
 use crate::config::Config;
 use crate::history::History;
-use crate::ledger::{Learning, Ledger, Source};
+use crate::ledger::{Learning, Ledger};
 use crate::menu::{self, Row};
 use crate::pill::{Notice, PillEvent};
 use crate::recents::{self, Payload};
@@ -344,7 +344,8 @@ impl Panel {
     }
 
     fn dictionary_rows(&self) -> Vec<Row> {
-        let (rows, waiting, learned) = dictionary_rows(&self.ledger.learning());
+        let fixable = last_dictation(&self.history).is_some();
+        let (rows, waiting, learned) = dictionary_rows(&self.ledger.learning(), fixable);
         *self.waiting.lock().unwrap_or_else(PoisonError::into_inner) = waiting;
         *self.learned.lock().unwrap_or_else(PoisonError::into_inner) = learned;
         rows
@@ -399,23 +400,13 @@ impl Panel {
         match id {
             "dictionary" => Some(self.dictionary_rows()),
             "dictionary-fix" => {
-                if let Some((dictation, text)) = self.ledger.learning().last {
-                    let ledger = self.ledger.clone();
-                    let app = self.app.clone();
-                    std::thread::spawn(move || {
-                        let _ = app.run_on_main_thread(move || {
-                            if let Some(edited) = crate::fix::prompt(&text) {
-                                if edited.trim() != text.trim() {
-                                    ledger.corrected(&dictation, edited.trim(), Source::Manual);
-                                }
-                            }
-                        });
-                    });
+                if let Some(route) = last_dictation(&self.history) {
+                    crate::library::show(&self.app, Some(route));
                 }
                 None
             }
             "dictionary-edit" => {
-                crate::dictionary::open(&self.app);
+                crate::library::show(&self.app, Some("dictionary".to_owned()));
                 None
             }
             "meeting" => {
@@ -554,7 +545,19 @@ fn item(id: &'static str, label: &str, checked: bool, symbol: Option<&'static st
     }
 }
 
-fn dictionary_rows(learning: &Learning) -> (Vec<Row>, Vec<String>, Vec<String>) {
+/// The Library route that opens the newest dictation's line ready to edit.
+fn last_dictation(history: &History) -> Option<String> {
+    use chrono::TimeZone;
+    let entry = history.recent(1).into_iter().next()?;
+    let at = chrono::Local.from_local_datetime(&entry.at).earliest()?;
+    Some(format!(
+        "edit:dictation:{}@{}",
+        entry.at.format("%Y-%m-%d"),
+        at.timestamp_millis()
+    ))
+}
+
+fn dictionary_rows(learning: &Learning, fixable: bool) -> (Vec<Row>, Vec<String>, Vec<String>) {
     let count = learning.learned.len();
     let summary = match count {
         0 => "Learns from words you fix".to_owned(),
@@ -564,11 +567,7 @@ fn dictionary_rows(learning: &Learning) -> (Vec<Row>, Vec<String>, Vec<String>) 
     let mut rows = vec![
         Row::Hint(summary),
         item(
-            if learning.last.is_some() {
-                "dictionary-fix"
-            } else {
-                ""
-            },
+            if fixable { "dictionary-fix" } else { "" },
             "Fix Last Dictation…",
             false,
             Some("pencil"),
@@ -657,7 +656,7 @@ mod dictionary_tests {
 
     #[test]
     fn empty_learning() {
-        let (rows, waiting, learned) = dictionary_rows(&Learning::default());
+        let (rows, waiting, learned) = dictionary_rows(&Learning::default(), false);
         assert_eq!(rows[0], Row::Hint("Learns from words you fix".into()));
         assert_eq!(
             rows[1],
@@ -672,12 +671,12 @@ mod dictionary_tests {
             learned: vec!["Tauri".into()],
             ..Default::default()
         };
-        let (rows, _, payloads) = dictionary_rows(&learning);
+        let (rows, _, payloads) = dictionary_rows(&learning, true);
         assert_eq!(rows[0], Row::Hint("Learned 1 word from your fixes".into()));
         assert!(rows.contains(&item(LEARNED_IDS[0], "Tauri", true, None)));
         assert_eq!(payloads, ["Tauri"]);
         learning.learned = (0..12).map(|n| format!("Term {n}")).collect();
-        let (rows, _, payloads) = dictionary_rows(&learning);
+        let (rows, _, payloads) = dictionary_rows(&learning, true);
         assert_eq!(payloads.len(), 8);
         assert_eq!(
             rows.last(),
@@ -701,7 +700,7 @@ mod dictionary_tests {
             }],
             ..Default::default()
         };
-        let (rows, waiting, _) = dictionary_rows(&learning);
+        let (rows, waiting, _) = dictionary_rows(&learning, true);
         assert!(rows.contains(&item(
             WAIT_IDS[0],
             "Supabase  · heard \"superbase\"",

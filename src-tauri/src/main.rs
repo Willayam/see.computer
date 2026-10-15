@@ -8,7 +8,6 @@ mod dictionary;
 mod engine;
 mod eval;
 mod filler;
-mod fix;
 mod history;
 mod hotkeys;
 mod learn;
@@ -136,6 +135,7 @@ fn main() {
             library::library_items,
             library::library_copy,
             library::library_reveal,
+            library::library_fix,
             dictionary::dictionary_load,
             dictionary::dictionary_stamp,
             dictionary::dictionary_edit,
@@ -144,6 +144,7 @@ fn main() {
         .setup(move |app| {
             library::attach(app.handle());
             tauri::Manager::manage(app, setup_history.clone());
+            tauri::Manager::manage(app, setup_ledger.clone());
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             updater.attach(app.handle());
             let cancel_app = app.handle().clone();
@@ -168,8 +169,9 @@ fn main() {
                 },
             )?;
             setup::install(app.handle(), setup_trigger.clone());
-            if std::env::var_os("SEE_COMPUTER_OPEN_DICTIONARY").is_some() {
-                dictionary::open(app.handle());
+            if let Some(route) = std::env::var_os("SEE_COMPUTER_OPEN_LIBRARY") {
+                let route = route.to_string_lossy().into_owned();
+                library::show(app.handle(), (!route.is_empty()).then_some(route));
             }
             trigger::spawn_watcher(setup_trigger, setup_watcher_tx, setup_gesture);
             Ok(())

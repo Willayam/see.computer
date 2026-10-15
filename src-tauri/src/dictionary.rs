@@ -1,29 +1,27 @@
-//! The Dictionary window: every term in `vocabulary.md` and `learned.md` in
-//! one list, how each has come out in past dictations, and the edits the
-//! files allow. The files stay the source of truth; the window reads them
-//! fresh on every change and writes through the ledger thread.
+//! The Library's Dictionary section: every term in `vocabulary.md` and
+//! `learned.md` as one row, how each has come out in saved dictations and
+//! meetings, and the edits the files allow. The files stay the source of
+//! truth; the section reads them fresh on every change and writes through the
+//! ledger thread.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
 use std::time::SystemTime;
-
-use tauri::window::{Effect, EffectState, EffectsBuilder};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use crate::history::History;
 use crate::ledger::{Learning, Ledger};
+use crate::library::Spoken;
 use crate::vocabulary::{same, Document, Edit, Files, Line};
 
-const LABEL: &str = "dictionary";
+/// How many transcript lines a term's detail lists.
+const RECENT: usize = 6;
 
 pub struct Dictionary {
     ledger: Ledger,
     history: History,
     /// Fixed at launch, the moment the ledger fixes the one it writes.
     vocabulary: PathBuf,
-    corpus: Mutex<Corpus>,
 }
 
 impl Dictionary {
@@ -32,7 +30,6 @@ impl Dictionary {
             ledger,
             history,
             vocabulary: crate::boost::Lexicon::default_path(),
-            corpus: Mutex::new(Corpus::default()),
         }
     }
 
@@ -49,22 +46,18 @@ impl Dictionary {
             .read()
             .map_err(|error| format!("Unable to read your dictionary: {error}."))?;
         let learning = self.ledger.learning();
-        let mut corpus = self.corpus.lock().unwrap_or_else(PoisonError::into_inner);
-        corpus.refresh(&self.history);
+        let corpus = Corpus::new(crate::library::spoken(&self.history.root()));
         let mut snapshot = snapshot(&vocabulary, &learned, &learning, &corpus);
         snapshot.stamp = stamp;
         Ok(snapshot)
     }
 
-    /// Changes whenever anything the window shows could have: either file,
-    /// the learner's queue, or a new dictation in history.
+    /// Changes whenever the files or the learner's queue do. New dictations
+    /// and meetings reach the Library through its own `library-changed`.
     fn stamp(&self, files: &Files) -> String {
         let mut hasher = DefaultHasher::new();
         file_stamp(&files.vocabulary).hash(&mut hasher);
         file_stamp(&files.learned).hash(&mut hasher);
-        if let Some((_, newest)) = self.history.days().first() {
-            file_stamp(newest).hash(&mut hasher);
-        }
         let learning = self.ledger.learning();
         learning.learned.hash(&mut hasher);
         for waiting in &learning.waiting {
@@ -81,74 +74,83 @@ fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
         .and_then(|meta| Some((meta.modified().ok()?, meta.len())))
 }
 
-/// Every dictation's text joined into one haystack, re-read only when a day
-/// file changes.
-#[derive(Default)]
+/// Every dictation and meeting line, newest first, joined into one haystack
+/// for the totals and kept as lines for each term's recent list.
 struct Corpus {
-    days: Vec<(PathBuf, Option<(SystemTime, u64)>)>,
-    dictations: usize,
+    lines: Vec<Spoken>,
     exact: String,
     lower: String,
 }
 
 impl Corpus {
-    fn refresh(&mut self, history: &History) {
-        let days: Vec<_> = history
-            .days()
-            .into_iter()
-            .map(|(date, path)| {
-                let stamp = file_stamp(&path);
-                ((date, path), stamp)
-            })
-            .collect();
-        let unchanged = days.len() == self.days.len()
-            && days
-                .iter()
-                .zip(&self.days)
-                .all(|(((_, path), stamp), (old_path, old_stamp))| {
-                    path == old_path && stamp == old_stamp
-                });
-        if unchanged {
-            return;
+    fn new(lines: Vec<Spoken>) -> Corpus {
+        let exact = lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Corpus {
+            lower: exact.to_lowercase(),
+            exact,
+            lines,
         }
-        let mut exact = String::new();
-        self.dictations = 0;
-        for ((date, path), _) in &days {
-            let Ok(content) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            for entry in crate::history::parse_day(*date, &content) {
-                exact.push_str(&entry.text);
-                exact.push('\n');
-                self.dictations += 1;
-            }
-        }
-        self.lower = exact.to_lowercase();
-        self.exact = exact;
-        self.days = days
-            .into_iter()
-            .map(|((_, path), stamp)| (path, stamp))
-            .collect();
     }
+}
 
-    fn count(&self, needle: &str, case_sensitive: bool) -> usize {
-        if case_sensitive {
-            crate::boost::occurrences(&self.exact, needle, true)
+/// The spellings that count for and against one term.
+struct Forms {
+    term: String,
+    /// How the term looks opening a sentence, which is not a mishearing.
+    capitalized: String,
+    /// Lowercased heard forms: its rules' and what the user corrected.
+    wrong: Vec<String>,
+}
+
+impl Forms {
+    /// How often `exact` holds the term as written and how often a misheard
+    /// form. `lower` is `exact` lowercased, passed in so a haystack is
+    /// lowercased once however many terms are counted in it.
+    fn tally(&self, exact: &str, lower: &str) -> (usize, usize) {
+        let count =
+            |haystack: &str, needle: &str| crate::boost::occurrences(haystack, needle, true);
+        let right = count(exact, &self.term);
+        let opening = if self.capitalized == self.term {
+            0
         } else {
-            crate::boost::occurrences(&self.lower, &needle.to_lowercase(), true)
-        }
+            count(exact, &self.capitalized)
+        };
+        let other_casing = count(lower, &self.term.to_lowercase()).saturating_sub(right + opening);
+        // A heard form inside the term itself ("md" in CLAUDE.md) or inside
+        // a longer heard form ("os" in "work os") is not counted again there.
+        let mut containers = vec![self.term.to_lowercase()];
+        containers.extend(self.wrong.iter().cloned());
+        let heard: usize = self
+            .wrong
+            .iter()
+            .map(|form| {
+                let inside: usize = containers
+                    .iter()
+                    .filter(|outer| outer.len() > form.len())
+                    .map(|outer| count(outer, form) * count(lower, outer))
+                    .sum();
+                count(lower, form).saturating_sub(inside)
+            })
+            .sum();
+        (right, other_casing + heard)
     }
 }
 
 #[derive(Debug, Default, PartialEq, serde::Serialize)]
 pub struct Snapshot {
     stamp: String,
-    dictations: usize,
+    /// How many dictation and meeting lines the counts cover.
+    lines: usize,
     words: Vec<Word>,
     waiting: Vec<Waiting>,
 }
 
 #[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Word {
     term: String,
     parked: bool,
@@ -158,12 +160,24 @@ struct Word {
     rules: Vec<Rule>,
     right: usize,
     misheard: usize,
+    recent: Vec<Recent>,
 }
 
 #[derive(Debug, PartialEq, serde::Serialize)]
 struct Rule {
     heard: String,
     learned: bool,
+}
+
+/// A transcript line the term came out in, as the Library can open it.
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Recent {
+    item: String,
+    start_ms: i64,
+    at_ms: i64,
+    text: String,
+    misheard: bool,
 }
 
 #[derive(Debug, PartialEq, serde::Serialize)]
@@ -182,22 +196,24 @@ fn snapshot(
     corpus: &Corpus,
 ) -> Snapshot {
     let mut words: Vec<Word> = Vec::new();
+    let blank = |term: String, weight: f32| Word {
+        term,
+        parked: false,
+        vocabulary: false,
+        learned: false,
+        weight,
+        rules: Vec::new(),
+        right: 0,
+        misheard: 0,
+        recent: Vec::new(),
+    };
     for (in_learned, document) in [(false, vocabulary), (true, learned)] {
         for line in document.lines() {
             let Line::Active(entry) = line else { continue };
             let index = match words.iter().position(|w| same(&w.term, &entry.term)) {
                 Some(index) => index,
                 None => {
-                    words.push(Word {
-                        term: entry.term.clone(),
-                        parked: false,
-                        vocabulary: false,
-                        learned: false,
-                        weight: entry.weight,
-                        rules: Vec::new(),
-                        right: 0,
-                        misheard: 0,
-                    });
+                    words.push(blank(entry.term.clone(), entry.weight));
                     words.len() - 1
                 }
             };
@@ -235,25 +251,23 @@ fn snapshot(
                 }
             }
             Some(_) => {}
-            None => words.push(Word {
-                term: entry.term,
-                parked: true,
-                vocabulary: true,
-                learned: false,
-                weight: entry.weight,
-                rules: entry
-                    .heard
-                    .map(|heard| Rule {
-                        heard,
-                        learned: false,
-                    })
-                    .into_iter()
-                    .collect(),
-                right: 0,
-                misheard: 0,
-            }),
+            None => {
+                let mut word = blank(entry.term, entry.weight);
+                word.parked = true;
+                word.vocabulary = true;
+                word.rules.extend(entry.heard.map(|heard| Rule {
+                    heard,
+                    learned: false,
+                }));
+                words.push(word);
+            }
         }
     }
+    let lowered: Vec<String> = corpus
+        .lines
+        .iter()
+        .map(|line| line.text.to_lowercase())
+        .collect();
     for word in &mut words {
         let mut wrong: Vec<String> = word.rules.iter().map(|r| r.heard.to_lowercase()).collect();
         for (term, heard) in &learning.heard {
@@ -264,35 +278,31 @@ fn snapshot(
         wrong.retain(|form| !same(form, &word.term));
         wrong.sort();
         wrong.dedup();
-        word.right = corpus.count(&word.term, true);
-        let capitalized = capitalize(&word.term);
-        let opening = if capitalized == word.term {
-            0
-        } else {
-            corpus.count(&capitalized, true)
+        let forms = Forms {
+            capitalized: capitalize(&word.term),
+            term: word.term.clone(),
+            wrong,
         };
-        let other_casing = corpus
-            .count(&word.term, false)
-            .saturating_sub(word.right + opening);
-        // A heard form inside the term itself ("md" in CLAUDE.md) or inside
-        // a longer heard form ("os" in "work os") is not counted again there.
-        let mut containers = vec![word.term.to_lowercase()];
-        containers.extend(wrong.iter().cloned());
-        word.misheard = other_casing
-            + wrong
-                .iter()
-                .map(|form| {
-                    let inside: usize = containers
-                        .iter()
-                        .filter(|outer| outer.len() > form.len())
-                        .map(|outer| {
-                            crate::boost::occurrences(outer, form, true)
-                                * corpus.count(outer, false)
-                        })
-                        .sum();
-                    corpus.count(form, false).saturating_sub(inside)
+        (word.right, word.misheard) = forms.tally(&corpus.exact, &corpus.lower);
+        if word.right + word.misheard == 0 {
+            continue;
+        }
+        word.recent = corpus
+            .lines
+            .iter()
+            .zip(&lowered)
+            .filter_map(|(line, lower)| {
+                let (right, misheard) = forms.tally(&line.text, lower);
+                (right + misheard > 0).then(|| Recent {
+                    item: line.item.clone(),
+                    start_ms: line.start_ms,
+                    at_ms: line.at_ms,
+                    text: line.text.clone(),
+                    misheard: misheard > 0,
                 })
-                .sum::<usize>();
+            })
+            .take(RECENT)
+            .collect();
     }
     words.sort_by_cached_key(|w| w.term.to_lowercase());
     let waiting = learning
@@ -310,13 +320,12 @@ fn snapshot(
         .collect();
     Snapshot {
         stamp: String::new(),
-        dictations: corpus.dictations,
+        lines: corpus.lines.len(),
         words,
         waiting,
     }
 }
 
-/// How a term looks opening a sentence, which is not a mishearing.
 fn capitalize(term: &str) -> String {
     let mut chars = term.chars();
     match chars.next() {
@@ -361,87 +370,24 @@ pub async fn dictionary_reveal(state: tauri::State<'_, Dictionary>) -> Result<()
         .map_err(|error| format!("Unable to open Finder: {error}."))
 }
 
-/// Opens the window, or brings it forward. The app runs as an accessory with
-/// no Dock icon, which cannot own a key window the user can Cmd-Tab to, so it
-/// becomes a regular app while the window is open and goes back when it
-/// closes. Main thread only.
-pub fn open(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(LABEL) {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
-        activate();
-        return;
-    }
-    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
-    let built = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("dictionary.html".into()))
-        .title("Dictionary")
-        .inner_size(780.0, 540.0)
-        .min_inner_size(600.0, 400.0)
-        .center()
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true)
-        .transparent(true)
-        .effects(
-            EffectsBuilder::new()
-                .effect(Effect::Sidebar)
-                .state(EffectState::FollowsWindowActiveState)
-                .build(),
-        )
-        .build();
-    match built {
-        Ok(window) => {
-            let closing = app.clone();
-            window.on_window_event(move |event| {
-                if matches!(event, WindowEvent::Destroyed) {
-                    let _ = closing.set_activation_policy(tauri::ActivationPolicy::Accessory);
-                    // The next dictation pastes into the frontmost app, so
-                    // that has to be the app the user came from, not us.
-                    deactivate();
-                }
-            });
-            let _ = window.set_focus();
-            activate();
-        }
-        Err(error) => {
-            eprintln!("could not open the dictionary window: {error}");
-            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-        }
-    }
-}
-
-fn shared_app() -> Option<&'static objc2::runtime::AnyObject> {
-    use objc2::msg_send;
-    let class = objc2::runtime::AnyClass::get(c"NSApplication")?;
-    unsafe { msg_send![class, sharedApplication] }
-}
-
-/// macOS 14's cooperative activation grants this after a click in the menu.
-fn activate() {
-    if let Some(app) = shared_app() {
-        unsafe { objc2::msg_send![app, activate] }
-    }
-}
-
-/// Hands the focus back to the app the user came from.
-fn deactivate() {
-    if let Some(app) = shared_app() {
-        unsafe { objc2::msg_send![app, deactivate] }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Lines newest first, each its own dictation a minute apart.
     fn corpus(texts: &[&str]) -> Corpus {
-        let exact = texts.join("\n");
-        Corpus {
-            days: Vec::new(),
-            dictations: texts.len(),
-            lower: exact.to_lowercase(),
-            exact,
-        }
+        Corpus::new(
+            texts
+                .iter()
+                .enumerate()
+                .map(|(index, text)| Spoken {
+                    item: format!("dictation:2026-10-{:02}", 15 - index),
+                    start_ms: 1_000_000 - index as i64 * 60_000,
+                    at_ms: 1_000_000 - index as i64 * 60_000,
+                    text: (*text).to_owned(),
+                })
+                .collect(),
+        )
     }
 
     fn snapshot_of(vocabulary: &str, history: &[&str]) -> Snapshot {
@@ -500,6 +446,16 @@ mod tests {
             }]
         );
         assert_eq!((poteto.right, poteto.misheard), (1, 1));
+        assert_eq!(
+            poteto.recent,
+            [Recent {
+                item: "dictation:2026-10-15".into(),
+                start_ms: 1_000_000,
+                at_ms: 1_000_000,
+                text: "Poteto mode is on. I said potato again.".into(),
+                misheard: true,
+            }]
+        );
         let pnpm = row("pnpm");
         assert!(!pnpm.parked, "an active line wins over a parked copy");
         assert_eq!(pnpm.weight, 3.0);
@@ -510,7 +466,9 @@ mod tests {
         );
         let supabase = row("Supabase");
         assert_eq!((supabase.right, supabase.misheard), (1, 2));
+        assert_eq!(supabase.recent[0].item, "dictation:2026-10-13");
         assert!(row("EAS").parked);
+        assert!(row("EAS").recent.is_empty());
         let claude = snapshot_of("- md -> CLAUDE.md\n", &["Read CLAUDE.md, then claude md."]);
         assert_eq!(
             (claude.words[0].right, claude.words[0].misheard),
@@ -525,5 +483,16 @@ mod tests {
             }],
             "a waiting word already in the list is not offered again"
         );
+    }
+
+    #[test]
+    fn recent_lines_are_the_newest_first_and_capped() {
+        let texts: Vec<String> = (0..10).map(|n| format!("Tauri build {n}")).collect();
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let snapshot = snapshot_of("- Tauri\n", &texts);
+        let recent = &snapshot.words[0].recent;
+        assert_eq!(recent.len(), RECENT);
+        assert_eq!(recent[0].text, "Tauri build 0");
+        assert!(recent.iter().all(|line| !line.misheard));
     }
 }

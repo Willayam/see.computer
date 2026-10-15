@@ -6,6 +6,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::history::History;
+use crate::ledger::Ledger;
 use crate::meeting::folder;
 
 #[derive(Serialize)]
@@ -94,20 +95,38 @@ pub fn show(app: &AppHandle, select: Option<String>) {
         .focused(true)
         .build()
     {
-        Ok(_) => activate(app),
+        Ok(window) => {
+            let closing = app.clone();
+            window.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::Destroyed) {
+                    // The next dictation pastes into the frontmost app, so
+                    // that has to be the one the user came from, not us.
+                    set_active(&closing, false);
+                }
+            });
+            activate(app);
+        }
         Err(error) => eprintln!("could not open Library: {error}"),
     }
 }
 
 fn activate(app: &AppHandle) {
-    let _ = app.run_on_main_thread(|| unsafe {
+    set_active(app, true);
+}
+
+fn set_active(app: &AppHandle, active: bool) {
+    let _ = app.run_on_main_thread(move || unsafe {
         use objc2::msg_send;
         use objc2::runtime::{AnyClass, AnyObject};
         let Some(class) = AnyClass::get(c"NSApplication") else {
             return;
         };
         let application: *mut AnyObject = msg_send![class, sharedApplication];
-        let _: () = msg_send![application, activate];
+        if active {
+            let _: () = msg_send![application, activate];
+        } else {
+            let _: () = msg_send![application, deactivate];
+        }
     });
 }
 
@@ -142,6 +161,108 @@ pub fn library_reveal(path: String, history: State<'_, History>) -> Result<(), S
         .spawn()
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+/// Fixes one transcript line where the Library shows it, then teaches the
+/// learner from the fix, as the Fix dialog did. Dictations are rewritten by
+/// the history thread, which owns the day files; a finished meeting's
+/// markdown has no other writer.
+#[tauri::command]
+pub async fn library_fix(
+    id: String,
+    start_ms: i64,
+    original: String,
+    edited: String,
+    history: State<'_, History>,
+    ledger: State<'_, Ledger>,
+) -> Result<(), String> {
+    let edited = edited.trim();
+    if edited.is_empty() {
+        return Err("Type the corrected text, or press Cancel.".to_owned());
+    }
+    if edited == original.trim() {
+        return Ok(());
+    }
+    match id.split_once(':') {
+        Some(("dictation", _)) => {
+            if edited.lines().any(|line| line.starts_with("## ")) {
+                return Err(
+                    "Start no line with \"## \"; the history uses it to mark a dictation."
+                        .to_owned(),
+                );
+            }
+            let at = Local
+                .timestamp_millis_opt(start_ms)
+                .single()
+                .ok_or("That dictation has no valid time.")?
+                .naive_local();
+            history
+                .replace(crate::history::Fix {
+                    at,
+                    original: original.clone(),
+                    edited: edited.to_owned(),
+                })
+                .recv()
+                .map_err(|_| "Unable to save. Quit and reopen see.computer, then try again.")??;
+            ledger.fixed(start_ms, &original, edited);
+            Ok(())
+        }
+        Some(("meeting", name)) if !name.contains(['/', '\\']) && name != ".." => {
+            if edited.contains('\n') {
+                return Err("Keep a meeting line on one line.".to_owned());
+            }
+            let folder = crate::paths::documents().join(name);
+            let manifest =
+                folder::read(&folder).ok_or("That meeting is no longer in the Library.")?;
+            if manifest.state != folder::State::Done {
+                return Err("Wait until the meeting has finished transcribing.".to_owned());
+            }
+            let path = folder.join(folder::MARKDOWN);
+            let failed = |error: std::io::Error| format!("Unable to save: {error}.");
+            let before = std::fs::read_to_string(&path).map_err(failed)?;
+            let after = fixed_meeting(&before, start_ms, &original, edited)
+                .ok_or("That line changed on disk, so the Library has been reloaded.")?;
+            let temp = path.with_extension("md.tmp");
+            std::fs::write(&temp, after).map_err(failed)?;
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(before.as_str()) {
+                let _ = std::fs::remove_file(&temp);
+                return Err("The meeting changed while saving. Try again.".to_owned());
+            }
+            std::fs::rename(temp, &path).map_err(failed)?;
+            changed();
+            ledger.fixed(manifest.started_ms + start_ms, &original, edited);
+            Ok(())
+        }
+        _ => Err("Only dictations and meetings can be fixed here.".to_owned()),
+    }
+}
+
+/// One spoken line from a dictation or a meeting, for the Dictionary's
+/// counts. Takes are left out: their words are in the day files already.
+pub struct Spoken {
+    pub item: String,
+    pub start_ms: i64,
+    pub at_ms: i64,
+    pub text: String,
+}
+
+/// Every dictation and meeting line, newest first.
+pub fn spoken(history_root: &Path) -> Vec<Spoken> {
+    let mut out: Vec<Spoken> = items(history_root)
+        .into_iter()
+        .filter(|item| matches!(item.kind, "dictation" | "meeting"))
+        .flat_map(|item| {
+            let base = if item.kind == "meeting" { item.at } else { 0 };
+            item.lines.into_iter().map(move |line| Spoken {
+                item: item.id.clone(),
+                start_ms: line.start_ms,
+                at_ms: base + line.start_ms,
+                text: line.text,
+            })
+        })
+        .collect();
+    out.sort_by_key(|line| std::cmp::Reverse(line.at_ms));
+    out
 }
 
 fn path_string(path: &Path) -> String {
@@ -224,35 +345,63 @@ fn day(path: &Path) -> Option<Item> {
     })
 }
 
+/// `[mm:ss] You: text` as its start, speaker, and where the text begins.
+fn meeting_line(line: &str) -> Option<(i64, &'static str, usize)> {
+    let (clock, rest) = line.strip_prefix('[')?.split_once("] ")?;
+    let parts = clock
+        .split(':')
+        .map(str::parse::<i64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let seconds = match parts.as_slice() {
+        [minutes, seconds] => minutes * 60 + seconds,
+        [hours, minutes, seconds] => hours * 3600 + minutes * 60 + seconds,
+        _ => return None,
+    };
+    let (speaker, _) = rest.split_once(": ")?;
+    let speaker = match speaker {
+        "You" => "you",
+        "Them" => "them",
+        _ => return None,
+    };
+    Some((seconds * 1000, speaker, clock.len() + 3 + speaker.len() + 2))
+}
+
 fn meeting_lines(markdown: &str) -> Vec<Line> {
     markdown
         .lines()
         .filter_map(|line| {
-            let (clock, rest) = line.strip_prefix('[')?.split_once("] ")?;
-            let parts = clock
-                .split(':')
-                .map(str::parse::<i64>)
-                .collect::<Result<Vec<_>, _>>()
-                .ok()?;
-            let seconds = match parts.as_slice() {
-                [minutes, seconds] => minutes * 60 + seconds,
-                [hours, minutes, seconds] => hours * 3600 + minutes * 60 + seconds,
-                _ => return None,
-            };
-            let (speaker, text) = rest.split_once(": ")?;
-            let speaker = match speaker {
-                "You" => "you",
-                "Them" => "them",
-                _ => return None,
-            };
+            let (start_ms, speaker, text) = meeting_line(line)?;
             Some(Line {
-                start_ms: seconds * 1000,
+                start_ms,
                 end_ms: None,
                 speaker: Some(speaker),
-                text: text.trim().to_owned(),
+                text: line[text..].trim().to_owned(),
             })
         })
         .collect()
+}
+
+/// The markdown with one line's words replaced, or `None` when no line at
+/// that time still reads as `original`. Every other byte is kept.
+fn fixed_meeting(markdown: &str, start_ms: i64, original: &str, edited: &str) -> Option<String> {
+    let mut out = String::with_capacity(markdown.len() + edited.len());
+    let mut done = false;
+    for chunk in markdown.split_inclusive('\n') {
+        let body = chunk.trim_end_matches(['\n', '\r']);
+        match meeting_line(body) {
+            Some((at, _, text))
+                if !done && at == start_ms && body[text..].trim() == original.trim() =>
+            {
+                out.push_str(&body[..text]);
+                out.push_str(edited.trim());
+                out.push_str(&chunk[body.len()..]);
+                done = true;
+            }
+            _ => out.push_str(chunk),
+        }
+    }
+    done.then_some(out)
 }
 
 fn meeting(path: &Path) -> Option<Item> {
@@ -581,6 +730,20 @@ mod tests {
         assert_eq!(lines[1].start_ms, 3_723_000);
         assert_eq!(lines[1].speaker, Some("them"));
         assert_eq!(lines[1].text, "Hi.");
+    }
+
+    #[test]
+    fn a_meeting_fix_changes_only_its_line() {
+        let markdown = "# Zoom meeting\n\nOct 7.\n\n[00:05] You: we use superbase\n\n[00:05] Them: we use superbase\n";
+        assert_eq!(
+            fixed_meeting(markdown, 5_000, "we use superbase", "we use Supabase").as_deref(),
+            Some("# Zoom meeting\n\nOct 7.\n\n[00:05] You: we use Supabase\n\n[00:05] Them: we use superbase\n")
+        );
+        assert_eq!(
+            fixed_meeting(markdown, 6_000, "we use superbase", "x"),
+            None,
+            "a line that is no longer there is not rewritten"
+        );
     }
 
     #[test]

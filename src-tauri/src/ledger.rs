@@ -69,6 +69,15 @@ enum Command {
     Flush(mpsc::Sender<()>),
     Forget(String),
     Edit(crate::vocabulary::Edit, mpsc::Sender<Result<(), String>>),
+    Fixed(Fixed),
+}
+
+/// A transcript line the user fixed in the Library, which may be a dictation
+/// from before the ledger existed or a meeting line it never saw.
+struct Fixed {
+    at_ms: i64,
+    original: String,
+    edited: String,
 }
 
 #[derive(Clone)]
@@ -83,7 +92,6 @@ pub struct Ledger {
 pub struct Learning {
     pub learned: Vec<String>,
     pub waiting: Vec<crate::learn::Waiting>,
-    pub last: Option<(Id, String)>,
     /// What the model wrote in place of each term the user corrected.
     pub heard: Vec<(String, Vec<String>)>,
 }
@@ -134,12 +142,6 @@ impl Ledger {
                         }
                         if append(&root, &event).is_ok() {
                             events.push(event);
-                            if let Some(Event::Dictated { id, text, .. }) = events.last() {
-                                snapshot
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .last = Some((id.clone(), text.clone()));
-                            }
                         }
                         let protected = corrected.keys().cloned().collect();
                         prune(&root, keep_audio, 50, &protected);
@@ -155,6 +157,43 @@ impl Ledger {
                             if correct {
                                 promote(&root, &vocabulary, &words, &mut events, &pill);
                             }
+                            update_learning(&snapshot, &events, &vocabulary, &words);
+                        }
+                    }
+                    Command::Fixed(fixed) => {
+                        let id = match dictation_at(&events, &fixed) {
+                            Some(id) => Some(id),
+                            None => {
+                                let id = unused_id(&events, fixed.at_ms);
+                                let event = Event::Dictated {
+                                    id: id.clone(),
+                                    at: Local
+                                        .timestamp_millis_opt(fixed.at_ms)
+                                        .single()
+                                        .unwrap_or_else(Local::now)
+                                        .to_rfc3339(),
+                                    text: fixed.original.trim().to_owned(),
+                                    audio: None,
+                                };
+                                append(&root, &event).is_ok().then(|| {
+                                    events.push(event);
+                                    id
+                                })
+                            }
+                        };
+                        let event = id.map(|id| Event::Corrected {
+                            id,
+                            at: Local::now().to_rfc3339(),
+                            text: fixed.edited.trim().to_owned(),
+                            source: Source::Manual,
+                        });
+                        if let Some(event) = event.filter(|event| append(&root, event).is_ok()) {
+                            if let Event::Corrected { id, text, .. } = &event {
+                                corrected.insert(id.clone(), text.clone());
+                                let _ = write_corpus(&root, &corrected);
+                            }
+                            events.push(event);
+                            promote(&root, &vocabulary, &words, &mut events, &pill);
                             update_learning(&snapshot, &events, &vocabulary, &words);
                         }
                     }
@@ -286,6 +325,19 @@ impl Ledger {
                     crate::paste::Landing::Held => "held",
                 }
                 .to_owned(),
+            }));
+        }
+    }
+
+    /// Teaches the learner from a transcript line fixed in the Library, the
+    /// way the Fix dialog used to: the line's own dictation when the ledger
+    /// has it, or a new entry for one it never saw.
+    pub fn fixed(&self, at_ms: i64, original: &str, edited: &str) {
+        if self.enabled.load(Ordering::Relaxed) && original.trim() != edited.trim() {
+            let _ = self.tx.send(Command::Fixed(Fixed {
+                at_ms,
+                original: original.to_owned(),
+                edited: edited.to_owned(),
             }));
         }
     }
@@ -501,9 +553,6 @@ fn update_learning(
     let mut learning = Learning::default();
     for event in events.iter().rev() {
         match event {
-            Event::Dictated { id, text, .. } if learning.last.is_none() => {
-                learning.last = Some((id.clone(), text.clone()))
-            }
             Event::Learned { term, .. }
                 if !forgotten.contains(term.as_str()) && !learning.learned.contains(term) =>
             {
@@ -517,6 +566,40 @@ fn update_learning(
     *snapshot
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = learning;
+}
+
+/// The ledger's own record of a fixed line: same text, dictated within two
+/// minutes of when the history says it was. The closest one wins.
+fn dictation_at(events: &[Event], fixed: &Fixed) -> Option<Id> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Dictated { id, at, text, .. } if text.trim() == fixed.original.trim() => {
+                let at = chrono::DateTime::parse_from_rfc3339(at).ok()?;
+                Some((id, (at.timestamp_millis() - fixed.at_ms).abs()))
+            }
+            _ => None,
+        })
+        .filter(|(_, gap)| *gap <= 120_000)
+        .min_by_key(|(_, gap)| *gap)
+        .map(|(id, _)| id.clone())
+}
+
+/// An id in the usual shape for a moment, moved on a millisecond at a time
+/// past any id the log already holds.
+fn unused_id(events: &[Event], at_ms: i64) -> Id {
+    let taken: HashSet<&Id> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Dictated { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    (at_ms..)
+        .filter_map(|ms| Local.timestamp_millis_opt(ms).single())
+        .map(|at| Id(at.format("%Y%m%d-%H%M%S-%3f").to_string()))
+        .find(|id| !taken.contains(id))
+        .expect("some millisecond is free")
 }
 
 /// Removes every casing of `term` from `learned.md` and returns the
@@ -760,6 +843,39 @@ mod tests {
             .lines()
             .all(|l| l.starts_with('#')));
         assert!(ledger.learning().learned.is_empty());
+    }
+
+    #[test]
+    fn a_line_fixed_in_the_library_teaches_like_the_fix_dialog() {
+        let (ledger, root) = fixture(500);
+        let id = ledger.mint();
+        ledger.dictated(&id, "we use superbase", crate::mic::Audio16k::silence(0.01));
+        ledger.flush();
+        let at_ms = Local::now().timestamp_millis();
+        ledger.fixed(at_ms, "we use superbase", "we use Supabase");
+        ledger.fixed(
+            at_ms - 86_400_000,
+            "ship with fastlain",
+            "ship with Fastlane",
+        );
+        ledger.flush();
+        let events = read(&root);
+        assert!(
+            events.iter().any(|e| matches!(e,
+                Event::Corrected { id: fixed, source: Source::Manual, .. } if *fixed == id)),
+            "a line the ledger dictated is corrected under its own id"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, Event::Dictated { audio: None, text, .. } if text == "ship with fastlain"))
+                .count(),
+            1,
+            "a line it never saw gets an entry of its own"
+        );
+        let learned = fs::read_to_string(root.join("learned.md")).unwrap();
+        assert!(learned.contains("- superbase -> Supabase\n"), "{learned}");
+        assert!(learned.contains("- fastlain -> Fastlane\n"), "{learned}");
     }
 
     #[test]

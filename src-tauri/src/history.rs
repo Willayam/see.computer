@@ -3,14 +3,29 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct History {
     root: Arc<Mutex<PathBuf>>,
     enabled: Arc<AtomicBool>,
-    tx: Sender<String>,
+    tx: Sender<Request>,
+}
+
+/// The history thread is the only writer of day files, so a fix made in the
+/// Library cannot race the append of the next dictation.
+enum Request {
+    Append(String),
+    Replace(Fix, Sender<Result<(), String>>),
+}
+
+/// One dictation's text as the Library showed it, and what the user changed
+/// it to.
+pub struct Fix {
+    pub at: NaiveDateTime,
+    pub original: String,
+    pub edited: String,
 }
 
 pub struct Entry {
@@ -26,7 +41,7 @@ impl History {
         let initial = seam.clone().unwrap_or_else(|| preferred.clone());
         let root = Arc::new(Mutex::new(initial));
         let enabled = Arc::new(AtomicBool::new(enabled));
-        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let (tx, rx) = mpsc::channel::<Request>();
         let writer_root = root.clone();
         crate::qos::spawn("see-history", crate::qos::Class::Upkeep, move || {
             let (live, can_fallback) = match seam {
@@ -37,7 +52,18 @@ impl History {
                 None => (resolve_root(&preferred, &fallback), true),
             };
             set_root(&writer_root, live);
-            while let Ok(text) = rx.recv() {
+            while let Ok(write) = rx.recv() {
+                let text = match write {
+                    Request::Append(text) => text,
+                    Request::Replace(fix, reply) => {
+                        let result = replace_entry(&locked_root(&writer_root), &fix);
+                        if result.is_ok() {
+                            crate::library::changed();
+                        }
+                        let _ = reply.send(result);
+                        continue;
+                    }
+                };
                 let at = Local::now();
                 let live = locked_root(&writer_root);
                 if let Err(error) = append_entry(&live, at, &text) {
@@ -58,8 +84,22 @@ impl History {
 
     pub fn record(&self, text: &str) {
         if self.enabled() {
-            let _ = self.tx.send(text.to_owned());
+            let _ = self.tx.send(Request::Append(text.to_owned()));
         }
+    }
+
+    /// Rewrites one entry's text in its day file. The reply says whether the
+    /// entry was still there as the Library showed it.
+    pub fn replace(&self, fix: Fix) -> Receiver<Result<(), String>> {
+        let (reply, outcome) = mpsc::channel();
+        if let Err(mpsc::SendError(Request::Replace(_, reply))) =
+            self.tx.send(Request::Replace(fix, reply))
+        {
+            let _ = reply.send(Err(
+                "Unable to save. Quit and reopen see.computer, then try again.".to_owned(),
+            ));
+        }
+        outcome
     }
 
     pub fn recent(&self, limit: usize) -> Vec<Entry> {
@@ -68,11 +108,6 @@ impl History {
 
     pub fn root(&self) -> PathBuf {
         locked_root(&self.root)
-    }
-
-    /// Every day file, newest first.
-    pub fn days(&self) -> Vec<(NaiveDate, PathBuf)> {
-        day_files(&self.root())
     }
 
     pub fn enabled(&self) -> bool {
@@ -162,7 +197,60 @@ fn day_files(root: &Path) -> Vec<(NaiveDate, PathBuf)> {
     days
 }
 
-pub fn parse_day(date: NaiveDate, content: &str) -> Vec<Entry> {
+fn replace_entry(root: &Path, fix: &Fix) -> Result<(), String> {
+    let path = root.join(format!("{}.md", fix.at.format("%Y-%m-%d")));
+    let failed = |error: io::Error| format!("Unable to save: {error}.");
+    let before = std::fs::read_to_string(&path).map_err(failed)?;
+    let after = replaced(&before, fix).ok_or_else(|| {
+        "That dictation changed on disk, so the Library has been reloaded.".to_owned()
+    })?;
+    let temp = path.with_extension("md.tmp");
+    std::fs::write(&temp, after).map_err(failed)?;
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(before.as_str()) {
+        let _ = std::fs::remove_file(&temp);
+        return Err("The day's history changed while saving. Try again.".to_owned());
+    }
+    std::fs::rename(temp, path).map_err(failed)
+}
+
+/// The day file with one entry's body swapped, or `None` when no entry at
+/// that time still reads as `original`. Every other byte is kept.
+fn replaced(content: &str, fix: &Fix) -> Option<String> {
+    let heading = format!("## {}\n\n", fix.at.format("%H:%M:%S"));
+    let mut from = 0;
+    while let Some(found) = content[from..].find(&heading) {
+        let start = from + found;
+        from = start + heading.len();
+        if start > 0 && content.as_bytes()[start - 1] != b'\n' {
+            continue;
+        }
+        let body_start = start + heading.len();
+        let body_end = content[body_start..]
+            .match_indices("\n## ")
+            .map(|(index, _)| body_start + index + 1)
+            .find(|&next| {
+                let rest = &content[next + 3..];
+                rest.get(..8)
+                    .is_some_and(|time| NaiveTime::parse_from_str(time, "%H:%M:%S").is_ok())
+            })
+            .unwrap_or(content.len());
+        let body = &content[body_start..body_end];
+        if body.trim() != fix.original.trim() {
+            continue;
+        }
+        let tail = &body[body.trim_end().len()..];
+        return Some(format!(
+            "{}{}{}{}",
+            &content[..body_start],
+            fix.edited.trim(),
+            tail,
+            &content[body_end..]
+        ));
+    }
+    None
+}
+
+fn parse_day(date: NaiveDate, content: &str) -> Vec<Entry> {
     let mut headings = Vec::new();
     for (start, _) in content.match_indices("## ") {
         if start > 0 && content.as_bytes().get(start - 1) != Some(&b'\n') {
@@ -351,6 +439,34 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&blocked, permissions).unwrap();
         assert_eq!(resolved, fallback);
+    }
+
+    #[test]
+    fn a_fix_replaces_one_entry_and_keeps_every_other_byte() {
+        let day = "## 09:00:00\n\nuse potato mode\n\n## 09:00:00\n\nsame second\n\n## 10:15:00\n\nlast one\n\n";
+        let fix = |time: &str, original: &str, edited: &str| Fix {
+            at: NaiveDate::from_ymd_opt(2026, 10, 15)
+                .unwrap()
+                .and_time(NaiveTime::parse_from_str(time, "%H:%M:%S").unwrap()),
+            original: original.into(),
+            edited: edited.into(),
+        };
+        assert_eq!(
+            replaced(day, &fix("09:00:00", "same second", "Same second, fixed")).as_deref(),
+            Some(
+                day.replace("same second\n", "Same second, fixed\n")
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            replaced(day, &fix("10:15:00", " last one ", "Last one.")).as_deref(),
+            Some(day.replace("last one\n", "Last one.\n").as_str())
+        );
+        assert_eq!(
+            replaced(day, &fix("09:00:00", "not there", "x")),
+            None,
+            "an entry that changed on disk is not overwritten"
+        );
     }
 
     #[test]
