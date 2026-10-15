@@ -200,8 +200,8 @@ Fixes the audit or the review found that this branch does not make:
 
 - Treat a one-letter transcript as nothing heard.
 - Read iCloud conflict copies of day files.
-- Correct the casing of a few seeded vocabulary terms ("Github", "SupaBase",
-  "vercel").
+- When `learned.md` holds a new casing of a term in `vocabulary.md`, let the
+  learned spelling replace the old one instead of sitting beside it.
 - Forget which apps had their Accessibility tree opened when the app quits,
   so a reused process id does not inherit the paste guard.
 - Compact the ledger. Its events stay in memory and on disk without bound,
