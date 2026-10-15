@@ -30,6 +30,7 @@ mod text;
 mod tray;
 mod trigger;
 mod updater;
+mod vocabulary;
 
 fn acquire_single_instance() -> std::fs::File {
     use std::os::fd::AsRawFd;

@@ -21,13 +21,13 @@ pub(crate) fn occurrences(text: &str, term: &str, case_sensitive: bool) -> usize
     if term.is_empty() {
         return 0;
     }
-    let (haystack, needle) = if case_sensitive {
-        (text.to_owned(), term.to_owned())
+    let (haystack, needle): (std::borrow::Cow<str>, std::borrow::Cow<str>) = if case_sensitive {
+        (text.into(), term.into())
     } else {
-        (text.to_lowercase(), term.to_lowercase())
+        (text.to_lowercase().into(), term.to_lowercase().into())
     };
     haystack
-        .match_indices(&needle)
+        .match_indices(needle.as_ref())
         .filter(|(start, matched)| {
             let before = haystack[..*start].chars().next_back();
             let after = haystack[start + matched.len()..].chars().next();
@@ -273,14 +273,30 @@ impl Lexicon {
             let (parsed, found) = fs::read_to_string(path)
                 .map(|s| parse(&s))
                 .unwrap_or_default();
+            // Spellings that differ only in case are one term, and the one
+            // read last wins. `learned.md` is read last, so a casing the user
+            // taught by fixing it replaces the one in `vocabulary.md`.
             for term in parsed {
-                if let Some(old) = terms.iter_mut().find(|old| old.text == term.text) {
-                    old.weight = old.weight.max(term.weight);
-                } else {
-                    terms.push(term);
+                match terms
+                    .iter_mut()
+                    .find(|old| crate::vocabulary::same(&old.text, &term.text))
+                {
+                    Some(old) => {
+                        old.weight = old.weight.max(term.weight);
+                        old.text = term.text;
+                    }
+                    None => terms.push(term),
                 }
             }
             rules.extend(found);
+        }
+        for rule in &mut rules {
+            if let Some(term) = terms
+                .iter()
+                .find(|term| crate::vocabulary::same(&term.text, &rule.term))
+            {
+                rule.term.clone_from(&term.text);
+            }
         }
         rules.sort_by_key(|r| std::cmp::Reverse(r.heard.len()));
         let changed = terms != self.terms || rules != self.rules;
@@ -329,44 +345,27 @@ impl Lexicon {
     }
 }
 
-/// One term per line. `#` comments and blank lines are skipped, a leading `-`
-/// is allowed so the file reads as a markdown list, and a tab-separated number
-/// overrides the weight. `heard -> Term` boosts `Term` and also rewrites the
-/// phrase the model keeps hearing instead, which is what boosting cannot fix
-/// when the model is confident in the wrong word.
+/// The active lines of a vocabulary file, read by `vocabulary::Line`.
+/// `heard -> Term` boosts `Term` and also rewrites the phrase the model keeps
+/// hearing instead, which is what boosting cannot fix when the model is
+/// confident in the wrong word.
 fn parse(text: &str) -> (Vec<Term>, Vec<Rule>) {
     let mut terms = Vec::new();
     let mut rules = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        let line = line.strip_prefix("- ").unwrap_or(line);
-        if line.is_empty() || line.starts_with('#') {
+    for line in crate::vocabulary::Document::parse(text).lines() {
+        let crate::vocabulary::Line::Active(entry) = line else {
             continue;
-        }
-        let (body, weight) = match line.split_once('\t') {
-            Some((body, weight)) => (body.trim(), weight.trim().parse::<f32>().unwrap_or(1.0)),
-            None => (line, 1.0),
         };
-        if !weight.is_finite() || weight <= 0.0 {
-            continue;
-        }
-        let (heard, term) = match body.split_once(" -> ") {
-            Some((heard, term)) if !heard.is_empty() && !term.is_empty() => (Some(heard), term),
-            _ => (None, body),
-        };
-        if term.is_empty() {
-            continue;
-        }
-        terms.push(Term {
-            text: term.to_owned(),
-            weight,
-        });
-        if let Some(heard) = heard {
+        if let Some(heard) = entry.heard {
             rules.push(Rule {
-                heard: heard.to_owned(),
-                term: term.to_owned(),
+                heard,
+                term: entry.term.clone(),
             });
         }
+        terms.push(Term {
+            text: entry.term,
+            weight: entry.weight,
+        });
     }
     (terms, rules)
 }
@@ -797,6 +796,31 @@ mod tests {
             lexicon.rewrite("potato mode or potato  mode"),
             "poteto mode or potato  mode"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_learned_casing_replaces_the_vocabulary_spelling() {
+        let root = std::env::temp_dir().join(format!("lexicon-case-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("vocabulary.md"),
+            "- poteto\n- potato -> poteto\n- Tauri\n",
+        )
+        .unwrap();
+        fs::write(root.join("learned.md"), "- Poteto\t2\n").unwrap();
+        let lexicon = Lexicon::load(root.join("vocabulary.md"));
+        assert_eq!(
+            lexicon.terms(),
+            [
+                Term {
+                    text: "Poteto".into(),
+                    weight: 2.0
+                },
+                term("Tauri")
+            ]
+        );
+        assert_eq!(lexicon.rewrite("use potato mode"), "use Poteto mode");
         fs::remove_dir_all(root).unwrap();
     }
 
