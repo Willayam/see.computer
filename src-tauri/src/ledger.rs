@@ -170,6 +170,14 @@ impl Ledger {
                                     .flatten();
                                 match (fix, &pill) {
                                     (Some(fix), Some(pill)) => {
+                                        // Words learned that the card does not name
+                                        // still get their flash, before it.
+                                        let others: Vec<_> = names
+                                            .iter()
+                                            .filter(|n| **n != fix.wrote)
+                                            .cloned()
+                                            .collect();
+                                        announce(&Some(pill.clone()), &others);
                                         let _ = pill.send(PillEvent::Fixed(fix));
                                     }
                                     _ => announce(&pill, &names),
@@ -537,10 +545,11 @@ fn fix_notice(
     })?;
     let known = known_terms(vocabulary);
     let waiting = crate::learn::waiting(events, &known, words);
+    // A word this fix taught comes first: that is the news.
     crate::learn::swaps(pasted, edited)
         .into_iter()
         .filter(|swap| crate::learn::learnable(swap, words))
-        .find_map(|swap| {
+        .filter_map(|swap| {
             let learned = learned.contains(&swap.wrote);
             let open = waiting.iter().any(|w| w.term == swap.wrote) || known.contains(&swap.wrote);
             (learned || open).then_some(crate::pill::Fix {
@@ -549,6 +558,7 @@ fn fix_notice(
                 learned,
             })
         })
+        .min_by_key(|fix| !fix.learned)
 }
 
 /// Every spelling either file holds, so a casing the user already has is
