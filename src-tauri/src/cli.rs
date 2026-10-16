@@ -239,6 +239,7 @@ fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
         .collect();
     let context = [
         ("SEE_COMPUTER_EVAL_SCREEN_TEXT", "screen"),
+        ("SEE_COMPUTER_EVAL_DAYBOOK_TEXT", "daybook"),
     ]
     .into_iter()
     .flat_map(|(name, source)| {
