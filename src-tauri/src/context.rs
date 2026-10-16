@@ -306,13 +306,30 @@ mod tests {
             "a",
             "with",
             "yesterday",
+            "convex",
+            "we",
+            "store",
+            "rows",
+            "now",
+            "chat",
+            "agent",
         ]);
         let screen = "Settings\nKlarna\nI sent the file to Larsten yesterday. And then Larsten replied.\n\
                       Comparing prices on Prisjakt.nu with a MacBook Pro, a dropdown and a follow-up.\n\
-                      RIGHT 3D T3 n8n API, Sep 3 PM. I'll ask Larsten's team.";
+                      RIGHT 3D T3 n8n API, Sep 3 PM. I'll ask Larsten's team.\n\
+                      We store the rows in Convex now.\nNew Chat With The Agent";
         assert_eq!(
             crate::learn::context_terms(screen, &words),
-            ["Larsten", "Klarna", "Prisjakt.nu", "MacBook", "n8n", "API"]
+            [
+                "Larsten",
+                "Klarna",
+                "Prisjakt.nu",
+                "MacBook",
+                "n8n",
+                "API",
+                "Pro",
+                "Convex"
+            ]
         );
         let daybook = ["Larsten".to_owned(), "Klarna".to_owned()];
         let screen: Vec<String> = (0..40).map(|n| format!("Term{n}")).collect();
