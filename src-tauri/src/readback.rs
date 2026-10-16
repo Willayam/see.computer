@@ -288,7 +288,9 @@ pub fn screen_text() -> Option<String> {
     }
     let deadline = Instant::now() + Duration::from_millis(800);
     let observation = crate::target::observe();
-    if Instant::now() >= deadline { return None; }
+    if Instant::now() >= deadline {
+        return None;
+    }
     let app = Cf(unsafe { AXUIElementCreateApplication(observation.pid) });
     if app.0.is_null() {
         return None;
@@ -313,7 +315,9 @@ pub fn screen_text() -> Option<String> {
         }
     }
     let fallback = focused.and_then(Result::ok);
-    let window = (Instant::now() < deadline).then(|| copy(app.0, c"AXFocusedWindow").ok()).flatten();
+    let window = (Instant::now() < deadline)
+        .then(|| copy(app.0, c"AXFocusedWindow").ok())
+        .flatten();
     let focused_element = observation
         .element
         .as_ref()
