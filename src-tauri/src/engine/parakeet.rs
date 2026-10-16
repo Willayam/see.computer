@@ -71,9 +71,16 @@ impl Parakeet {
 
     /// Tidying, the heard-form rules, then near misses of on-screen names.
     fn finish(&self, raw: &str) -> String {
+        let saved: Vec<&str> = self
+            .lexicon
+            .terms()
+            .iter()
+            .map(|term| term.text.as_str())
+            .collect();
         crate::context::near_misses(
             &self.lexicon.rewrite(&tidy(raw)),
             &self.context,
+            &saved,
             crate::learn::Words::shared(),
         )
     }

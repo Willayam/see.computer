@@ -47,7 +47,12 @@ pub fn gather(screen: &[String], daybook: &[String]) -> Vec<Term> {
 /// swapped letter from exactly one screen term that starts with the same two
 /// letters. A letter added or dropped is left alone: in the user's own lines
 /// those were Swedish inflections, "Fridag" and "Fridas" beside "Frida".
-pub fn near_misses(text: &str, terms: &[Term], words: &crate::learn::Words) -> String {
+pub fn near_misses(
+    text: &str,
+    terms: &[Term],
+    saved: &[&str],
+    words: &crate::learn::Words,
+) -> String {
     let names: Vec<&str> = terms
         .iter()
         .filter(|term| term.source == "screen" && term.text.chars().all(char::is_alphabetic))
@@ -64,7 +69,14 @@ pub fn near_misses(text: &str, terms: &[Term], words: &crate::learn::Words) -> S
             .map_or(rest.len(), |offset| start + offset);
         let word = &rest[start..end];
         out.push_str(&rest[..start]);
-        out.push_str(near_miss(word, &names, words).unwrap_or(word));
+        // A saved vocabulary word came out as meant.
+        let keep = saved.iter().any(|term| term.eq_ignore_ascii_case(word));
+        out.push_str(
+            (!keep)
+                .then(|| near_miss(word, &names, words))
+                .flatten()
+                .unwrap_or(word),
+        );
         rest = &rest[end..];
     }
     out.push_str(rest);
@@ -337,7 +349,7 @@ mod tests {
                 })
                 .collect()
         };
-        let fix = |text: &str, terms: &[Term]| near_misses(text, terms, &words);
+        let fix = |text: &str, terms: &[Term]| near_misses(text, terms, &[], &words);
         let terms = screen(&["Larsten", "Frida"]);
         assert_eq!(
             fix("I sent the file to Larston yesterday.", &terms),
@@ -351,6 +363,13 @@ mod tests {
         );
         // Two names it could be is no answer, and Daybook is not the screen.
         assert_eq!(fix("Larston", &screen(&["Larsten", "Larstan"])), "Larston");
+        // A saved vocabulary word is what the user meant.
+        let kvittu = screen(&["Kvittu"]);
+        assert_eq!(fix("Kvitto", &kvittu), "Kvittu");
+        assert_eq!(
+            near_misses("Kvitto", &kvittu, &["kvitto"], &words),
+            "Kvitto"
+        );
         let daybook = [Term {
             text: "Larsten".into(),
             source: "daybook",
