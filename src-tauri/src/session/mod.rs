@@ -399,6 +399,7 @@ impl Controller {
                             }
                             let armed = mic.arm();
                             self.share_take = self.sharing.enabled();
+                            self.engine.begin_context(crate::context::begin());
                             self.engine.warm();
                             self.show(Activity::Listening);
                             Session::Dictating {
@@ -673,6 +674,8 @@ impl Controller {
                         if let Some(audio) = audio {
                             self.ledger.dictated(&id, text.as_str(), audio);
                         }
+                        self.ledger
+                            .context(&id, &self.engine.context_used(), text.as_str());
                         self.history.record(text.as_str());
                         crate::setup::note_dictation();
                         {

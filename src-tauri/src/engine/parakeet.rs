@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use parakeet_rs::{TimestampMode, TokenBias};
 
-use crate::boost::{merge, Boost, Lexicon, Pieces};
+use crate::boost::{merge, Boost, Lexicon, Pieces, Term};
 
 use super::{Engine, EngineError, ModelFiles, Segment, Transcription};
 use crate::mic::Audio16k;
@@ -31,6 +31,7 @@ pub struct Parakeet {
     pieces: Option<Pieces>,
     lexicon: Lexicon,
     boost: Option<Boost>,
+    context: Vec<crate::context::Term>,
 }
 
 impl Parakeet {
@@ -61,11 +62,43 @@ impl Parakeet {
         let Some(pieces) = self.pieces.as_ref() else {
             return;
         };
-        let boost = Boost::build(pieces, self.lexicon.terms());
+        let boost = Boost::build(pieces, &self.active_terms());
         for term in boost.unencodable() {
             eprintln!("vocabulary: \"{term}\" cannot be spelled from this model's tokens");
         }
         self.boost = (!boost.is_empty()).then_some(boost);
+    }
+
+    /// Tidying, the heard-form rules, then near misses of on-screen names.
+    fn finish(&self, raw: &str) -> String {
+        let saved: Vec<&str> = self
+            .lexicon
+            .terms()
+            .iter()
+            .map(|term| term.text.as_str())
+            .collect();
+        crate::context::near_misses(
+            &self.lexicon.rewrite(&tidy(raw)),
+            &self.context,
+            &saved,
+            crate::learn::Words::shared(),
+        )
+    }
+
+    fn active_terms(&self) -> Vec<Term> {
+        let mut terms = self.lexicon.terms().to_vec();
+        for context in &self.context {
+            if !terms
+                .iter()
+                .any(|term| term.text.eq_ignore_ascii_case(&context.text))
+            {
+                terms.push(Term {
+                    text: context.text.clone(),
+                    weight: 0.5,
+                });
+            }
+        }
+        terms
     }
 }
 
@@ -83,6 +116,7 @@ fn open(dir: &Path) -> Result<Parakeet, EngineError> {
             pieces: Pieces::load(&dir.join(VOCAB)),
             lexicon: Lexicon::load(PathBuf::new()),
             boost: None,
+            context: Vec::new(),
         })
         .map_err(|error| EngineError::Load(error.to_string()))
 }
@@ -123,11 +157,34 @@ fn tidy(raw: &str) -> String {
 }
 
 impl Engine for Parakeet {
+    fn set_context(&mut self, terms: &[crate::context::Term]) {
+        let saved = self.lexicon.terms();
+        self.context = terms
+            .iter()
+            .filter(|term| {
+                !saved
+                    .iter()
+                    .any(|entry| entry.text.eq_ignore_ascii_case(&term.text))
+                    && self
+                        .pieces
+                        .as_ref()
+                        .is_some_and(|pieces| pieces.encode(&term.text).is_some())
+            })
+            .cloned()
+            .collect();
+        self.rebuild_boost();
+    }
+
+    fn context_terms(&self) -> Vec<crate::context::Term> {
+        self.context.clone()
+    }
+
     fn transcribe(&mut self, audio: &Audio16k) -> Result<Transcription, EngineError> {
         // A stat per utterance, so editing the vocabulary file is all it takes.
         if self.lexicon.refresh() {
             self.rebuild_boost();
         }
+        let active_terms = self.active_terms();
         let pair =
             self.boost.is_some() && std::env::var("SEE_COMPUTER_BOOST_MERGE").as_deref() != Ok("0");
         let (plain, result) = if pair {
@@ -160,7 +217,7 @@ impl Engine for Parakeet {
             .filter(|p| p.tokens.len() == result.tokens.len());
         let text = plain.as_ref().map_or_else(
             || result.text.clone(),
-            |p| merge(&p.text, &result.text, self.lexicon.terms()),
+            |p| merge(&p.text, &result.text, &active_terms),
         );
         Ok(Transcription {
             audio: None,
@@ -172,9 +229,9 @@ impl Engine for Parakeet {
                     let source = matched_segments.map_or(token, |p| &p.tokens[index]);
                     let raw = matched_segments.map_or_else(
                         || token.text.clone(),
-                        |p| merge(&p.tokens[index].text, &token.text, self.lexicon.terms()),
+                        |p| merge(&p.tokens[index].text, &token.text, &active_terms),
                     );
-                    let text = self.lexicon.rewrite(&tidy(&raw));
+                    let text = self.finish(&raw);
                     (!text.is_empty()).then(|| Segment {
                         start_ms: (source.start.max(0.0) * 1000.0).round() as u64,
                         end_ms: (source.end.max(0.0) * 1000.0).round() as u64,
@@ -182,7 +239,7 @@ impl Engine for Parakeet {
                     })
                 })
                 .collect(),
-            text: Text::parse(self.lexicon.rewrite(&tidy(&text))),
+            text: Text::parse(self.finish(&text)),
         })
     }
 }

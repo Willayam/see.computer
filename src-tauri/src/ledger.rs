@@ -44,6 +44,10 @@ pub enum Event {
         focus: String,
         landing: String,
     },
+    Context {
+        id: Id,
+        terms: Vec<ContextHit>,
+    },
     Corrected {
         id: Id,
         at: String,
@@ -60,6 +64,13 @@ pub enum Event {
         at: String,
         term: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ContextHit {
+    pub term: String,
+    pub source: String,
+    pub landed: bool,
 }
 
 enum Command {
@@ -334,6 +345,23 @@ impl Ledger {
                 },
                 audio,
             ));
+        }
+    }
+
+    pub fn context(&self, id: &Id, terms: &[crate::context::Term], text: &str) {
+        if self.enabled.load(Ordering::Relaxed) && !terms.is_empty() {
+            let terms = terms
+                .iter()
+                .map(|term| ContextHit {
+                    term: term.text.clone(),
+                    source: term.source.to_owned(),
+                    landed: crate::boost::occurrences(text, &term.text, false) > 0,
+                })
+                .collect();
+            let _ = self.tx.send(Command::Event(Event::Context {
+                id: id.clone(),
+                terms,
+            }));
         }
     }
 
@@ -889,6 +917,32 @@ mod tests {
         assert!(
             matches!(&events[2], Event::Corrected { text, source: Source::ReadBack, .. } if text == "Tauri!")
         );
+    }
+
+    #[test]
+    fn context_event_records_only_terms_and_landing() {
+        let (ledger, root) = fixture(500);
+        let id = ledger.mint();
+        ledger.context(
+            &id,
+            &[crate::context::Term {
+                text: "Zorvia".into(),
+                source: "screen",
+            }],
+            "Use Zorvia today",
+        );
+        ledger.flush();
+        let events = read(&root);
+        assert!(
+            matches!(&events[0], Event::Context { terms, .. } if terms == &[ContextHit {
+                term: "Zorvia".into(), source: "screen".into(), landed: true
+            }])
+        );
+        assert!(!std::fs::read_to_string(root.join("events.jsonl"))
+            .unwrap()
+            .contains("Use Zorvia today"));
+        drop(ledger);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

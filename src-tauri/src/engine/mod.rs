@@ -12,6 +12,10 @@ pub use models::{ModelFiles, Models};
 
 pub trait Engine: Send {
     fn transcribe(&mut self, audio: &Audio16k) -> Result<Transcription, EngineError>;
+    fn set_context(&mut self, _terms: &[crate::context::Term]) {}
+    fn context_terms(&self) -> Vec<crate::context::Term> {
+        Vec::new()
+    }
 }
 
 const SAMPLE_RATE: usize = 16_000;
@@ -221,6 +225,7 @@ enum Job {
     /// reclaims the mmapped weights while the app sits idle, and paying the
     /// page-in during the recording hides it from the release-to-paste path.
     Warm,
+    Context(std::sync::mpsc::Receiver<Vec<crate::context::Term>>),
     Feed(Audio16k),
     Discard,
     Transcribe(JobId, Audio16k),
@@ -229,11 +234,14 @@ enum Job {
 pub struct Worker {
     jobs: Sender<Job>,
     next: u64,
+    context_used: std::sync::Arc<std::sync::Mutex<Vec<crate::context::Term>>>,
 }
 
 impl Worker {
     pub fn spawn<M: From<Event> + Send + 'static>(loader: Loader, reply: Sender<M>) -> Worker {
         let (jobs, rx) = std::sync::mpsc::channel();
+        let context_used = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let used = context_used.clone();
         crate::qos::spawn("see-engine", crate::qos::Class::Engine, move || {
             let loaded: Result<Box<dyn Engine>, EngineError> = match loader {
                 Loader::Models(models) => {
@@ -274,15 +282,40 @@ impl Worker {
                 }
             };
             let mut utterance = Utterance::default();
+            let mut context: Option<std::sync::mpsc::Receiver<Vec<crate::context::Term>>> = None;
             while let Ok(job) = rx.recv() {
+                if let Some(receiver) = &context {
+                    if let Ok(terms) = receiver.try_recv() {
+                        engine.set_context(&terms);
+                        *used
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            engine.context_terms();
+                        context = None;
+                    }
+                }
                 match job {
                     Job::Warm => {
                         let _ = engine.transcribe(&Audio16k::silence(1.0));
                     }
+                    Job::Context(receiver) => {
+                        utterance.reset();
+                        engine.set_context(&[]);
+                        used.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clear();
+                        context = Some(receiver);
+                    }
                     Job::Feed(audio) => utterance.feed(engine.as_mut(), &audio),
-                    Job::Discard => utterance.reset(),
+                    Job::Discard => {
+                        utterance.reset();
+                        engine.set_context(&[]);
+                        context = None;
+                    }
                     Job::Transcribe(job, audio) => {
                         let result = utterance.finish(engine.as_mut(), &audio);
+                        engine.set_context(&[]);
+                        context = None;
                         if reply.send(Event::Done(job, result).into()).is_err() {
                             break;
                         }
@@ -290,7 +323,11 @@ impl Worker {
                 }
             }
         });
-        Worker { jobs, next: 0 }
+        Worker {
+            jobs,
+            next: 0,
+            context_used,
+        }
     }
 
     pub fn submit(&mut self, audio: Audio16k) -> Result<JobId, EngineError> {
@@ -306,6 +343,17 @@ impl Worker {
     /// worker already surfaced its error through `Event::Ready`.
     pub fn warm(&self) {
         let _ = self.jobs.send(Job::Warm);
+    }
+
+    pub fn begin_context(&self, context: std::sync::mpsc::Receiver<Vec<crate::context::Term>>) {
+        let _ = self.jobs.send(Job::Context(context));
+    }
+
+    pub fn context_used(&self) -> Vec<crate::context::Term> {
+        self.context_used
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn feed(&self, audio: Audio16k) {

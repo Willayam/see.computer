@@ -164,7 +164,7 @@ impl Pieces {
     /// disagree with the model's own tokenization of a term, which costs a
     /// little boosting accuracy and nothing else: a term tokenized slightly
     /// differently simply fails to match and goes unboosted.
-    fn encode(&self, term: &str) -> Option<Vec<usize>> {
+    pub(crate) fn encode(&self, term: &str) -> Option<Vec<usize>> {
         let mut out = Vec::new();
         for word in term.split_whitespace() {
             // A word start carries the sentencepiece word-boundary marker.
