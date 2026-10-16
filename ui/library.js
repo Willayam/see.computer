@@ -28,6 +28,8 @@
 
   let kind = "all";
   let query = "";
+  // Until the first load answers, the panes say so instead of sitting empty.
+  let loaded = false;
   let currentId = null;
   // The transcript line being fixed, and the text typed so far, which a
   // reload must not throw away.
@@ -106,7 +108,7 @@
       el.addEventListener("click", () => select(i.id));
       list.appendChild(el);
     }
-    if (!rows.length) list.innerHTML = '<div class="empty">Nothing matches.</div>';
+    if (!rows.length) list.innerHTML = `<div class="empty">${loaded ? "Nothing matches." : "Loading…"}</div>`;
     $("#count").textContent = `${rows.length} of ${items.length}`;
   }
 
@@ -254,7 +256,7 @@
     if (dictionary()) return dictionary().renderDetail();
     const d = $("#detail");
     const i = items.find((x) => x.id === currentId);
-    if (!i) { d.innerHTML = '<div class="blank">Pick something on the left.</div>'; return; }
+    if (!i) { d.innerHTML = `<div class="blank">${loaded ? "Pick something on the left." : "Loading your library…"}</div>`; return; }
     d.innerHTML = `<article class="page">
       ${kicker(i)}
       <h1 class="title">${esc(title(i))}</h1>
@@ -388,6 +390,7 @@
     try {
       const next = await tauri.core.invoke("library_items");
       if (version !== loadVersion) return;
+      loaded = true;
       items = next.sort((a, b) => b.at - a.at);
       if (!currentId || !items.some((i) => i.id === currentId)) currentId = items[0]?.id ?? null;
       if (dictionary()) { dictionary().reload(); return; }
@@ -450,8 +453,13 @@
     let start = null;
     try { start = decodeURIComponent(location.hash.slice(1)) || null; } catch { start = null; }
     if (params.get("kind")) setKind(params.get("kind"));
+    // The Dictionary loads on its own, so it opens without waiting for every
+    // dictation, take and meeting to be read.
+    const toDictionary = start === "dictionary" || !!start?.startsWith("dictionary:");
+    if (toDictionary) await route(start);
+    else { renderList(); renderDetail(); }
     await reload();
-    await route(start);
+    if (!toDictionary) await route(start);
     tauri.event.listen("library-changed", reload);
     tauri.event.listen("library-select", ({ payload }) => route(payload));
     window.addEventListener("focus", reload);
