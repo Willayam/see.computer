@@ -333,6 +333,11 @@ pub fn screen_text() -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// Web apps nest their text deep: T3 Code's transcript sits about 27 levels
+/// under its window, so a shallow walk read only the toolbar.
+const WINDOW_NODES: usize = 800;
+const WINDOW_DEPTH: usize = 64;
+
 fn collect_window_text(
     element: *mut c_void,
     text: &mut String,
@@ -340,7 +345,11 @@ fn collect_window_text(
     depth: usize,
     deadline: Instant,
 ) {
-    if *nodes >= 96 || depth > 5 || Instant::now() >= deadline || text.len() >= 16_000 {
+    if *nodes >= WINDOW_NODES
+        || depth > WINDOW_DEPTH
+        || Instant::now() >= deadline
+        || text.len() >= 16_000
+    {
         return;
     }
     *nodes += 1;
@@ -352,13 +361,14 @@ fn collect_window_text(
             }
             text.push(ch);
         }
+        // One line per element, so a label's capital reads as opening a line.
         if text.len() < 16_000 {
-            text.push(' ');
+            text.push('\n');
         }
     }
     if let Ok(children) = copy(element, c"AXChildren") {
         if unsafe { CFGetTypeID(children.0) } == unsafe { CFArrayGetTypeID() } {
-            let count = unsafe { CFArrayGetCount(children.0) }.min(96);
+            let count = unsafe { CFArrayGetCount(children.0) }.min(WINDOW_NODES as isize);
             for index in 0..count {
                 let child = unsafe { CFArrayGetValueAtIndex(children.0, index) };
                 if !child.is_null() {
