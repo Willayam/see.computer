@@ -601,3 +601,45 @@ fn rejected_start_and_missed_release_request_decoder_reset() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+#[test]
+fn stray_single_letters_are_not_dictations() {
+    assert!(super::stray_letter("A."));
+    assert!(super::stray_letter("h"));
+    assert!(!super::stray_letter("Yes."));
+    assert!(!super::stray_letter("OK"));
+    assert!(!super::stray_letter("I think"));
+}
+
+#[test]
+fn stray_letter_skips_paste_and_ledger() {
+    let (mut controller, pill, dir) = test_controller();
+    let root = dir.join("ledger");
+    controller.ledger = crate::ledger::Ledger::start_at(
+        root.clone(),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        500,
+        Some(dir.join("vocabulary.md")),
+        None,
+    );
+    controller.step(Msg::MainPressed);
+    controller.step(Msg::MainReleased);
+    let job = match controller.session {
+        Session::Transcribing { job, .. } => job,
+        _ => panic!("expected transcription"),
+    };
+    controller.step(Msg::Engine(engine::Event::Done(
+        job,
+        Ok(engine::Transcription {
+            audio: Some(mic::Audio16k::silence(0.1)),
+            text: Text::parse("A."),
+            segments: Vec::new(),
+        }),
+    )));
+    assert!(matches!(controller.session, Session::Idle));
+    assert!(pill
+        .try_iter()
+        .any(|event| event == PillEvent::Finish(Notice::NothingHeard)));
+    controller.ledger.flush();
+    assert!(crate::ledger::read(&root).is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
