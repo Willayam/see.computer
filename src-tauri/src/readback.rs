@@ -66,9 +66,14 @@ impl Readback {
     }
 }
 
+/// The text around the dictation when it landed. A side that reached the
+/// edge of the field is matched at that edge, because a short one, such as
+/// the space a paste leaves behind, also occurs inside the dictation.
 pub struct Anchor {
     before: String,
     after: String,
+    at_start: bool,
+    at_end: bool,
 }
 
 fn utf16_byte(value: &str, units: usize) -> usize {
@@ -109,22 +114,33 @@ pub fn anchor(value: &str, pasted: &str, caret_utf16: Option<usize>) -> Option<A
             .rev()
             .collect(),
         after: value[end..].chars().take(80).collect(),
+        at_start: value[..start].chars().count() <= 80,
+        at_end: value[end..].chars().count() <= 80,
     })
 }
 
 pub fn region(value: &str, anchor: &Anchor) -> Option<String> {
-    let start = if anchor.before.is_empty() {
+    // Whitespace alone says nothing about where the dictation sits, and
+    // trim_unrelated drops any words typed beside it.
+    let meaningful = |side: &str| !side.trim().is_empty();
+    let before = &anchor.before;
+    let after = &anchor.after;
+    let start = if !meaningful(before) {
         0
+    } else if anchor.at_start && value.starts_with(before.as_str()) {
+        before.len()
     } else {
         value
-            .match_indices(&anchor.before)
-            .map(|(start, _)| start + anchor.before.len())
-            .find(|end| anchor.after.is_empty() || value[*end..].contains(&anchor.after))?
+            .match_indices(before.as_str())
+            .map(|(start, _)| start + before.len())
+            .find(|end| !meaningful(after) || value[*end..].contains(after.as_str()))?
     };
-    let end = if anchor.after.is_empty() {
+    let end = if !meaningful(after) {
         value.len()
+    } else if anchor.at_end && value[start..].ends_with(after.as_str()) {
+        value.len() - after.len()
     } else {
-        start + value[start..].find(&anchor.after)?
+        start + value[start..].find(after.as_str())?
     };
     Some(value[start..end].to_owned())
 }
@@ -398,6 +414,7 @@ fn run(watch: Watch, ledger: &Ledger, rx: &mpsc::Receiver<Watch>) -> Option<Watc
     };
     let mut last = Some(watch.pasted.clone());
     let mut misses = 0;
+    let mut outcome = "unchanged".to_owned();
     while Instant::now() < deadline {
         if !ledger.enabled() {
             return None;
@@ -413,26 +430,34 @@ fn run(watch: Watch, ledger: &Ledger, rx: &mpsc::Receiver<Watch>) -> Option<Watc
         if !ledger.enabled() {
             return None;
         }
-        match value(element) {
-            Err(-25202) => break,
-            Ok(Some(text)) => {
-                if let Some(region) = region(&text, &anchor) {
+        // The log names why a watch ended early, never the text.
+        let miss = match value(element) {
+            Err(-25202) => {
+                outcome = "lost -25202".to_owned();
+                break;
+            }
+            Err(status) => status.to_string(),
+            Ok(None) => "too-long".to_owned(),
+            Ok(Some(text)) => match region(&text, &anchor) {
+                None => "no-anchor".to_owned(),
+                Some(region) => {
                     let edited = trim_unrelated(&watch.pasted, &region);
                     if resembles(&watch.pasted, &edited) {
                         last = Some(edited);
                         misses = 0;
                         continue;
                     }
+                    "unlike".to_owned()
                 }
-            }
-            _ => {}
-        }
+            },
+        };
         misses += 1;
         if misses == 3 {
+            outcome = format!("lost {miss}");
             break;
         }
     }
-    finish(&watch, ledger, opened, "unchanged", last);
+    finish(&watch, ledger, opened, &outcome, last);
     None
 }
 
@@ -509,6 +534,38 @@ mod tests {
             "one two three four FIX six seven eight nine ten"
         ));
         assert!(!opened_up(-999));
+    }
+
+    /// The value an Electron TipTap editor reported after a real paste on
+    /// 2026-10-16: the dictation and the space the paste adds. Matching that
+    /// space from the start cut the region to "I", so every poll missed and
+    /// the watch gave up three seconds after the paste.
+    #[test]
+    fn a_paste_that_ends_the_field_is_read_whole() {
+        let pasted = "I sent the file to Larston yesterday.";
+        for tail in [" ", " \n", "\u{a0}", "\n"] {
+            let a = anchor(&format!("{pasted}{tail}"), pasted, None).unwrap();
+            let edited = format!("I sent the file to Larsten yesterday.{tail}");
+            let region = region(&edited, &a).unwrap();
+            assert_eq!(
+                trim_unrelated(pasted, &region),
+                "I sent the file to Larsten yesterday."
+            );
+            let typed_after = region_of(&a, "I sent the file to Larsten yesterday. Thanks\n");
+            assert_eq!(
+                trim_unrelated(pasted, &typed_after),
+                "I sent the file to Larsten yesterday."
+            );
+            assert!(region_of(&a, "\n").trim().is_empty());
+        }
+        let a = anchor("Re: I sent it. ", "I sent it.", None).unwrap();
+        assert_eq!(region_of(&a, "Re: I sent that. ").trim(), "I sent that.");
+        let a = anchor("I sent it.\nThanks", "I sent it.", None).unwrap();
+        assert_eq!(region_of(&a, "I sent that.\nThanks"), "I sent that.");
+    }
+
+    fn region_of(anchor: &Anchor, value: &str) -> String {
+        region(value, anchor).unwrap()
     }
 
     #[test]
