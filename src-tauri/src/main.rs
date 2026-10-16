@@ -4,6 +4,7 @@ mod boost;
 mod cli;
 mod clip;
 mod config;
+mod context;
 mod dictionary;
 mod engine;
 mod eval;

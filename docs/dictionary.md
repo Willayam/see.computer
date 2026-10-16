@@ -94,6 +94,23 @@ dictate ─► ledger: id, text, audio, app ─► paste
                     corpus.tsv ─► see-computer eval
 ```
 
+While a dictation is recording, a background task reads the focused window's
+Accessibility text. It visits at most 96 elements for 800 ms, accepts at most
+16,000 characters, and uses the learner's term shape test to keep at most 64
+names and identifiers. The engine adds those terms at weight 0.5 for this
+utterance, through the same dual decode and merge as saved vocabulary. A hunk
+survives only when it lands a whole term. The context is cleared after the
+utterance. `SEE_COMPUTER_SCREEN_CONTEXT=0` turns the source off.
+
+Another background task reads Daybook's `daybook.db` with SQLite `mode=ro`.
+It reads only non-private descriptions from the last two hours and refreshes
+its in-memory term cache every three minutes. A missing or changed database
+leaves the cache empty. The default path is
+`~/Development/automation-project/data/daybook.db`; `SEE_COMPUTER_DAYBOOK_DB`
+overrides it and `SEE_COMPUTER_DAYBOOK_CONTEXT=0` turns this source off. The
+decoder takes the cached terms at the same low weight. The ledger records
+each term used, its source, and whether it appeared in the result.
+
 **The ledger** (`ledger.rs`) gives every dictation an id and appends events to
 `~/Library/Application Support/see.computer/ledger/events.jsonl`. The events
 record what was decoded and the audio path, where the words landed (app,
@@ -202,7 +219,8 @@ the learned spelling and points the term's rules at it (`Lexicon::refresh`).
 
 ## What is verified
 
-- Unit and controller tests: 236 pass, meetings included. They cover the
+- Unit and controller tests: 240 pass, one live sharing test is ignored.
+  They cover the
   ledger, the learner and its filter, rules, the merge, read-back's text
   matching and trimming, eval scoring, the menu rows, the vocabulary line
   edits and their byte preservation, the per-term counts and recent lines,
@@ -226,6 +244,19 @@ the learned spelling and points the term's rules at it (`Lexicon::refresh`).
   Library handing activation back to the app it opened over, the workspace
   named TextEdit within half a second, and a dictation replayed from
   `fixtures/en.wav` was pasted into the document.
+- On 2026-10-16, the release eval on 104 regenerated synthetic clips with a
+  temporary vocabulary copy gave 176 errors in 972 words, 18.11% WER, and
+  35/108 term hits. Adding irrelevant screen and Daybook terms gave the same
+  per-clip output and summary, with no skipped clips. On the `Convex` clip
+  with no saved vocabulary, screen context changed `convex` to `Convex` and
+  raised term recall from 0/1 to 1/1, with no word errors in either run.
+  Unit tests cover private and old Daybook rows, missing files, the learner
+  shape filter, the merge, and the ledger's term-only context event. Clippy
+  passes with warnings denied.
+- A scratch TextEdit replay was attempted on 2026-10-16 under the live lock.
+  The unsigned debug app's event tap repeatedly reset before a dictation
+  started. No paste or context event was produced. The installed app was
+  relaunched and the lock removed. Live AX collection remains unverified.
 - Not yet seen running: read-back against a live text field (in Electron or
   anywhere else). To check read-back, launch with
   `SEE_COMPUTER_READBACK_LOG=1`, dictate into TextEdit and into an Electron
@@ -243,8 +274,8 @@ Ranked by expected gain per unit of work. Built items are in this branch.
 | 3 | Personal eval corpus and regression score | ledger audio + corrections | none | audio stays local | turns "feels worse" into a number per change | built (`corpus.tsv`, `see-computer eval`) |
 | 4 | Dual decode, keep only boosted hunks that land a term | second greedy pass over the same encoder output | +10.7 ms median per clip | none | errors 187 → 182 at margin 3; margin 4 no longer ends up worse than boost-off (188 vs 190 errors) | built |
 | 5 | Fixing lines in the Library, and the Dictionary menu | the Library window, native panel rows | none | none | covers apps read-back cannot see | built |
-| 6 | Screen-context terms per dictation | AX text of the focused window read while the user speaks, filtered by the learner's shape test, boosted at low weight for that utterance only | none if read during recording | on-screen text held in memory, never written | names and identifiers visible on screen; also the only lever for "scale" vs "skill" | next |
-| 7 | Daybook feed | read `daybook.db` read-only, last two hours of non-private descriptions | none | already local; skip private rows | project and client names, about 6 minutes stale | next, cheap |
+| 6 | Screen-context terms per dictation | AX text of the focused window read while the user speaks, filtered by the learner's shape test, boosted at low weight for that utterance only | none if read during recording | on-screen text held in memory, never written | names and identifiers visible on screen; also the only lever for "scale" vs "skill" | built |
+| 7 | Daybook feed | read `daybook.db` read-only, last two hours of non-private descriptions | none | already local; skip private rows | project and client names, about 6 minutes stale | built |
 | 8 | Background miner | nightly job over ledger, history, Daybook, git repos, Wispr's dictionary; optional Haiku pass to judge candidates via the Claude CLI | none | only candidate strings and short contexts leave the machine, and only with Haiku on | fills the review queue before the user corrects anything | later |
 | 9 | Per-app term sets | ledger's app per dictation | none | local | fewer collateral pushes by boosting only what that app needs | later, after 6 |
 | 10 | Confidence highlighting | token log-probs from the decoder | small | none | points the user at the words to check | later |
@@ -287,6 +318,9 @@ Fixes the audit or the review found that this branch does not make:
   an editable field, so a real paste would type into its password box.
 - `see-computer eval` exits 2 when any clip was skipped, so a run that
   silently dropped hard clips cannot pass.
+- `SEE_COMPUTER_EVAL_SCREEN_TEXT` and `SEE_COMPUTER_EVAL_DAYBOOK_TEXT` name
+  text files whose extracted terms are applied to every eval clip. This makes
+  the context path measurable without reading a live window or database.
 
 ## Privacy
 
@@ -298,3 +332,8 @@ that answered nothing then, the field focused a quarter second later. It
 reads for at most 90 seconds and stores only the region of the user's own
 dictation. Turning off "Save
 Dictation History" stops the ledger, the audio, and learning.
+The dictation app keeps fetched screen text and Daybook descriptions only in
+memory. It writes neither to history nor the ledger. The ledger stores only
+context terms used and whether they landed, when history is enabled. The feed
+opens the Daybook database read-only and skips rows marked private. An
+absent, locked, or changed database never delays dictation.
