@@ -60,8 +60,13 @@ struct Share {
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 
+extern "C" {
+    fn see_library_close_on_command_q();
+}
+
 pub fn attach(app: &AppHandle) {
     let _ = APP.set(app.clone());
+    unsafe { see_library_close_on_command_q() };
 }
 
 pub fn changed() {
