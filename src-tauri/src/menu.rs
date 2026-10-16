@@ -88,6 +88,11 @@ pub fn toggle(rows: &[Row]) {
     native(rows, |ptr, count| unsafe { see_menu_toggle(ptr, count) });
 }
 
+/// Redraws the panel with `rows` if it is open. Main thread only.
+pub fn refresh(rows: &[Row]) {
+    native(rows, |ptr, count| unsafe { see_menu_update(ptr, count) });
+}
+
 fn native<T>(rows: &[Row], call: impl FnOnce(*const NativeRow, c_int) -> T) -> T {
     let mut text = Vec::with_capacity(rows.len() * 2);
     let native_rows: Vec<NativeRow> = rows
