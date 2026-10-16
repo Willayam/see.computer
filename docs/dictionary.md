@@ -101,7 +101,9 @@ bundle id, focus), what the user corrected them to, and what was learned or
 forgotten. Audio is a 16 kHz mono wav per dictation. The newest 500
 uncorrected files are kept, and corrected ones are kept forever, because
 they are the eval corpus. The "Save Dictation History" toggle governs all of
-it.
+it. The event log keeps the newest 500 uncorrected dictations and all
+corrected dictations. It rewrites through a temp file once 50 more
+uncorrected dictations accumulate.
 
 **Read-back** (`readback.rs`) keeps the text field the paste went into,
 taken from the same Accessibility query that decided to paste. It re-reads
@@ -202,7 +204,17 @@ the learned spelling and points the term's rules at it (`Lexicon::refresh`).
 
 ## What is verified
 
-- Unit and controller tests: 236 pass, meetings included. They cover the
+- Follow-up Rust suite: 242 passed and one ignored. Clippy passed with
+  warnings denied. Tests cover one-letter rejection before paste and ledger
+  writes, conflict copies in recents and the Library, fixes to those copies,
+  app-termination cleanup of the Accessibility guard, and ledger compaction
+  with corrected audio retained.
+- The follow-up app launched with temp Documents, history, and ledger paths.
+  With the Library focused, Cmd+Q closed its window and left the app running.
+  The installed app was relaunched after the check. The tray Quit action was
+  not exercised live.
+- The original branch had 236 passing unit and controller tests, meetings
+  included. They cover the
   ledger, the learner and its filter, rules, the merge, read-back's text
   matching and trimming, eval scoring, the menu rows, the vocabulary line
   edits and their byte preservation, the per-term counts and recent lines,
@@ -250,14 +262,9 @@ Ranked by expected gain per unit of work. Built items are in this branch.
 | 10 | Confidence highlighting | token log-probs from the decoder | small | none | points the user at the words to check | later |
 | 11 | LLM rewrite on the paste path | network call per dictation | 0.5 to 2 s | every dictation leaves the machine | unclear, and it rewrites what was said | not planned |
 
-Fixes the audit or the review found that this branch does not make:
+Follow-up still open:
 
-- Treat a one-letter transcript as nothing heard.
-- Read iCloud conflict copies of day files.
-- Forget which apps had their Accessibility tree opened when the app quits,
-  so a reused process id does not inherit the paste guard.
-- Compact the ledger. Its events stay in memory and on disk without bound,
-  which is small for a year of dictation but has no ceiling.
+- Read-back against live text fields remains unverified.
 
 ## Measuring
 

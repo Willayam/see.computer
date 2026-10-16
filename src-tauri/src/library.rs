@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{Local, NaiveDateTime, TimeZone};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
@@ -60,8 +60,13 @@ struct Share {
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 
+extern "C" {
+    fn see_library_close_on_command_q();
+}
+
 pub fn attach(app: &AppHandle) {
     let _ = APP.set(app.clone());
+    unsafe { see_library_close_on_command_q() };
 }
 
 pub fn changed() {
@@ -215,7 +220,7 @@ pub async fn library_fix(
         return Ok(());
     }
     match id.split_once(':') {
-        Some(("dictation", _)) => {
+        Some(("dictation", file)) => {
             if edited.lines().any(|line| line.starts_with("## ")) {
                 return Err(
                     "Start no line with \"## \"; the history uses it to mark a dictation."
@@ -229,6 +234,7 @@ pub async fn library_fix(
                 .naive_local();
             history
                 .replace(crate::history::Fix {
+                    file: file.to_owned(),
                     at,
                     original: original.clone(),
                     edited: edited.to_owned(),
@@ -310,8 +316,10 @@ fn local_ms(date: &str, time: &str) -> Option<i64> {
 }
 
 fn day(path: &Path) -> Option<Item> {
-    let date = path.file_stem()?.to_str()?;
-    NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    let file = path.file_stem()?.to_str()?;
+    let date = crate::history::day_file_date(file)?
+        .format("%Y-%m-%d")
+        .to_string();
     let content = std::fs::read_to_string(path).ok()?;
     let mut lines = Vec::new();
     let mut time = None;
@@ -319,7 +327,7 @@ fn day(path: &Path) -> Option<Item> {
     for line in content.lines() {
         if let Some(next) = line
             .strip_prefix("## ")
-            .and_then(|value| local_ms(date, value))
+            .and_then(|value| local_ms(&date, value))
         {
             if let Some(at) = time.take() {
                 lines.push(Line {
@@ -353,7 +361,7 @@ fn day(path: &Path) -> Option<Item> {
         .collect::<Vec<_>>()
         .join("\n\n");
     Some(Item {
-        id: format!("dictation:{date}"),
+        id: format!("dictation:{file}"),
         kind: "dictation",
         state: "done",
         error: None,
@@ -749,6 +757,18 @@ mod tests {
             local_ms("2026-10-07", "10:00:00").unwrap()
         );
         assert_eq!(item.paste, "First.\n\nSecond.");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conflict_copy_has_its_own_library_item() {
+        let root = temp_dir();
+        let path = root.join("2026-10-13 2.md");
+        std::fs::write(&path, "## 10:00:00\n\nSecond\n\n").unwrap();
+        let item = day(&path).unwrap();
+        assert_eq!(item.id, "dictation:2026-10-13 2");
+        assert_eq!(item.lines[0].text, "Second");
+        assert_eq!(item.files.markdown.as_deref(), Some(path.to_str().unwrap()));
         std::fs::remove_dir_all(root).unwrap();
     }
 
