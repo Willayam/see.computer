@@ -6,6 +6,17 @@
 // dictating into keeps its focus and the synthetic Command+V still lands there.
 #import <AppKit/AppKit.h>
 
+void see_readback_app_terminated(int pid);
+
+void see_watch_app_termination(void) {
+    [[[NSWorkspace sharedWorkspace] notificationCenter]
+        addObserverForName:NSWorkspaceDidTerminateApplicationNotification
+        object:nil queue:nil usingBlock:^(NSNotification *notification) {
+            NSRunningApplication *app = notification.userInfo[NSWorkspaceApplicationKey];
+            if (app) see_readback_app_terminated(app.processIdentifier);
+        }];
+}
+
 typedef struct {
     const char *id;
     const char *label;
