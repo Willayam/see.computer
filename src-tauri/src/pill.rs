@@ -21,7 +21,26 @@ pub enum PillEvent {
     /// Nothing could take the words, so the chip stretches into a card that
     /// shows them with a Copy button and a dismiss.
     Held(Held),
+    /// Read-back recorded a fix to a word the learner can use. Waits for the
+    /// pill to be idle, so it never covers a dictation.
+    Fixed(Fix),
     Hide,
+}
+
+/// A spelling the user fixed in place, as the card shows it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Fix {
+    pub heard: String,
+    pub wrote: String,
+    /// Whether this fix was the one that taught the word.
+    pub learned: bool,
+}
+
+/// What the card is up for: the words that had nowhere to land, or a fix.
+#[derive(Clone, Debug, PartialEq)]
+enum Card {
+    Held(Held),
+    Fixed(Fix),
 }
 
 /// What the stretched pill shows. `note` mirrors the tray's glyph column: a
@@ -136,8 +155,25 @@ enum Wire {
         ends: bool,
     },
     Held(Held),
+    Fixed {
+        text: String,
+        note: &'static str,
+    },
     Hide,
 }
+
+impl Wire {
+    fn fixed(fix: &Fix) -> Wire {
+        Wire::Fixed {
+            text: format!("{} → {}", fix.heard, fix.wrote),
+            note: if fix.learned { "Learned" } else { "Seen once" },
+        }
+    }
+}
+
+/// How long a fix waits for the pill to settle before it shows. A notice
+/// that ends an activity is up for 1.6 s.
+const FIX_DELAY: std::time::Duration = std::time::Duration::from_millis(1_800);
 
 pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) + Send + 'static) {
     let Some(window) = app.get_webview_window("pill") else {
@@ -146,18 +182,48 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
     configure_hud(&window);
     let levels_on = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     spawn_level_emitter(app.clone(), levels_on.clone());
-    let card = std::sync::Arc::new(std::sync::Mutex::new(None::<Held>));
+    let card = std::sync::Arc::new(std::sync::Mutex::new(None::<Card>));
     attach_card_listeners(app, window.clone(), card.clone());
     let app = app.clone();
     crate::qos::spawn("see-pill", crate::qos::Class::Upkeep, move || {
         let mut current = None;
         let mut cancel_armed = false;
-        while let Ok(event) = rx.recv() {
+        let mut fix: Option<Fix> = None;
+        let mut last_wire = std::time::Instant::now();
+        loop {
+            let event = if fix.is_some() {
+                match rx.recv_timeout(FIX_DELAY.saturating_sub(last_wire.elapsed())) {
+                    Ok(event) => event,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let showing = card.lock().map(|slot| slot.is_some()).unwrap_or(true);
+                        if current.is_none() && !showing {
+                            if let Some(fix) = fix.take() {
+                                if let Ok(mut slot) = card.lock() {
+                                    *slot = Some(Card::Fixed(fix.clone()));
+                                }
+                                let _ = app.emit_to("pill", "pill", Wire::fixed(&fix));
+                            }
+                        }
+                        last_wire = std::time::Instant::now();
+                        continue;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            } else {
+                match rx.recv() {
+                    Ok(event) => event,
+                    Err(_) => break,
+                }
+            };
+            if let PillEvent::Fixed(next) = event {
+                fix = Some(next);
+                continue;
+            }
             let starts_activity = matches!(event, PillEvent::Show(_)) && current.is_none();
             match &event {
                 PillEvent::Show(activity) => current = Some(*activity),
                 PillEvent::Finish(_) | PillEvent::Hide | PillEvent::Held(_) => current = None,
-                PillEvent::Shot | PillEvent::Flash(_) => {}
+                PillEvent::Shot | PillEvent::Flash(_) | PillEvent::Fixed(_) => {}
             }
             let wire = match event {
                 PillEvent::Show(activity) => Wire::Show(activity),
@@ -174,11 +240,12 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                 },
                 PillEvent::Held(held) => {
                     if let Ok(mut slot) = card.lock() {
-                        *slot = Some(held.clone());
+                        *slot = Some(Card::Held(held.clone()));
                     }
                     Wire::Held(held)
                 }
                 PillEvent::Hide => Wire::Hide,
+                PillEvent::Fixed(_) => continue,
             };
             if starts_activity {
                 let dispatcher = app.clone();
@@ -228,6 +295,7 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                 on_armed(armed);
             }
             let _ = app.emit_to("pill", "pill", wire);
+            last_wire = std::time::Instant::now();
         }
     });
 }
@@ -287,7 +355,7 @@ fn configure_hud(window: &WebviewWindow) {
 fn attach_card_listeners(
     app: &AppHandle,
     window: WebviewWindow,
-    card: std::sync::Arc<std::sync::Mutex<Option<Held>>>,
+    card: std::sync::Arc<std::sync::Mutex<Option<Card>>>,
 ) {
     #[derive(serde::Deserialize)]
     struct Size {
@@ -323,13 +391,21 @@ fn attach_card_listeners(
         match event.payload().trim_matches('"') {
             "copy" => {
                 let held = card.lock().ok().and_then(|slot| slot.clone());
-                if let Some(held) = held {
+                if let Some(Card::Held(held)) = held {
                     if let Ok(mut clipboard) = arboard::Clipboard::new() {
                         // The words are usually still there, because a held
                         // paste never restores the prior clipboard. This covers
                         // the case where something else has copied since.
                         let _ = clipboard.set_text(held.clipboard);
                     }
+                }
+            }
+            // The click is the user asking for the Library, so it may come
+            // forward. Nothing else about the card ever takes focus.
+            "review" => {
+                let fixed = card.lock().ok().and_then(|slot| slot.clone());
+                if let Some(Card::Fixed(fix)) = fixed {
+                    crate::library::show(&acting, Some(format!("dictionary:{}", fix.wrote)));
                 }
             }
             // Sent once the card has finished collapsing, however it was
