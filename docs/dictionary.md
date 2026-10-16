@@ -95,12 +95,45 @@ dictate ─► ledger: id, text, audio, app ─► paste
 ```
 
 While a dictation is recording, a background task reads the focused window's
-Accessibility text. It visits at most 96 elements for 800 ms, accepts at most
-16,000 characters, and uses the learner's term shape test to keep at most 64
-names and identifiers. The engine adds those terms at weight 0.5 for this
-utterance, through the same dual decode and merge as saved vocabulary. A hunk
-survives only when it lands a whole term. The context is cleared after the
-utterance. `SEE_COMPUTER_SCREEN_CONTEXT=0` turns the source off.
+Accessibility text, one line per element. It visits at most 800 elements, 64
+levels deep, for 800 ms, and accepts at most 16,000 characters. Web apps nest
+their text deep: T3 Code's transcript sits about 27 levels under its window,
+and the first version, which stopped at five levels and 96 elements, only
+ever read the focused field. On T3 Code the walk reads about 670 elements in
+under 100 ms.
+
+The terms kept from that text are names and identifiers: camelCase,
+internal punctuation (`claude.ai`), letters mixed with digits, all caps the
+word list does not know, and capitalized words the word list does not know.
+A capital that opens a sentence does not count, but a word alone on its line
+does, since that is a label or a name. Dictionary words, plain lowercase
+words, month and day names, and units stay out. A dictionary word
+capitalized inside a sentence, as in "the rows in Convex", counts when the
+text never writes it in lowercase, and ranks after the rest. Terms are
+ranked by how often they appear. A dictation gets at most 32 screen terms,
+then at most 8 Daybook terms, with no spelling twice (`context::gather`).
+Before this, each dictation was boosted with 62 to 65 terms, among them
+"And", "Pro", "dropdown" and "Comparing".
+
+The engine adds those terms at weight 0.5 for this utterance, through the
+same dual decode and merge as saved vocabulary. A hunk survives only when it
+lands a whole term. The context is cleared after the utterance.
+`SEE_COMPUTER_SCREEN_CONTEXT=0` turns the source off.
+
+**Near misses of names on screen.** Boosting cannot reach a name the model
+hears as another spelling. With "Larsten" in context, the boosted pass takes
+the name's opening token and then leaves it ("Lauriston", "Lawson"), and the
+merge rightly keeps the plain pass's "Larston". Weights up to 3 and margins
+up to 8 did not change that on the user's three recordings. After decoding,
+a capitalized word the word list does not know, at least five letters long,
+is written as a screen term when it is one changed or swapped letter from
+exactly one of them and shares its first two letters
+(`context::near_misses`). Saved vocabulary words are left alone. A letter
+added or dropped is not enough: run over the user's 2,926 saved lines with
+every vocabulary term treated as on screen, allowing those also turned the
+Swedish "Fridag" and "Fridas" into "Frida". With one changed or swapped
+letter, 4 lines changed, all of them misspellings of vocabulary names
+("Larston", "Hormozy", "Fridd").
 
 Another background task reads Daybook's `daybook.db` with SQLite `mode=ro`.
 It reads only non-private descriptions from the last two hours and refreshes
@@ -255,13 +288,25 @@ the learned spelling and points the term's rules at it (`Lexicon::refresh`).
   passes with warnings denied.
 - A scratch TextEdit replay was attempted on 2026-10-16 under the live lock.
   The unsigned debug app's event tap repeatedly reset before a dictation
-  started. No paste or context event was produced. The installed app was
-  relaunched and the lock removed. Live AX collection remains unverified.
-- Not yet seen running: read-back against a live text field (in Electron or
-  anywhere else). To check read-back, launch with
-  `SEE_COMPUTER_READBACK_LOG=1`, dictate into TextEdit and into an Electron
-  app, fix a word, and read
-  `~/Library/Application Support/see.computer/readback-log.tsv`.
+  started. No paste or context event was produced.
+- Later on 2026-10-16, after the filter, the deeper walk and the near-miss
+  rewrite: 242 tests pass and clippy passes with warnings denied. The 104
+  regenerated clips with today's vocabulary copy give 177 errors in 972
+  words and 37/108 terms with no context. With real T3 Code screen text and
+  real Daybook descriptions as context, the old filter gave 181 errors and
+  the new one 177. With every vocabulary term as screen text, the new
+  filter gives 177. The `Convex` clips still come out as `Convex` with
+  "Convex" on screen and no vocabulary. The user's three "Larsten"
+  recordings, which came out "Larston", "Larson" and "Larston", give 3
+  errors with no context and 1 with "Larsten" on screen: both "Larston"s
+  become "Larsten", and "Larson" stays, two letters away.
+- The deeper walk was run read-only against T3 Code while the user worked:
+  671 elements and 6,394 characters in 94 ms, against nothing past the
+  focused field before.
+- Not verified live: screen context during a real dictation into T3 Code.
+  The eval applies context from text files, not from a live window.
+- Read-back against a live field is checked on
+  `t3code/improve-dictionary-feedback`, where its fix lives.
 
 ## Roadmap
 
@@ -320,7 +365,7 @@ Fixes the audit or the review found that this branch does not make:
   silently dropped hard clips cannot pass.
 - `SEE_COMPUTER_EVAL_SCREEN_TEXT` and `SEE_COMPUTER_EVAL_DAYBOOK_TEXT` name
   text files whose extracted terms are applied to every eval clip. This makes
-  the context path measurable without reading a live window or database.
+  the context path measurable without reading a live window or database. The eval ranks and caps them the way a dictation does.
 
 ## Privacy
 
