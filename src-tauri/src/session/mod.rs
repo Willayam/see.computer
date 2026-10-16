@@ -668,7 +668,7 @@ impl Controller {
                         text: Some(text),
                         audio,
                         ..
-                    }) => {
+                    }) if !stray_letter(text.as_str()) => {
                         let id = self.ledger.mint();
                         if let Some(audio) = audio {
                             self.ledger.dictated(&id, text.as_str(), audio);
@@ -1239,3 +1239,8 @@ impl Trail {
 
 #[cfg(test)]
 mod tests;
+
+fn stray_letter(text: &str) -> bool {
+    let text = text.trim_end_matches(|ch: char| ch.is_ascii_punctuation());
+    text.chars().count() == 1 && text.chars().all(char::is_alphabetic)
+}

@@ -25,6 +25,34 @@ pub struct Readback(Option<mpsc::Sender<Watch>>);
 
 static OPENED: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
 
+extern "C" {
+    fn see_watch_app_termination();
+}
+
+#[no_mangle]
+extern "C" fn see_readback_app_terminated(pid: i32) {
+    if let Some(opened) = OPENED.get() {
+        opened
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&pid);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn termination_forgets_opened_accessibility_tree() {
+    let pid = i32::MAX;
+    OPENED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(pid);
+    assert!(opened_up(pid));
+    see_readback_app_terminated(pid);
+    assert!(!opened_up(pid));
+}
+
 pub fn opened_up(pid: i32) -> bool {
     OPENED.get().is_some_and(|set| {
         set.lock()
@@ -38,6 +66,7 @@ impl Readback {
         if std::env::var("SEE_COMPUTER_READBACK").is_ok_and(|value| value == "0") {
             return Self::off();
         }
+        unsafe { see_watch_app_termination() };
         let (tx, rx) = mpsc::channel();
         crate::qos::spawn("see-readback", crate::qos::Class::Upkeep, move || {
             let mut next = None;

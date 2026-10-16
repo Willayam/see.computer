@@ -23,6 +23,7 @@ enum Request {
 /// One dictation's text as the Library showed it, and what the user changed
 /// it to.
 pub struct Fix {
+    pub file: String,
     pub at: NaiveDateTime,
     pub original: String,
     pub edited: String,
@@ -168,12 +169,22 @@ fn read_recent(root: &Path, limit: usize) -> Vec<Entry> {
             continue;
         };
         entries.extend(parse_day(date, &content));
-        if entries.len() >= limit {
-            entries.truncate(limit);
-            break;
-        }
     }
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.at));
+    entries.truncate(limit);
     entries
+}
+
+pub(crate) fn day_file_date(stem: &str) -> Option<NaiveDate> {
+    let date = if let Some((date, copy)) = stem.split_once(' ') {
+        if copy.parse::<u32>().ok()? < 2 || copy.contains(' ') {
+            return None;
+        }
+        date
+    } else {
+        stem
+    };
+    NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
 }
 
 fn day_files(root: &Path) -> Vec<(NaiveDate, PathBuf)> {
@@ -186,7 +197,7 @@ fn day_files(root: &Path) -> Vec<(NaiveDate, PathBuf)> {
             if path.extension().is_some_and(|extension| extension == "md") {
                 path.file_stem()
                     .and_then(|stem| stem.to_str())
-                    .and_then(|stem| NaiveDate::parse_from_str(stem, "%Y-%m-%d").ok())
+                    .and_then(day_file_date)
                     .map(|date| (date, path))
             } else {
                 None
@@ -198,7 +209,10 @@ fn day_files(root: &Path) -> Vec<(NaiveDate, PathBuf)> {
 }
 
 fn replace_entry(root: &Path, fix: &Fix) -> Result<(), String> {
-    let path = root.join(format!("{}.md", fix.at.format("%Y-%m-%d")));
+    if day_file_date(&fix.file) != Some(fix.at.date()) {
+        return Err("That dictation has no valid day file.".to_owned());
+    }
+    let path = root.join(format!("{}.md", fix.file));
     let failed = |error: io::Error| format!("Unable to save: {error}.");
     let before = std::fs::read_to_string(&path).map_err(failed)?;
     let after = replaced(&before, fix).ok_or_else(|| {
@@ -350,6 +364,7 @@ fn set_root(root: &Mutex<PathBuf>, path: PathBuf) {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
     fn temp_dir() -> PathBuf {
@@ -400,6 +415,47 @@ mod tests {
     }
 
     #[test]
+    fn reads_conflict_copy_without_changing_either_file() {
+        let root = temp_dir();
+        let canonical = root.join("2026-10-13.md");
+        let conflict = root.join("2026-10-13 2.md");
+        fs::write(&canonical, "## 09:00:00\n\nFirst\n\n").unwrap();
+        fs::write(&conflict, "## 10:00:00\n\nSecond\n\n").unwrap();
+        let entries = read_recent(&root, 2);
+        assert_eq!(
+            entries.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
+            ["Second", "First"]
+        );
+        assert_eq!(
+            fs::read_to_string(canonical).unwrap(),
+            "## 09:00:00\n\nFirst\n\n"
+        );
+        assert_eq!(
+            fs::read_to_string(conflict).unwrap(),
+            "## 10:00:00\n\nSecond\n\n"
+        );
+        assert!(day_file_date("2026-10-13 note").is_none());
+        let fix = Fix {
+            file: "2026-10-13 2".into(),
+            at: NaiveDate::from_ymd_opt(2026, 10, 13)
+                .unwrap()
+                .and_hms_opt(10, 0, 0)
+                .unwrap(),
+            original: "Second".into(),
+            edited: "Fixed second".into(),
+        };
+        replace_entry(&root, &fix).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("2026-10-13 2.md")).unwrap(),
+            "## 10:00:00\n\nFixed second\n\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("2026-10-13.md")).unwrap(),
+            "## 09:00:00\n\nFirst\n\n"
+        );
+    }
+
+    #[test]
     fn heals_moved_and_merged_day_files() {
         let root = temp_dir();
         let preferred = root.join("preferred");
@@ -445,6 +501,7 @@ mod tests {
     fn a_fix_replaces_one_entry_and_keeps_every_other_byte() {
         let day = "## 09:00:00\n\nuse potato mode\n\n## 09:00:00\n\nsame second\n\n## 10:15:00\n\nlast one\n\n";
         let fix = |time: &str, original: &str, edited: &str| Fix {
+            file: "2026-10-15".into(),
             at: NaiveDate::from_ymd_opt(2026, 10, 15)
                 .unwrap()
                 .and_time(NaiveTime::parse_from_str(time, "%H:%M:%S").unwrap()),
