@@ -258,7 +258,8 @@ function hideCard() {
   document.body.classList.remove('carded');
   /* Told after the collapse finishes, so the window shrinks once the card is
      gone rather than mid-animation. Matches the 340ms width transition. */
-  dismissTimer = setTimeout(() => window.__TAURI__.event.emit('pill-action', 'dismiss'), 340);
+  const kind = cardKind;
+  dismissTimer = setTimeout(() => window.__TAURI__.event.emit('pill-action', `dismiss-${kind}`), 340);
 }
 copyEl.addEventListener('click', () => {
   if (carded && cardKind === 'fixed') {

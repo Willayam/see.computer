@@ -410,8 +410,18 @@ fn attach_card_listeners(
             }
             // Sent once the card has finished collapsing, however it was
             // dismissed, so the window shrinks after the animation not during.
-            "dismiss" => {
+            // Names the card it closes, so a dismissal that arrives after
+            // the next card was stored leaves that card up.
+            dismiss @ ("dismiss-held" | "dismiss-fixed") => {
                 if let Ok(mut slot) = card.lock() {
+                    let same = match slot.as_ref() {
+                        Some(Card::Held(_)) => dismiss == "dismiss-held",
+                        Some(Card::Fixed(_)) => dismiss == "dismiss-fixed",
+                        None => true,
+                    };
+                    if !same {
+                        return;
+                    }
                     *slot = None;
                 }
                 let window = acting_window.clone();
