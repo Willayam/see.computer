@@ -295,21 +295,37 @@ fn names_something(token: &str, opens: bool, words: &Words) -> bool {
     if letters < 2 || ORDINARY.contains(&token.to_lowercase().as_str()) {
         return false;
     }
-    if token.chars().any(char::is_numeric) {
-        return true;
-    }
     let inner: String = token
         .chars()
         .skip(1)
         .take(token.chars().count() - 2)
         .collect();
-    if inner.contains(['.', '_', '/']) {
+    // A path or branch name is read, never said: "apps/web/sandbox/drawers",
+    // "t3code/project-lat". Only a short alternation like "A/B" is spoken.
+    if inner.contains('/') {
+        return token.split('/').all(|part| part.chars().count() <= 2);
+    }
+    if token.chars().any(char::is_numeric) {
+        return true;
+    }
+    if inner.contains(['.', '_']) {
         return true;
     }
     if inner.contains('-') {
-        return token
-            .split('-')
-            .any(|part| !part.is_empty() && !words.knows(part));
+        // T3 Code shows a long branch name as two elements, and the second
+        // opens mid-word: "est-status", "nding-page". A name opens with a
+        // word, a capital or a digit.
+        let opens_like_a_word = token.split('-').next().is_some_and(|part| {
+            words.knows(part)
+                || part
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_uppercase() || c.is_numeric())
+        });
+        return opens_like_a_word
+            && token
+                .split('-')
+                .any(|part| !part.is_empty() && !words.knows(part));
     }
     let upper = token.chars().filter(|c| c.is_uppercase()).count();
     let lower = token.chars().filter(|c| c.is_lowercase()).count();
@@ -723,6 +739,34 @@ mod tests {
             opens_sentence: false,
         };
         assert!(!learnable(&swap, &words));
+    }
+
+    #[test]
+    fn clipped_branch_names_and_paths_are_not_terms() {
+        let words = Words::from_list(&[
+            "status", "page", "surface", "website", "links", "project", "drawers", "web", "apps",
+            "sandbox", "walls", "through", "day",
+        ]);
+        // One element per line, as the window walk reads T3 Code's sidebar:
+        // a long branch name is two elements, the second opening mid-word.
+        let screen = "PR\nsee.computer\nt3code/project-lat\nest-status\n\
+                      t3code/mcp-eval-la\nnding-page\nt3code/simplify-produ\nct-surface\n\
+                      t3code/cocco-agen\ncy-website\nhort-links\napps/web/sandbox/drawers\n\
+                      tmp/codex-bins-dir\nUsers/williamlarsten/.t3/worktrees/william\n\
+                      A/B\nUSB-C\ngpt-6-sol\n7-day\nwalls-through-Codex\nLarsten\n";
+        assert_eq!(
+            context_terms(screen, &words),
+            [
+                "PR",
+                "see.computer",
+                "A/B",
+                "USB-C",
+                "gpt-6-sol",
+                "7-day",
+                "walls-through-Codex",
+                "Larsten"
+            ]
+        );
     }
 
     #[test]
