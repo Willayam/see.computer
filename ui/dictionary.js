@@ -501,7 +501,8 @@
         const sel = view.snap?.waiting.some((w) => keyOf(w.term) === key) ? { kind: "waiting", key } : { kind: "word", key };
         if (find(sel)) choose(sel);
       };
-      if (view.snap) run(); else reload().then(run);
+      // A fix the card just announced may be newer than the snapshot.
+      reload().then(run);
     },
     move(delta) {
       const rows = visible();

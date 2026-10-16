@@ -459,6 +459,10 @@
     let start = null;
     try { start = decodeURIComponent(location.hash.slice(1)) || null; } catch { start = null; }
     if (params.get("kind")) setKind(params.get("kind"));
+    // Listening first, so a Review click during a slow first load still lands.
+    tauri.event.listen("library-changed", reload);
+    tauri.event.listen("library-select", ({ payload }) => route(payload));
+    window.addEventListener("focus", reload);
     // The Dictionary loads on its own, so it opens without waiting for every
     // dictation, take and meeting to be read.
     const toDictionary = start === "dictionary" || !!start?.startsWith("dictionary:");
@@ -466,8 +470,5 @@
     else { renderList(); renderDetail(); }
     await reload();
     if (!toDictionary) await route(start);
-    tauri.event.listen("library-changed", reload);
-    tauri.event.listen("library-select", ({ payload }) => route(payload));
-    window.addEventListener("focus", reload);
   });
 })();
