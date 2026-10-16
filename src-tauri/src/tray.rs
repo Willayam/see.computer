@@ -86,6 +86,11 @@ struct Panel {
     payloads: Arc<Mutex<Vec<Payload>>>,
     waiting: Arc<Mutex<Vec<String>>>,
     learned: Arc<Mutex<Vec<String>>>,
+    /// The recents as last read. They live in ~/Documents, which iCloud
+    /// evicts under disk pressure, and one evicted day file held the main
+    /// thread for 5 s. So the panel draws this copy and pokes `reread`.
+    recents: Arc<Mutex<Vec<recents::Recent>>>,
+    reread: Sender<()>,
 }
 
 pub struct Wiring {
@@ -114,6 +119,7 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
         meetings,
         meeting_autostart,
     } = wiring;
+    let (reread, pokes) = std::sync::mpsc::channel::<()>();
     let panel = Panel {
         app: app.clone(),
         inbox,
@@ -130,11 +136,40 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
         payloads: Arc::new(Mutex::new(Vec::new())),
         waiting: Arc::new(Mutex::new(Vec::new())),
         learned: Arc::new(Mutex::new(Vec::new())),
+        recents: Arc::new(Mutex::new(Vec::new())),
+        reread,
     };
+    let reader = panel.clone();
+    crate::qos::spawn("see-recents", crate::qos::Class::Upkeep, move || {
+        while pokes.recv().is_ok() {
+            while pokes.try_recv().is_ok() {}
+            let fresh = recents::recent(&reader.history, RECENT_IDS.len());
+            let changed = {
+                let mut slot = reader
+                    .recents
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let changed = slot
+                    .iter()
+                    .map(recents::Recent::row)
+                    .ne(fresh.iter().map(recents::Recent::row));
+                *slot = fresh;
+                changed
+            };
+            if changed {
+                let panel = reader.clone();
+                let _ = reader
+                    .app
+                    .run_on_main_thread(move || menu::refresh(&panel.main_rows()));
+            }
+        }
+    });
+    let _ = panel.reread.send(());
     let picked = panel.clone();
     menu::on_pick(move |id| picked.pick(id));
     let watched = panel.clone();
     panel.meetings.watch(move || {
+        let _ = watched.reread.send(());
         let panel = watched.clone();
         let _ = watched
             .app
@@ -152,6 +187,7 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
                 ..
             } = event
             {
+                let _ = panel.reread.send(());
                 menu::toggle(&panel.main_rows());
             }
         })
@@ -187,7 +223,7 @@ impl Panel {
         rows.push(item("meeting", &label, false, Some(symbol)));
         rows.push(Row::Separator);
 
-        let recents = recents::recent(&self.history, RECENT_IDS.len());
+        let recents = self.recents.lock().unwrap_or_else(PoisonError::into_inner);
         if recents.is_empty() {
             // Two hint rows so the whole sentence fits the panel width.
             rows.push(Row::Hint(format!(
@@ -197,7 +233,7 @@ impl Panel {
             rows.push(Row::Hint("dictations appear here".to_owned()));
         }
         let mut payloads = Vec::with_capacity(recents.len());
-        for (index, recent) in recents.into_iter().enumerate() {
+        for (index, recent) in recents.iter().enumerate() {
             let (label, symbol) = recent.row();
             rows.push(match recent.payload {
                 Payload::Meeting(_) => Row::Line {
@@ -207,8 +243,9 @@ impl Panel {
                 },
                 _ => item(RECENT_IDS[index], &label, false, Some(symbol)),
             });
-            payloads.push(recent.payload);
+            payloads.push(recent.payload.clone());
         }
+        drop(recents);
         *self.payloads.lock().unwrap_or_else(PoisonError::into_inner) = payloads;
 
         rows.push(Row::Separator);
