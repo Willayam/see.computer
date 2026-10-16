@@ -176,7 +176,7 @@
 
   function actions(i) {
     const a = [];
-    a.push(`<button class="act is-primary" data-act="copy">${ICON.copy}<span>Copy</span></button>`);
+    if (i.state !== "cloud") a.push(`<button class="act is-primary" data-act="copy">${ICON.copy}<span>Copy</span></button>`);
     if (i.kind === "take" && i.share?.url) a.push(`<button class="act" data-act="link">${ICON.link}<span>Share link</span></button>`);
     a.push(`<button class="act" data-act="finder" title="${esc(i.files.markdown || i.files.folder)}">${ICON.finder}<span>Reveal</span></button>`);
     return a.join("");

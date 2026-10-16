@@ -220,9 +220,13 @@ static FETCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 
 /// Asks iCloud for every evicted file the Library reads and waits up to
 /// `wait` for them. Any still in the cloud show as downloading, and the
-/// Library reloads once they arrive.
+/// Library reloads once they arrive. While that watch runs, a load does not
+/// wait again, so a stalled download costs one wait, not one per load.
 pub(crate) fn fetch(history_root: &Path, wait: std::time::Duration) {
     use std::sync::atomic::Ordering;
+    if FETCHING.load(Ordering::SeqCst) {
+        return;
+    }
     let documents = crate::paths::documents();
     let pending = |files: &[std::path::PathBuf]| -> Vec<std::path::PathBuf> {
         files.iter().filter(|path| evicted(path)).cloned().collect()
