@@ -237,7 +237,21 @@ fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
         .iter()
         .map(|term| term.text.clone())
         .collect();
+    let context = [
+        ("SEE_COMPUTER_EVAL_SCREEN_TEXT", "screen"),
+    ]
+    .into_iter()
+    .flat_map(|(name, source)| {
+        std::env::var_os(name)
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|text| crate::learn::context_terms(&text, &crate::learn::Words::system()))
+            .unwrap_or_default()
+            .into_iter()
+            .map(move |text| crate::context::Term { text, source })
+    })
+    .collect::<Vec<_>>();
     let scored = match on_engine_thread(move |engine| {
+        engine.set_context(&context);
         let mut total = crate::eval::Score::default();
         let mut count = 0;
         let mut skipped = parse_skipped;

@@ -214,6 +214,29 @@ pub fn learnable(swap: &Swap, words: &Words) -> bool {
     false
 }
 
+/// Apply the correction learner's shape test to bounded context text.
+pub fn context_terms(text: &str, words: &Words) -> Vec<String> {
+    let mut seen = HashSet::new();
+    text.split_whitespace()
+        .filter_map(|part| {
+            let token = strip(part);
+            (token.len() >= 2
+                && token.len() <= 64
+                && learnable(
+                    &Swap {
+                        heard: String::new(),
+                        wrote: token.to_owned(),
+                        opens_sentence: false,
+                    },
+                    words,
+                )
+                && seen.insert(token.to_lowercase()))
+            .then(|| token.to_owned())
+        })
+        .take(64)
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Promotion {
     pub term: String,

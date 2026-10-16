@@ -196,6 +196,9 @@ extern "C" {
     fn CFGetTypeID(value: *const c_void) -> usize;
     fn CFStringGetTypeID() -> usize;
     fn CFNumberGetTypeID() -> usize;
+    fn CFArrayGetTypeID() -> usize;
+    fn CFArrayGetCount(array: *const c_void) -> isize;
+    fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
     fn CFStringCreateWithCString(
         allocator: *const c_void,
         value: *const c_char,
@@ -241,12 +244,16 @@ fn copy(element: *mut c_void, name: &std::ffi::CStr) -> Result<Cf, i32> {
     }
 }
 fn value(element: *mut c_void) -> Result<Option<String>, i32> {
+    value_capped(element, 100_000)
+}
+
+fn value_capped(element: *mut c_void, cap: isize) -> Result<Option<String>, i32> {
     if let Ok(count) = copy(element, c"AXNumberOfCharacters") {
         let mut number = 0i64;
         if unsafe {
             CFGetTypeID(count.0) == CFNumberGetTypeID()
                 && CFNumberGetValue(count.0, 4, &mut number as *mut _ as *mut c_void)
-        } && number > 100_000
+        } && number > cap as i64
         {
             return Ok(None);
         }
@@ -256,7 +263,7 @@ fn value(element: *mut c_void) -> Result<Option<String>, i32> {
         return Ok(None);
     }
     let len = unsafe { CFStringGetLength(text.0) };
-    if !(0..=100_000).contains(&len) {
+    if !(0..=cap).contains(&len) {
         return Ok(None);
     }
     let mut units = vec![0u16; len as usize];
@@ -271,6 +278,91 @@ fn value(element: *mut c_void) -> Result<Option<String>, i32> {
         )
     };
     Ok(Some(String::from_utf16_lossy(&units)))
+}
+
+/// Read the focused window while speech is still being captured.
+/// This runs only on the context thread and never retains its full text.
+pub fn screen_text() -> Option<String> {
+    if !crate::paste::accessibility_trusted(false) {
+        return None;
+    }
+    let deadline = Instant::now() + Duration::from_millis(800);
+    let observation = crate::target::observe();
+    if Instant::now() >= deadline { return None; }
+    let app = Cf(unsafe { AXUIElementCreateApplication(observation.pid) });
+    if app.0.is_null() {
+        return None;
+    }
+    unsafe { AXUIElementSetMessagingTimeout(app.0, 0.2) };
+    let mut focused = if observation.element.is_some() {
+        None
+    } else {
+        Some(copy(app.0, c"AXFocusedUIElement"))
+    };
+    if Instant::now() < deadline && matches!(&focused, Some(Err(-25212 | -25211))) {
+        let name = attribute(c"AXManualAccessibility");
+        if unsafe { AXUIElementSetAttributeValue(app.0, name.0, kCFBooleanTrue) } == 0 {
+            OPENED
+                .get_or_init(|| Mutex::new(HashSet::new()))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(observation.pid);
+            if Instant::now() < deadline {
+                focused = Some(copy(app.0, c"AXFocusedUIElement"));
+            }
+        }
+    }
+    let fallback = focused.and_then(Result::ok);
+    let window = (Instant::now() < deadline).then(|| copy(app.0, c"AXFocusedWindow").ok()).flatten();
+    let focused_element = observation
+        .element
+        .as_ref()
+        .map(crate::target::Element::as_ptr)
+        .or_else(|| fallback.as_ref().map(|value| value.0));
+    let element = window.as_ref().map(|value| value.0).or(focused_element)?;
+    let mut text = String::new();
+    let mut nodes = 0;
+    if let Some(focused) = focused_element {
+        collect_window_text(focused, &mut text, &mut nodes, 0, deadline);
+    }
+    collect_window_text(element, &mut text, &mut nodes, 0, deadline);
+    (!text.is_empty()).then_some(text)
+}
+
+fn collect_window_text(
+    element: *mut c_void,
+    text: &mut String,
+    nodes: &mut usize,
+    depth: usize,
+    deadline: Instant,
+) {
+    if *nodes >= 96 || depth > 5 || Instant::now() >= deadline || text.len() >= 16_000 {
+        return;
+    }
+    *nodes += 1;
+    unsafe { AXUIElementSetMessagingTimeout(element, 0.1) };
+    if let Ok(Some(value)) = value_capped(element, (16_000 - text.len()) as isize) {
+        for ch in value.chars() {
+            if text.len() + ch.len_utf8() >= 16_000 {
+                break;
+            }
+            text.push(ch);
+        }
+        if text.len() < 16_000 {
+            text.push(' ');
+        }
+    }
+    if let Ok(children) = copy(element, c"AXChildren") {
+        if unsafe { CFGetTypeID(children.0) } == unsafe { CFArrayGetTypeID() } {
+            let count = unsafe { CFArrayGetCount(children.0) }.min(96);
+            for index in 0..count {
+                let child = unsafe { CFArrayGetValueAtIndex(children.0, index) };
+                if !child.is_null() {
+                    collect_window_text(child as *mut c_void, text, nodes, depth + 1, deadline);
+                }
+            }
+        }
+    }
 }
 fn caret(element: *mut c_void) -> Option<usize> {
     let range = copy(element, c"AXSelectedTextRange").ok()?;
