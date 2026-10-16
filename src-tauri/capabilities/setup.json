@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "setup",
+  "description": "The setup window listens for the `setup` event and emits back which permission button was pressed, or that the user is done. Each press can raise a system prompt or open a System Settings pane, and nothing else.",
+  "windows": ["setup"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "core:event:allow-emit"]
+}

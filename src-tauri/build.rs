@@ -27,5 +27,32 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=UniformTypeIdentifiers");
     println!("cargo:rustc-link-arg=-mmacosx-version-min=14.0");
     println!("cargo:rerun-if-changed=native/recording.m");
-    tauri_build::build();
+    cc::Build::new()
+        .file("native/permissions.m")
+        .flag("-fobjc-arc")
+        .flag("-mmacosx-version-min=14.0")
+        .compile("seepermissions");
+    println!("cargo:rerun-if-changed=native/permissions.m");
+    cc::Build::new()
+        .file("native/tap.m")
+        .flag("-fobjc-arc")
+        .flag("-mmacosx-version-min=14.0")
+        .compile("seetap");
+    println!("cargo:rustc-link-lib=framework=CoreAudio");
+    println!("cargo:rerun-if-changed=native/tap.m");
+    // Only the windows a capability names may call these, so the pill keeps
+    // no invoke surface at all.
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
+        tauri_build::AppManifest::new().commands(&[
+            "library_items",
+            "library_copy",
+            "library_reveal",
+            "library_fix",
+            "dictionary_load",
+            "dictionary_stamp",
+            "dictionary_edit",
+            "dictionary_reveal",
+        ]),
+    ))
+    .expect("failed to run tauri-build");
 }

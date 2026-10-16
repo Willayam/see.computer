@@ -4,13 +4,27 @@ compatibility_date = "2026-09-09"
 account_id = "29392a6d23b11e67789d7f1c9bcc5853"
 workers_dev = true
 
+# The website Worker owns the see.computer custom domain. Path routes run
+# before a custom domain, so these hand the share paths to this Worker.
+[[routes]]
+pattern = "see.computer/s/*"
+zone_name = "see.computer"
+
+[[routes]]
+pattern = "see.computer/api/shares/*"
+zone_name = "see.computer"
+
+[[routes]]
+pattern = "see.computer/hls-*"
+zone_name = "see.computer"
+
 [assets]
 directory = "./public"
 binding = "ASSETS"
 run_worker_first = true
 
 [vars]
-PUBLIC_ORIGIN = "https://see-computer-shares.cocco.workers.dev"
+PUBLIC_ORIGIN = "https://see.computer"
 
 [[r2_buckets]]
 binding = "SHARES"

@@ -120,6 +120,17 @@ impl ParakeetTDTModel {
         Ok((tokens, frame_indices, durations))
     }
 
+    pub fn forward_pair(
+        &mut self,
+        features: Array2<f32>,
+        bias: &mut dyn crate::bias::TokenBias,
+    ) -> Result<((Vec<usize>, Vec<usize>, Vec<usize>), (Vec<usize>, Vec<usize>, Vec<usize>))> {
+        let (encoder_out, encoder_len) = self.run_encoder(&features)?;
+        let plain = self.greedy_decode(&encoder_out, encoder_len, None)?;
+        let boosted = self.greedy_decode(&encoder_out, encoder_len, Some(bias))?;
+        Ok((plain, boosted))
+    }
+
     fn run_encoder(&mut self, features: &Array2<f32>) -> Result<(Array3<f32>, i64)> {
         let batch_size = 1;
         let time_steps = features.shape()[0];

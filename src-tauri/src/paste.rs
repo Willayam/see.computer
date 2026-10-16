@@ -29,13 +29,14 @@ struct Job {
     text: Text,
     clipboard: Clipboard,
     done: Box<dyn FnOnce(Outcome) + Send>,
+    dictation: Option<crate::ledger::Id>,
 }
 
 impl Paste {
-    pub fn system() -> Paste {
+    pub fn system(ledger: crate::ledger::Ledger, readback: crate::readback::Readback) -> Paste {
         let (tx, rx) = std::sync::mpsc::channel();
         crate::qos::spawn("see-paste", crate::qos::Class::Keystroke, move || {
-            paste_loop(rx)
+            paste_loop(rx, ledger, readback)
         });
         Paste {
             mode: Mode::System(tx),
@@ -61,6 +62,7 @@ impl Paste {
         &self,
         text: Text,
         clipboard: Clipboard,
+        dictation: Option<crate::ledger::Id>,
         reply: impl FnOnce(Outcome) + Send + 'static,
     ) {
         let done = Box::new(reply);
@@ -69,6 +71,7 @@ impl Paste {
                 if let Err(error) = tx.send(Job {
                     text,
                     clipboard,
+                    dictation,
                     done,
                 }) {
                     (error.0.done)(Outcome(Err(Error::Clipboard(
@@ -95,7 +98,11 @@ struct PendingRestore {
     at: Instant,
 }
 
-fn paste_loop(rx: Receiver<Job>) {
+fn paste_loop(
+    rx: Receiver<Job>,
+    ledger: crate::ledger::Ledger,
+    readback: crate::readback::Readback,
+) {
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(clipboard) => clipboard,
         Err(error) => {
@@ -166,13 +173,20 @@ fn paste_loop(rx: Receiver<Job>) {
         // between transcription finishing and the keystroke going out. Two AX
         // round trips at a 0.25s timeout each, so an unresponsive app can delay
         // the paste by up to half a second before we give up and paste anyway.
-        let observation = crate::target::observe();
-        let hold = observation.focus.holds_instead_of_pasting();
+        let mut observation = crate::target::observe();
+        // SEE_COMPUTER_PASTE=hold lets a verification run with the screen locked
+        // exercise everything but the keystroke, which would otherwise land in
+        // the lock screen's password field.
+        let hold = observation.focus.holds_instead_of_pasting()
+            || std::env::var("SEE_COMPUTER_PASTE").is_ok_and(|value| value == "hold");
         if hold {
             // No Cmd+V, and the prior clipboard is not restored, so the words
             // survive for the user to place. This is the whole fix: today a
             // dictation with nothing focused is overwritten 1.2s later.
             last = None;
+            if let Some(id) = &job.dictation {
+                ledger.landed(id, &observation, Landing::Held);
+            }
             (job.done)(Outcome(Ok(Landing::Held)));
             crate::target::log(&observation, true);
             continue;
@@ -180,6 +194,20 @@ fn paste_loop(rx: Receiver<Job>) {
         match post_cmd_v() {
             Ok(()) => {
                 last = Some((job.text.as_str().to_owned(), Instant::now()));
+                if let Some(id) = &job.dictation {
+                    ledger.landed(id, &observation, Landing::Pasted);
+                }
+                if let Some(id) = job.dictation {
+                    if ledger.enabled() && observation.focus != crate::target::Focus::NotEditable {
+                        readback.watch(crate::readback::Watch {
+                            id,
+                            pid: observation.pid,
+                            bundle: observation.bundle.clone(),
+                            pasted: job.text.as_str().trim().to_owned(),
+                            element: observation.element.take(),
+                        });
+                    }
+                }
                 (job.done)(Outcome(Ok(Landing::Pasted)));
                 crate::target::log(&observation, false);
                 if job.clipboard == Clipboard::RestorePrior {
@@ -222,8 +250,8 @@ pub enum Error {
     Event(String),
 }
 
-/// `prompt` is only passed as `true` once, at launch: a consent dialog during a
-/// paste would steal the focus we are about to paste into.
+/// `prompt` is only passed as `true` from the setup window: a consent dialog
+/// during a paste would steal the focus we are about to paste into.
 pub fn accessibility_trusted(prompt: bool) -> bool {
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {

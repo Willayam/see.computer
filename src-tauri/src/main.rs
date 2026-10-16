@@ -4,10 +4,16 @@ mod boost;
 mod cli;
 mod clip;
 mod config;
+mod dictionary;
 mod engine;
+mod eval;
 mod filler;
 mod history;
 mod hotkeys;
+mod learn;
+mod ledger;
+mod library;
+mod meeting;
 mod menu;
 mod mic;
 mod numbers;
@@ -15,16 +21,19 @@ mod paste;
 mod paths;
 mod pill;
 mod qos;
+mod readback;
 mod recents;
 mod recorder;
 mod rivals;
 mod session;
+mod setup;
 mod sharing;
 mod target;
 mod text;
 mod tray;
 mod trigger;
 mod updater;
+mod vocabulary;
 
 fn acquire_single_instance() -> std::fs::File {
     use std::os::fd::AsRawFd;
@@ -72,7 +81,13 @@ fn main() {
     let trigger = std::sync::Arc::new(std::sync::Mutex::new(config.trigger));
     let gesture = std::sync::Arc::new(trigger::Gesture::default());
     let history = history::History::start(config.history);
+    let ledger = ledger::Ledger::start(history.enabled_flag(), Some(pill_tx.clone()));
+    let readback = readback::Readback::start(ledger.clone());
     let sharing = sharing::Sharing::start(config.sharing);
+    let meeting_autostart =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(config.meeting_autostart));
+    let (meetings, meetings_thread) =
+        meeting::controller::spawn(pill_tx.clone(), meeting_autostart.clone());
     let updater = updater::Updater::new(tx.clone(), pill_tx.clone());
     let status = std::sync::Arc::new(std::sync::Mutex::new(session::EngineStatus::Loading {
         phase: engine::Phase::Downloading,
@@ -85,10 +100,11 @@ fn main() {
             mic,
             engine: engine::Loader::Models(engine::Models::default_root()),
             recorder: recorder::Recorder::screencapture(paths::documents()),
-            paste: paste::Paste::system(),
+            paste: paste::Paste::system(ledger.clone(), readback),
             pill: pill_tx,
             trail: session::Trail::from_env(),
             history: history.clone(),
+            ledger: ledger.clone(),
             sharing: sharing.clone(),
             status: status.clone(),
             gesture: gesture.clone(),
@@ -101,15 +117,34 @@ fn main() {
     let setup_trigger = trigger.clone();
     let setup_gesture = gesture;
     let setup_history = history;
+    let setup_ledger = ledger;
     let setup_status = status;
+    let dictionary = dictionary::Dictionary::new(setup_ledger.clone(), setup_history.clone());
+    let setup_meetings = meetings.clone();
     let app = tauri::Builder::default()
+        .manage(dictionary)
         .plugin(hotkeys::plugin(tx.clone()))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        // One handler for every window: a second invoke_handler call would
+        // replace the first.
+        .invoke_handler(tauri::generate_handler![
+            library::library_items,
+            library::library_copy,
+            library::library_reveal,
+            library::library_fix,
+            dictionary::dictionary_load,
+            dictionary::dictionary_stamp,
+            dictionary::dictionary_edit,
+            dictionary::dictionary_reveal,
+        ])
         .setup(move |app| {
+            library::attach(app.handle());
+            tauri::Manager::manage(app, setup_history.clone());
+            tauri::Manager::manage(app, setup_ledger.clone());
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             updater.attach(app.handle());
             let cancel_app = app.handle().clone();
@@ -125,20 +160,32 @@ fn main() {
                     trigger: setup_trigger.clone(),
                     pill: tray_pill_tx,
                     history: setup_history,
+                    ledger: setup_ledger,
                     status: setup_status,
                     sharing,
                     updater,
+                    meetings: setup_meetings,
+                    meeting_autostart,
                 },
             )?;
-            paste::accessibility_trusted(true);
+            setup::install(app.handle(), setup_trigger.clone());
+            if let Some(route) = std::env::var_os("SEE_COMPUTER_OPEN_LIBRARY") {
+                let route = route.to_string_lossy().into_owned();
+                library::show(app.handle(), (!route.is_empty()).then_some(route));
+            }
             trigger::spawn_watcher(setup_trigger, setup_watcher_tx, setup_gesture);
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("see.computer failed to start");
     let mut controller = Some(controller);
+    let mut meetings_thread = Some(meetings_thread);
     app.run(move |_, event| {
         if matches!(event, tauri::RunEvent::Exit) {
+            meetings.quit();
+            if let Some(handle) = meetings_thread.take() {
+                let _ = handle.join();
+            }
             let _ = tx.send(session::Msg::Quit);
             if let Some(handle) = controller.take() {
                 let _ = handle.join();

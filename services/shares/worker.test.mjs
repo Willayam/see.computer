@@ -9,7 +9,7 @@ import worker, {
 } from "./worker.mjs";
 import { viewerHtml } from "./viewer.mjs";
 
-const origin = "https://see-computer-shares.cocco.workers.dev";
+const origin = "https://see.computer";
 const initialNow = Date.UTC(2026, 8, 9, 12, 0, 0);
 const ownerA = "a".repeat(64);
 const ownerB = "b".repeat(64);
@@ -203,7 +203,7 @@ function fixture() {
 }
 
 function id(number) {
-  return number.toString(16).padStart(32, "0");
+  return number.toString(36).padStart(7, "0");
 }
 
 function internalRequest(path, { method = "GET", owner = ownerA, ip = ipA, body, headers = {} } = {}) {

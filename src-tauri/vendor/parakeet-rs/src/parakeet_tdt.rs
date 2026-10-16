@@ -108,6 +108,34 @@ impl ParakeetTDT {
         )?;
         let (tokens, frame_indices, durations) = self.model.forward(features, bias)?;
 
+        self.decode_result(tokens, frame_indices, durations, mode)
+    }
+
+    pub fn transcribe_samples_with_bias_pair(
+        &mut self,
+        audio: Vec<f32>,
+        sample_rate: u32,
+        channels: u16,
+        mode: Option<TimestampMode>,
+        bias: &mut dyn crate::bias::TokenBias,
+    ) -> Result<(TranscriptionResult, TranscriptionResult)> {
+        let features = audio::extract_features_with_cache(
+            audio, sample_rate, channels, &self.preprocessor_config, &self.feature_cache,
+        )?;
+        let (plain, boosted) = self.model.forward_pair(features, bias)?;
+        Ok((
+            self.decode_result(plain.0, plain.1, plain.2, mode)?,
+            self.decode_result(boosted.0, boosted.1, boosted.2, mode)?,
+        ))
+    }
+
+    fn decode_result(
+        &self,
+        tokens: Vec<usize>,
+        frame_indices: Vec<usize>,
+        durations: Vec<usize>,
+        mode: Option<TimestampMode>,
+    ) -> Result<TranscriptionResult> {
         let mut result = self.decoder.decode_with_timestamps(
             &tokens,
             &frame_indices,

@@ -10,6 +10,8 @@ pub struct Config {
     pub history: bool,
     #[serde(default)]
     pub sharing: bool,
+    #[serde(default)]
+    pub meeting_autostart: bool,
 }
 
 fn history_default() -> bool {
@@ -22,6 +24,7 @@ impl Default for Config {
             trigger: Trigger::Fn,
             history: true,
             sharing: false,
+            meeting_autostart: false,
         }
     }
 }
@@ -54,5 +57,6 @@ mod tests {
         assert_eq!(config.trigger, Trigger::LeftOption);
         assert!(config.history);
         assert!(!config.sharing);
+        assert!(!config.meeting_autostart);
     }
 }

@@ -9,8 +9,13 @@ pub fn app_support() -> PathBuf {
         .join("see.computer")
 }
 
-/// `~/Documents/see.computer`, where recordings, history, and the vocabulary live.
+/// `~/Documents/see.computer`, where recordings, history, and the vocabulary
+/// live, unless `SEE_COMPUTER_DOCUMENTS_DIR` names another folder for a check
+/// that must not touch the real one.
 pub fn documents() -> PathBuf {
+    if let Some(path) = std::env::var_os("SEE_COMPUTER_DOCUMENTS_DIR") {
+        return PathBuf::from(path);
+    }
     dirs::document_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_else(std::env::temp_dir)
@@ -27,6 +32,10 @@ pub fn instance_lock() -> PathBuf {
 
 pub fn models() -> PathBuf {
     app_support().join("models/parakeet-tdt-0.6b-v3-onnx/int8")
+}
+
+pub fn ledger() -> PathBuf {
+    app_support().join("ledger")
 }
 
 /// One line per dictation recording what Accessibility said about the frontmost
