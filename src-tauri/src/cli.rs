@@ -237,20 +237,16 @@ fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
         .iter()
         .map(|term| term.text.clone())
         .collect();
-    let context = [
-        ("SEE_COMPUTER_EVAL_SCREEN_TEXT", "screen"),
-        ("SEE_COMPUTER_EVAL_DAYBOOK_TEXT", "daybook"),
-    ]
-    .into_iter()
-    .flat_map(|(name, source)| {
+    let extract = |name: &str| {
         std::env::var_os(name)
             .and_then(|path| std::fs::read_to_string(path).ok())
-            .map(|text| crate::learn::context_terms(&text, &crate::learn::Words::system()))
+            .map(|text| crate::learn::context_terms(&text, crate::learn::Words::shared()))
             .unwrap_or_default()
-            .into_iter()
-            .map(move |text| crate::context::Term { text, source })
-    })
-    .collect::<Vec<_>>();
+    };
+    let context = crate::context::gather(
+        &extract("SEE_COMPUTER_EVAL_SCREEN_TEXT"),
+        &extract("SEE_COMPUTER_EVAL_DAYBOOK_TEXT"),
+    );
     let scored = match on_engine_thread(move |engine| {
         engine.set_context(&context);
         let mut total = crate::eval::Score::default();

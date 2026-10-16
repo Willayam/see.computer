@@ -12,6 +12,33 @@ pub struct Term {
     pub source: &'static str,
 }
 
+/// At most this many terms from the focused window, the most frequent first.
+const SCREEN_TERMS: usize = 32;
+/// Daybook describes the last two hours, so it gets fewer and ranks last.
+const DAYBOOK_TERMS: usize = 8;
+
+/// The terms one dictation is boosted with: screen terms before Daybook
+/// ones, each source ranked and capped, no spelling twice.
+pub fn gather(screen: &[String], daybook: &[String]) -> Vec<Term> {
+    let mut seen = HashSet::new();
+    screen
+        .iter()
+        .take(SCREEN_TERMS)
+        .map(|text| (text, "screen"))
+        .chain(
+            daybook
+                .iter()
+                .take(DAYBOOK_TERMS)
+                .map(|text| (text, "daybook")),
+        )
+        .filter(|(text, _)| seen.insert(text.to_lowercase()))
+        .map(|(text, source)| Term {
+            text: text.clone(),
+            source,
+        })
+        .collect()
+}
+
 fn enabled(name: &str) -> bool {
     std::env::var(name).ok().as_deref() != Some("0")
 }
@@ -24,9 +51,8 @@ fn daybook_cache() -> Arc<Mutex<Vec<String>>> {
             let cache = Arc::new(Mutex::new(Vec::new()));
             let update = cache.clone();
             crate::qos::spawn("see-daybook", crate::qos::Class::Upkeep, move || loop {
-                let words = crate::learn::Words::system();
                 let terms = daybook_text()
-                    .map(|text| crate::learn::context_terms(&text, &words))
+                    .map(|text| crate::learn::context_terms(&text, crate::learn::Words::shared()))
                     .unwrap_or_default();
                 *update
                     .lock()
@@ -44,38 +70,20 @@ pub fn begin() -> mpsc::Receiver<Vec<Term>> {
     let (tx, rx) = mpsc::channel();
     let cache = enabled("SEE_COMPUTER_DAYBOOK_CONTEXT").then(daybook_cache);
     crate::qos::spawn("see-screen-context", crate::qos::Class::Upkeep, move || {
-        let mut terms = Vec::new();
-        if enabled("SEE_COMPUTER_SCREEN_CONTEXT") {
-            if let Some(text) = crate::readback::screen_text() {
-                let words = crate::learn::Words::system();
-                terms.extend(
-                    crate::learn::context_terms(&text, &words)
-                        .into_iter()
-                        .map(|text| Term {
-                            text,
-                            source: "screen",
-                        }),
-                );
-            }
-        }
-        if let Some(cache) = cache {
-            terms.extend(
+        let screen = enabled("SEE_COMPUTER_SCREEN_CONTEXT")
+            .then(crate::readback::screen_text)
+            .flatten()
+            .map(|text| crate::learn::context_terms(&text, crate::learn::Words::shared()))
+            .unwrap_or_default();
+        let daybook = cache
+            .map(|cache| {
                 cache
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .iter()
-                    .take(64)
-                    .cloned()
-                    .map(|text| Term {
-                        text,
-                        source: "daybook",
-                    }),
-            );
-        }
-        let mut seen = HashSet::new();
-        terms.retain(|term| seen.insert(term.text.to_lowercase()));
-        terms.truncate(96);
-        let _ = tx.send(terms);
+                    .clone()
+            })
+            .unwrap_or_default();
+        let _ = tx.send(gather(&screen, &daybook));
     });
     rx
 }
@@ -116,7 +124,7 @@ fn read_daybook(path: &Path) -> Option<String> {
     let db = Db(raw);
     unsafe { sqlite3_busy_timeout(db.0, 0) };
     // Fail closed if the privacy column or description schema changes.
-    let sql = c"SELECT coalesce(d_on_screen,'') || ' ' || coalesce(d_working_on,'') \
+    let sql = c"SELECT coalesce(d_on_screen,'') || char(10) || coalesce(d_working_on,'') \
                FROM screenshots WHERE d_personal = 0 \
                AND julianday(captured_at) >= julianday('now') - 2.0/24.0 \
                ORDER BY captured_at DESC LIMIT 500";
@@ -138,7 +146,7 @@ fn read_daybook(path: &Path) -> Option<String> {
                         break;
                     }
                     text.push_str(&row);
-                    text.push(' ');
+                    text.push('\n');
                 }
             }
             101 => return Some(text),
@@ -198,6 +206,57 @@ mod tests {
     #[test]
     fn missing_daybook_is_empty() {
         assert!(read_daybook(Path::new("/nonexistent/daybook.db")).is_none());
+    }
+
+    #[test]
+    fn context_keeps_names_and_drops_labels_and_prose() {
+        let words = crate::learn::Words::from_list(&[
+            "and",
+            "pro",
+            "comparing",
+            "settings",
+            "the",
+            "file",
+            "to",
+            "sent",
+            "i",
+            "follow",
+            "up",
+            "right",
+            "new",
+            "on",
+            "prices",
+            "a",
+            "with",
+            "yesterday",
+        ]);
+        let screen = "Settings\nKlarna\nI sent the file to Larsten yesterday. And then Larsten replied.\n\
+                      Comparing prices on Prisjakt.nu with a MacBook Pro, a dropdown and a follow-up.\n\
+                      RIGHT 3D T3 n8n API, Sep 3 PM. I'll ask Larsten's team.";
+        assert_eq!(
+            crate::learn::context_terms(screen, &words),
+            ["Larsten", "Klarna", "Prisjakt.nu", "MacBook", "n8n", "API"]
+        );
+        let daybook = ["Larsten".to_owned(), "Klarna".to_owned()];
+        let screen: Vec<String> = (0..40).map(|n| format!("Term{n}")).collect();
+        let terms = gather(&screen, &daybook);
+        assert_eq!(terms.len(), SCREEN_TERMS + 2);
+        assert!(terms[..SCREEN_TERMS].iter().all(|t| t.source == "screen"));
+        assert_eq!(terms[SCREEN_TERMS].text, "Larsten");
+        let terms = gather(&["Larsten".to_owned()], &daybook);
+        assert_eq!(
+            terms,
+            [
+                Term {
+                    text: "Larsten".into(),
+                    source: "screen"
+                },
+                Term {
+                    text: "Klarna".into(),
+                    source: "daybook"
+                },
+            ]
+        );
     }
 
     #[test]
