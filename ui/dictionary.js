@@ -152,7 +152,8 @@
   }
 
   function recentEl(w) {
-    if (!w.recent.length) return `<p class="dict-help">Not seen in your ${plural(view.snap.lines, "saved line", "saved lines")} yet.</p>`;
+    const cloud = view.snap.inIcloud ? ` ${plural(view.snap.inIcloud, "file is", "files are")} still downloading from iCloud, so this may change.` : "";
+    if (!w.recent.length) return `<p class="dict-help">Not seen in your ${plural(view.snap.lines, "saved line", "saved lines")} yet.${cloud}</p>`;
     return `<div class="lines dict-recent">${w.recent.map((r, idx) => {
       const isMeeting = r.item.startsWith("meeting:");
       return `<button class="line is-dictation dict-hit" data-recent="${idx}" title="Open in the Library">

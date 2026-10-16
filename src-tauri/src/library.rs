@@ -164,7 +164,154 @@ fn set_active(app: &AppHandle, active: bool) {
 /// Async so the file reads run off the main thread, which also draws the panel.
 #[tauri::command]
 pub async fn library_items(history: State<'_, History>) -> Result<Vec<Item>, String> {
-    Ok(items(&history.root()))
+    let root = history.root();
+    fetch(&root, std::time::Duration::from_secs(3));
+    Ok(items(&root))
+}
+
+/// When the disk fills, macOS moves files in an iCloud Documents folder to
+/// the cloud and leaves a placeholder. Reading one waits for its download,
+/// 1.2 to 1.4 s each, and the downloads run one after another, so a Library
+/// that read every file was blank for minutes. Asking for all of them at
+/// once brought 30 back in 2.5 s on 2026-10-16.
+const SF_DATALESS: u32 = 0x4000_0000;
+
+pub(crate) fn evicted(path: &Path) -> bool {
+    use std::os::darwin::fs::MetadataExt;
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.st_flags() & SF_DATALESS != 0)
+}
+
+/// The files `items` reads, as opposed to the media it only links to.
+fn read_by_items(history_root: &Path, documents: &Path) -> Vec<std::path::PathBuf> {
+    let listed = |dir: &Path| {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>()
+    };
+    let mut files: Vec<_> = listed(history_root)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+        .collect();
+    for dir in listed(documents).into_iter().filter(|path| path.is_dir()) {
+        for name in [
+            folder::MANIFEST,
+            folder::MARKDOWN,
+            "transcript.json",
+            "share.json",
+        ] {
+            files.push(dir.join(name));
+        }
+    }
+    files
+}
+
+/// How many files the Library reads are still in iCloud.
+pub(crate) fn in_icloud(history_root: &Path) -> usize {
+    read_by_items(history_root, &crate::paths::documents())
+        .iter()
+        .filter(|path| evicted(path))
+        .count()
+}
+
+static FETCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Asks iCloud for every evicted file the Library reads and waits up to
+/// `wait` for them. Any still in the cloud show as downloading, and the
+/// Library reloads once they arrive.
+pub(crate) fn fetch(history_root: &Path, wait: std::time::Duration) {
+    use std::sync::atomic::Ordering;
+    let documents = crate::paths::documents();
+    let pending = |files: &[std::path::PathBuf]| -> Vec<std::path::PathBuf> {
+        files.iter().filter(|path| evicted(path)).cloned().collect()
+    };
+    let missing = pending(&read_by_items(history_root, &documents));
+    if missing.is_empty() {
+        return;
+    }
+    download(&missing);
+    let deadline = std::time::Instant::now() + wait;
+    let mut left = missing;
+    while !left.is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        left = pending(&left);
+    }
+    if left.is_empty() || FETCHING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        let mut reported = std::time::Instant::now();
+        let mut before = left.len();
+        while !left.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            left = pending(&left);
+            if left.len() < before && (left.is_empty() || reported.elapsed().as_secs() >= 5) {
+                changed();
+                reported = std::time::Instant::now();
+                before = left.len();
+            }
+        }
+        FETCHING.store(false, Ordering::SeqCst);
+    });
+}
+
+fn download(paths: &[std::path::PathBuf]) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let (Some(manager), Some(url), Some(string)) = (
+            AnyClass::get(c"NSFileManager"),
+            AnyClass::get(c"NSURL"),
+            AnyClass::get(c"NSString"),
+        ) else {
+            return;
+        };
+        let manager: *mut AnyObject = msg_send![manager, defaultManager];
+        for path in paths {
+            let Ok(path) = std::ffi::CString::new(path.to_string_lossy().as_bytes()) else {
+                continue;
+            };
+            let path: *mut AnyObject = msg_send![string, stringWithUTF8String: path.as_ptr()];
+            if path.is_null() {
+                continue;
+            }
+            let file: *mut AnyObject = msg_send![url, fileURLWithPath: path];
+            let error: *mut *mut AnyObject = std::ptr::null_mut();
+            let _: bool =
+                msg_send![manager, startDownloadingUbiquitousItemAtURL: file, error: error];
+        }
+    });
+}
+
+/// What a file still in iCloud shows as until it downloads.
+fn in_cloud(
+    id: String,
+    kind: &'static str,
+    at: i64,
+    folder: &Path,
+    markdown: Option<String>,
+) -> Item {
+    Item {
+        id,
+        kind,
+        state: "cloud",
+        error: None,
+        at,
+        duration_ms: None,
+        title: "Downloading from iCloud".to_owned(),
+        source: None,
+        lines: Vec::new(),
+        media: Vec::new(),
+        paste: String::new(),
+        files: Files {
+            folder: path_string(folder),
+            markdown,
+        },
+        share: None,
+    }
 }
 
 #[tauri::command]
@@ -312,6 +459,15 @@ fn local_ms(date: &str, time: &str) -> Option<i64> {
 fn day(path: &Path) -> Option<Item> {
     let date = path.file_stem()?.to_str()?;
     NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    if evicted(path) {
+        return Some(in_cloud(
+            format!("dictation:{date}"),
+            "dictation",
+            local_ms(date, "00:00:00")?,
+            path.parent()?,
+            Some(path_string(path)),
+        ));
+    }
     let content = std::fs::read_to_string(path).ok()?;
     let mut lines = Vec::new();
     let mut time = None;
@@ -436,6 +592,23 @@ fn fixed_meeting(markdown: &str, start_ms: i64, original: &str, edited: &str) ->
 }
 
 fn meeting(path: &Path) -> Option<Item> {
+    let name = path.file_name()?.to_str()?;
+    if evicted(&path.join(folder::MANIFEST)) || evicted(&path.join(folder::MARKDOWN)) {
+        let started =
+            NaiveDateTime::parse_from_str(name.strip_prefix("meeting-")?, "%Y-%m-%d-%H-%M-%S")
+                .ok()?;
+        let at = Local
+            .from_local_datetime(&started)
+            .single()?
+            .timestamp_millis();
+        return Some(in_cloud(
+            format!("meeting:{name}"),
+            "meeting",
+            at,
+            path,
+            None,
+        ));
+    }
     let manifest = folder::read(path)?;
     let markdown = path.join(folder::MARKDOWN);
     let present = markdown.is_file();
@@ -483,6 +656,15 @@ fn take(path: &Path) -> Option<Item> {
     let markdown = [path.join("take.md"), path.join("clip.md")]
         .into_iter()
         .find(|file| file.is_file());
+    if evicted(&path.join("transcript.json")) {
+        let name = path.file_name()?.to_str()?;
+        let at = name
+            .get(..10)
+            .zip(name.get(11..))
+            .and_then(|(date, clock)| local_ms(date, &clock.replace('-', ":")))?;
+        let markdown = markdown.as_ref().map(|file| path_string(file));
+        return Some(in_cloud(format!("take:{name}"), "take", at, path, markdown));
+    }
     let transcript = std::fs::read(path.join("transcript.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -594,8 +776,9 @@ fn take(path: &Path) -> Option<Item> {
     }
     media.sort_by_key(|entry| entry.at_ms);
     let markdown_path = markdown.as_ref().map(|path| path_string(path));
-    let share = std::fs::read(path.join("share.json"))
-        .ok()
+    let share = (!evicted(&path.join("share.json")))
+        .then(|| std::fs::read(path.join("share.json")).ok())
+        .flatten()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .and_then(|value| {
             value
