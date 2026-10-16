@@ -69,6 +69,15 @@ impl Parakeet {
         self.boost = (!boost.is_empty()).then_some(boost);
     }
 
+    /// Tidying, the heard-form rules, then near misses of on-screen names.
+    fn finish(&self, raw: &str) -> String {
+        crate::context::near_misses(
+            &self.lexicon.rewrite(&tidy(raw)),
+            &self.context,
+            crate::learn::Words::shared(),
+        )
+    }
+
     fn active_terms(&self) -> Vec<Term> {
         let mut terms = self.lexicon.terms().to_vec();
         for context in &self.context {
@@ -215,7 +224,7 @@ impl Engine for Parakeet {
                         || token.text.clone(),
                         |p| merge(&p.tokens[index].text, &token.text, &active_terms),
                     );
-                    let text = self.lexicon.rewrite(&tidy(&raw));
+                    let text = self.finish(&raw);
                     (!text.is_empty()).then(|| Segment {
                         start_ms: (source.start.max(0.0) * 1000.0).round() as u64,
                         end_ms: (source.end.max(0.0) * 1000.0).round() as u64,
@@ -223,7 +232,7 @@ impl Engine for Parakeet {
                     })
                 })
                 .collect(),
-            text: Text::parse(self.lexicon.rewrite(&tidy(&text))),
+            text: Text::parse(self.finish(&text)),
         })
     }
 }

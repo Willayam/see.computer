@@ -39,6 +39,71 @@ pub fn gather(screen: &[String], daybook: &[String]) -> Vec<Term> {
         .collect()
 }
 
+/// Writes an on-screen name over a near miss of it. Boosting cannot reach a
+/// name the model hears as another spelling: with "Larsten" on screen, the
+/// boosted pass takes its opening token and then leaves it ("Lauriston"),
+/// and the plain pass writes "Larston". The miss must be a capitalized word
+/// the word list does not know, at least five letters, and one changed or
+/// swapped letter from exactly one screen term that starts with the same two
+/// letters. A letter added or dropped is left alone: in the user's own lines
+/// those were Swedish inflections, "Fridag" and "Fridas" beside "Frida".
+pub fn near_misses(text: &str, terms: &[Term], words: &crate::learn::Words) -> String {
+    let names: Vec<&str> = terms
+        .iter()
+        .filter(|term| term.source == "screen" && term.text.chars().all(char::is_alphabetic))
+        .map(|term| term.text.as_str())
+        .collect();
+    if names.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(char::is_alphabetic) {
+        let end = rest[start..]
+            .find(|c: char| !c.is_alphabetic())
+            .map_or(rest.len(), |offset| start + offset);
+        let word = &rest[start..end];
+        out.push_str(&rest[..start]);
+        out.push_str(near_miss(word, &names, words).unwrap_or(word));
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn near_miss<'a>(word: &str, names: &[&'a str], words: &crate::learn::Words) -> Option<&'a str> {
+    let mut chars = word.chars();
+    let capitalized = chars.next().is_some_and(char::is_uppercase) && chars.all(char::is_lowercase);
+    if !capitalized || word.chars().count() < 5 || words.knows(word) {
+        return None;
+    }
+    let lower = word.to_lowercase();
+    let prefix: String = lower.chars().take(2).collect();
+    let mut found = names.iter().filter(|name| {
+        let name = name.to_lowercase();
+        name != lower && name.starts_with(&prefix) && one_letter(&lower, &name)
+    });
+    match (found.next(), found.next()) {
+        (Some(name), None) => Some(name),
+        _ => None,
+    }
+}
+
+/// The same length, and one letter changed or two neighbours swapped.
+fn one_letter(a: &str, b: &str) -> bool {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.len() != b.len() {
+        return false;
+    }
+    let differ: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
+    match differ.as_slice() {
+        [_] => true,
+        [i, j] => j - i == 1 && a[*i] == b[*j] && a[*j] == b[*i],
+        _ => false,
+    }
+}
+
 fn enabled(name: &str) -> bool {
     std::env::var(name).ok().as_deref() != Some("0")
 }
@@ -257,6 +322,40 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_near_miss_of_an_on_screen_name_is_written_as_the_name() {
+        let words =
+            crate::learn::Words::from_list(&["i", "sent", "the", "file", "to", "larson", "frida"]);
+        let screen = |names: &[&str]| -> Vec<Term> {
+            names
+                .iter()
+                .map(|text| Term {
+                    text: (*text).into(),
+                    source: "screen",
+                })
+                .collect()
+        };
+        let fix = |text: &str, terms: &[Term]| near_misses(text, terms, &words);
+        let terms = screen(&["Larsten", "Frida"]);
+        assert_eq!(
+            fix("I sent the file to Larston yesterday.", &terms),
+            "I sent the file to Larsten yesterday."
+        );
+        assert_eq!(fix("Ask Lasrten.", &terms), "Ask Larsten.");
+        // A known word, a letter added or dropped, and lowercase stay as heard.
+        assert_eq!(
+            fix("Larson and Fridag and larston", &terms),
+            "Larson and Fridag and larston"
+        );
+        // Two names it could be is no answer, and Daybook is not the screen.
+        assert_eq!(fix("Larston", &screen(&["Larsten", "Larstan"])), "Larston");
+        let daybook = [Term {
+            text: "Larsten".into(),
+            source: "daybook",
+        }];
+        assert_eq!(fix("Larston", &daybook), "Larston");
     }
 
     #[test]
