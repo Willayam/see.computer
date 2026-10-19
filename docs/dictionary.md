@@ -116,6 +116,56 @@ dictate ─► ledger: id, text, audio, app ─► paste
                     corpus.tsv ─► see-computer eval
 ```
 
+While a dictation is recording, a background task reads the focused window's
+Accessibility text, one line per element. It visits at most 800 elements, 64
+levels deep, for 800 ms, and accepts at most 16,000 characters. Web apps nest
+their text deep: T3 Code's transcript sits about 27 levels under its window,
+and the first version, which stopped at five levels and 96 elements, only
+ever read the focused field. On T3 Code the walk reads about 670 elements in
+under 100 ms.
+
+The terms kept from that text are names and identifiers: camelCase,
+internal punctuation (`claude.ai`), letters mixed with digits, all caps the
+word list does not know, and capitalized words the word list does not know.
+A capital that opens a sentence does not count, but a word alone on its line
+does, since that is a label or a name. Dictionary words, plain lowercase
+words, month and day names, and units stay out. A dictionary word
+capitalized inside a sentence, as in "the rows in Convex", counts when the
+text never writes it in lowercase, and ranks after the rest. Terms are
+ranked by how often they appear. A dictation gets at most 32 screen terms,
+then at most 8 Daybook terms, with no spelling twice (`context::gather`).
+Before this, each dictation was boosted with 62 to 65 terms, among them
+"And", "Pro", "dropdown" and "Comparing".
+
+The engine adds those terms at weight 0.5 for this utterance, through the
+same dual decode and merge as saved vocabulary. A hunk survives only when it
+lands a whole term. The context is cleared after the utterance.
+`SEE_COMPUTER_SCREEN_CONTEXT=0` turns the source off.
+
+**Near misses of names on screen.** Boosting cannot reach a name the model
+hears as another spelling. With "Larsten" in context, the boosted pass takes
+the name's opening token and then leaves it ("Lauriston", "Lawson"), and the
+merge rightly keeps the plain pass's "Larston". Weights up to 3 and margins
+up to 8 did not change that on the user's three recordings. After decoding,
+a capitalized word the word list does not know, at least five letters long,
+is written as a screen term when it is one changed or swapped letter from
+exactly one of them and shares its first two letters
+(`context::near_misses`). Saved vocabulary words are left alone. A letter
+added or dropped is not enough: run over the user's 2,926 saved lines with
+every vocabulary term treated as on screen, allowing those also turned the
+Swedish "Fridag" and "Fridas" into "Frida". With one changed or swapped
+letter, 4 lines changed, all of them misspellings of vocabulary names
+("Larston", "Hormozy", "Fridd").
+
+Another background task reads Daybook's `daybook.db` with SQLite `mode=ro`.
+It reads only non-private descriptions from the last two hours and refreshes
+its in-memory term cache every three minutes. A missing or changed database
+leaves the cache empty. The default path is
+`~/Development/automation-project/data/daybook.db`; `SEE_COMPUTER_DAYBOOK_DB`
+overrides it and `SEE_COMPUTER_DAYBOOK_CONTEXT=0` turns this source off. The
+decoder takes the cached terms at the same low weight. The ledger records
+each term used, its source, and whether it appeared in the result.
+
 **The ledger** (`ledger.rs`) gives every dictation an id and appends events to
 `~/Library/Application Support/see.computer/ledger/events.jsonl`. The events
 record what was decoded and the audio path, where the words landed (app,
@@ -286,6 +336,34 @@ in one batch brought 30 files back in 2.5 s, where reading them took about
   Library handing activation back to the app it opened over, the workspace
   named TextEdit within half a second, and a dictation replayed from
   `fixtures/en.wav` was pasted into the document.
+- On 2026-10-16, the release eval on 104 regenerated synthetic clips with a
+  temporary vocabulary copy gave 176 errors in 972 words, 18.11% WER, and
+  35/108 term hits. Adding irrelevant screen and Daybook terms gave the same
+  per-clip output and summary, with no skipped clips. On the `Convex` clip
+  with no saved vocabulary, screen context changed `convex` to `Convex` and
+  raised term recall from 0/1 to 1/1, with no word errors in either run.
+  Unit tests cover private and old Daybook rows, missing files, the learner
+  shape filter, the merge, and the ledger's term-only context event. Clippy
+  passes with warnings denied.
+- A scratch TextEdit replay was attempted on 2026-10-16 under the live lock.
+  The unsigned debug app's event tap repeatedly reset before a dictation
+  started. No paste or context event was produced.
+- Later on 2026-10-16, after the filter, the deeper walk and the near-miss
+  rewrite: 242 tests pass and clippy passes with warnings denied. The 104
+  regenerated clips with today's vocabulary copy give 177 errors in 972
+  words and 37/108 terms with no context. With real T3 Code screen text and
+  real Daybook descriptions as context, the old filter gave 181 errors and
+  the new one 177. With every vocabulary term as screen text, the new
+  filter gives 177. The `Convex` clips still come out as `Convex` with
+  "Convex" on screen and no vocabulary. The user's three "Larsten"
+  recordings, which came out "Larston", "Larson" and "Larston", give 3
+  errors with no context and 1 with "Larsten" on screen: both "Larston"s
+  become "Larsten", and "Larson" stays, two letters away.
+- The deeper walk was run read-only against T3 Code while the user worked:
+  671 elements and 6,394 characters in 94 ms, against nothing past the
+  focused field before.
+- Not verified live: screen context during a real dictation into T3 Code.
+  The eval applies context from text files, not from a live window.
 - On 2026-10-16, after the fixes: 238 tests pass and clippy passes with
   warnings denied. New tests cover a paste that ends its field, with each
   trailing form an editor reported, and the cards a read-back fix sends:
@@ -319,8 +397,8 @@ Ranked by expected gain per unit of work. Built items are in this branch.
 | 3 | Personal eval corpus and regression score | ledger audio + corrections | none | audio stays local | turns "feels worse" into a number per change | built (`corpus.tsv`, `see-computer eval`) |
 | 4 | Dual decode, keep only boosted hunks that land a term | second greedy pass over the same encoder output | +10.7 ms median per clip | none | errors 187 → 182 at margin 3; margin 4 no longer ends up worse than boost-off (188 vs 190 errors) | built |
 | 5 | Fixing lines in the Library, and the Dictionary menu | the Library window, native panel rows | none | none | covers apps read-back cannot see | built |
-| 6 | Screen-context terms per dictation | AX text of the focused window read while the user speaks, filtered by the learner's shape test, boosted at low weight for that utterance only | none if read during recording | on-screen text held in memory, never written | names and identifiers visible on screen; also the only lever for "scale" vs "skill" | next |
-| 7 | Daybook feed | read `daybook.db` read-only, last two hours of non-private descriptions | none | already local; skip private rows | project and client names, about 6 minutes stale | next, cheap |
+| 6 | Screen-context terms per dictation | AX text of the focused window read while the user speaks, filtered by the learner's shape test, boosted at low weight for that utterance only | none if read during recording | on-screen text held in memory, never written | names and identifiers visible on screen; also the only lever for "scale" vs "skill" | built |
+| 7 | Daybook feed | read `daybook.db` read-only, last two hours of non-private descriptions | none | already local; skip private rows | project and client names, about 6 minutes stale | built |
 | 8 | Background miner | nightly job over ledger, history, Daybook, git repos, Wispr's dictionary; optional Haiku pass to judge candidates via the Claude CLI | none | only candidate strings and short contexts leave the machine, and only with Haiku on | fills the review queue before the user corrects anything | later |
 | 9 | Per-app term sets | ledger's app per dictation | none | local | fewer collateral pushes by boosting only what that app needs | later, after 6 |
 | 10 | Confidence highlighting | token log-probs from the decoder | small | none | points the user at the words to check | later |
@@ -360,6 +438,9 @@ Follow-up still open:
   an editable field, so a real paste would type into its password box.
 - `see-computer eval` exits 2 when any clip was skipped, so a run that
   silently dropped hard clips cannot pass.
+- `SEE_COMPUTER_EVAL_SCREEN_TEXT` and `SEE_COMPUTER_EVAL_DAYBOOK_TEXT` name
+  text files whose extracted terms are applied to every eval clip. This makes
+  the context path measurable without reading a live window or database. The eval ranks and caps them the way a dictation does.
 
 ## Privacy
 
@@ -371,3 +452,8 @@ that answered nothing then, the field focused a quarter second later. It
 reads for at most 90 seconds and stores only the region of the user's own
 dictation. Turning off "Save
 Dictation History" stops the ledger, the audio, and learning.
+The dictation app keeps fetched screen text and Daybook descriptions only in
+memory. It writes neither to history nor the ledger. The ledger stores only
+context terms used and whether they landed, when history is enabled. The feed
+opens the Daybook database read-only and skips rows marked private. An
+absent, locked, or changed database never delays dictation.

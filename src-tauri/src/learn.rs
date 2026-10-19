@@ -122,6 +122,13 @@ impl Words {
         Words(std::sync::OnceLock::new())
     }
 
+    /// One list for the dictation path, so a dictation never waits on the
+    /// file: the context thread touches it while the user is still speaking.
+    pub fn shared() -> &'static Words {
+        static SHARED: std::sync::OnceLock<Words> = std::sync::OnceLock::new();
+        SHARED.get_or_init(Words::system)
+    }
+
     #[cfg(test)]
     pub fn from_list(words: &[&str]) -> Words {
         Words(std::sync::OnceLock::from(
@@ -212,6 +219,127 @@ pub fn learnable(swap: &Swap, words: &Words) -> bool {
         }
     }
     false
+}
+
+/// Names and identifiers in context text, the most frequent first.
+///
+/// Stricter than the correction test, because nobody confirmed these words:
+/// a capital that opens a line or sentence, a dictionary word, and a plain
+/// lowercase word all stay out. A label like "Settings" or a description
+/// like "Comparing prices" would otherwise be boosted like a name.
+pub fn context_terms(text: &str, words: &Words) -> Vec<String> {
+    // A word the text also writes in lowercase is a word, wherever it is
+    // capitalized: "And" opening a clause, "Add" on a button.
+    let lowercase: HashSet<&str> = text
+        .split_whitespace()
+        .map(strip)
+        .filter(|token| token.chars().all(char::is_lowercase))
+        .collect();
+    // (term, weak, count): a weak term is a dictionary word capitalized
+    // inside a sentence, "the rows in Convex", and ranks after the rest.
+    let mut found: Vec<(String, bool, usize)> = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for line in text.lines() {
+        // A word alone on its line is a label or a name, not a sentence.
+        let mut opens = line.split_whitespace().nth(1).is_some();
+        // A title-case label capitalizes everything; a sentence does not.
+        let count = line.split_whitespace().count();
+        let capitals = line
+            .split_whitespace()
+            .filter(|part| strip(part).chars().next().is_some_and(char::is_uppercase))
+            .count();
+        let prose = count >= 4 && capitals * 2 < count;
+        for part in line.split_whitespace() {
+            // "Larsten's" counts as Larsten, and "I'll" as I.
+            let token = strip(strip(part).split(['\'', '’']).next().unwrap_or_default());
+            let weak = || {
+                prose
+                    && !opens
+                    && token.chars().count() >= 3
+                    && token.chars().next().is_some_and(char::is_uppercase)
+                    && token.chars().skip(1).all(char::is_lowercase)
+                    && !lowercase.contains(token.to_lowercase().as_str())
+            };
+            let kind = if token.len() > 64 {
+                None
+            } else if names_something(token, opens, words) {
+                Some(false)
+            } else {
+                weak().then_some(true)
+            };
+            if let Some(weak) = kind {
+                match seen.get(&token.to_lowercase()) {
+                    Some(&index) => found[index].2 += 1,
+                    None => {
+                        seen.insert(token.to_lowercase(), found.len());
+                        found.push((token.to_owned(), weak, 1));
+                    }
+                }
+            }
+            opens = part.ends_with(['.', '!', '?', ':']);
+        }
+    }
+    // Stable, so equally frequent terms keep the order they were seen in.
+    found.sort_by_key(|(_, weak, count)| (*weak, std::cmp::Reverse(*count)));
+    found.into_iter().map(|(term, _, _)| term).collect()
+}
+
+/// Short forms a window shows everywhere that the word list lacks.
+const ORDINARY: &[&str] = &[
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec", "mon",
+    "tue", "wed", "thu", "fri", "sat", "sun", "am", "pm", "kb", "mb", "gb", "tb", "ok",
+];
+
+fn names_something(token: &str, opens: bool, words: &Words) -> bool {
+    let letters = token.chars().filter(|c| c.is_alphabetic()).count();
+    if letters < 2 || ORDINARY.contains(&token.to_lowercase().as_str()) {
+        return false;
+    }
+    let inner: String = token
+        .chars()
+        .skip(1)
+        .take(token.chars().count() - 2)
+        .collect();
+    // A path or branch name is read, never said: "apps/web/sandbox/drawers",
+    // "t3code/project-lat". Only a short alternation like "A/B" is spoken.
+    if inner.contains('/') {
+        return token.split('/').all(|part| part.chars().count() <= 2);
+    }
+    if token.chars().any(char::is_numeric) {
+        return true;
+    }
+    if inner.contains(['.', '_']) {
+        return true;
+    }
+    if inner.contains('-') {
+        // T3 Code shows a long branch name as two elements, and the second
+        // opens mid-word: "est-status", "nding-page". A name opens with a
+        // word, a capital or a digit.
+        let opens_like_a_word = token.split('-').next().is_some_and(|part| {
+            words.knows(part)
+                || part
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_uppercase() || c.is_numeric())
+        });
+        return opens_like_a_word
+            && token
+                .split('-')
+                .any(|part| !part.is_empty() && !words.knows(part));
+    }
+    let upper = token.chars().filter(|c| c.is_uppercase()).count();
+    let lower = token.chars().filter(|c| c.is_lowercase()).count();
+    let capital_inside = token.chars().skip(1).any(char::is_uppercase);
+    if capital_inside && lower > 0 {
+        return true;
+    }
+    if upper == 0 {
+        return false;
+    }
+    if lower == 0 {
+        return !words.knows(token);
+    }
+    !opens && !words.knows(token)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -611,6 +739,34 @@ mod tests {
             opens_sentence: false,
         };
         assert!(!learnable(&swap, &words));
+    }
+
+    #[test]
+    fn clipped_branch_names_and_paths_are_not_terms() {
+        let words = Words::from_list(&[
+            "status", "page", "surface", "website", "links", "project", "drawers", "web", "apps",
+            "sandbox", "walls", "through", "day",
+        ]);
+        // One element per line, as the window walk reads T3 Code's sidebar:
+        // a long branch name is two elements, the second opening mid-word.
+        let screen = "PR\nsee.computer\nt3code/project-lat\nest-status\n\
+                      t3code/mcp-eval-la\nnding-page\nt3code/simplify-produ\nct-surface\n\
+                      t3code/cocco-agen\ncy-website\nhort-links\napps/web/sandbox/drawers\n\
+                      tmp/codex-bins-dir\nUsers/williamlarsten/.t3/worktrees/william\n\
+                      A/B\nUSB-C\ngpt-6-sol\n7-day\nwalls-through-Codex\nLarsten\n";
+        assert_eq!(
+            context_terms(screen, &words),
+            [
+                "PR",
+                "see.computer",
+                "A/B",
+                "USB-C",
+                "gpt-6-sol",
+                "7-day",
+                "walls-through-Codex",
+                "Larsten"
+            ]
+        );
     }
 
     #[test]
