@@ -424,14 +424,21 @@ pub enum Edit {
         from: Option<String>,
         to: Option<String>,
     },
-    /// A word seen once, accepted now.
     Learn {
         term: String,
+        #[serde(default)]
+        edited: Option<Correction>,
     },
     /// A word seen once, never to be offered again.
     Ignore {
         term: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct Correction {
+    pub term: String,
+    pub heard: Option<String>,
 }
 
 /// What an edit means for the event log, beyond the files.
@@ -524,7 +531,17 @@ impl Edit {
                     to,
                 }
             }
-            Edit::Learn { term } => Edit::Learn { term: word(term)? },
+            Edit::Learn { term, edited } => Edit::Learn {
+                term: word(term)?,
+                edited: edited
+                    .map(|c| {
+                        Ok::<_, String>(Correction {
+                            term: word(c.term)?,
+                            heard: heard(c.heard.filter(|h| !h.trim().is_empty()))?,
+                        })
+                    })
+                    .transpose()?,
+            },
             Edit::Ignore { term } => Edit::Ignore { term: word(term)? },
         })
     }

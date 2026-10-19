@@ -808,15 +808,34 @@ fn apply_edit(
         Ok::<(), String>(())
     };
     match edit {
-        Edit::Learn { term } => {
+        Edit::Learn { term, edited } => {
             let known = known_terms(vocabulary);
             let waiting = crate::learn::waiting(events, &known, words)
                 .into_iter()
                 .find(|waiting| waiting.term == term)
                 .ok_or(GONE)?;
+            let (spelling, heard) = match edited {
+                Some(c) => (c.term, c.heard),
+                None => (waiting.term.clone(), waiting.heard.into_iter().next()),
+            };
+            let recorded_spelling_was_wrong = spelling != waiting.term;
+            if recorded_spelling_was_wrong {
+                if known.iter().any(|k| k.eq_ignore_ascii_case(&spelling)) {
+                    return Err(format!(
+                        "\u{201c}{spelling}\u{201d} is already in your dictionary. Open it there to add a heard form."
+                    ));
+                }
+                record(
+                    events,
+                    Event::Forgotten {
+                        at: now(),
+                        term: waiting.term,
+                    },
+                )?;
+            }
             let promotion = crate::learn::Promotion {
-                term: waiting.term,
-                heard: waiting.heard.into_iter().next(),
+                term: spelling,
+                heard,
                 from: waiting.from,
             };
             announce(pill, std::slice::from_ref(&promotion.term));
@@ -1067,6 +1086,38 @@ mod tests {
             .lines()
             .all(|l| l.starts_with('#')));
         assert!(ledger.learning().learned.is_empty());
+    }
+
+    #[test]
+    fn a_waiting_word_learns_as_the_user_corrected_it() {
+        let (ledger, root) = fixture(500);
+        let id = ledger.mint();
+        ledger.dictated(
+            &id,
+            "open t three tree air",
+            crate::mic::Audio16k::silence(0.01),
+        );
+        ledger.corrected(&id, "open T3 triage", Source::ReadBack);
+        ledger.flush();
+        let waiting = ledger.learning().waiting;
+        assert_eq!(waiting.len(), 1, "{waiting:?}");
+        let edit = crate::vocabulary::Edit::Learn {
+            term: waiting[0].term.clone(),
+            edited: Some(crate::vocabulary::Correction {
+                term: "T3 Triage".into(),
+                heard: Some("t three triage".into()),
+            }),
+        };
+        ledger.edit(edit).recv().unwrap().unwrap();
+        let learned = fs::read_to_string(root.join("learned.md")).unwrap();
+        assert!(
+            learned.contains("- t three triage -> T3 Triage\n"),
+            "{learned}"
+        );
+        assert!(
+            ledger.learning().waiting.is_empty(),
+            "the recorded spelling is not offered again"
+        );
     }
 
     #[test]

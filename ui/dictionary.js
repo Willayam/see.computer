@@ -17,6 +17,7 @@
     confirming: false,
     draftRule: null, // key of the word whose new heard form is being typed
     draftWord: "",
+    draftWaiting: null,
     message: null,
     active: false,
   };
@@ -63,6 +64,7 @@
     view.selected = sel;
     view.confirming = false;
     view.draftRule = null;
+    view.draftWaiting = null;
     view.message = null;
     renderList();
     renderDetail();
@@ -226,16 +228,29 @@
     </article>`;
   }
 
+  function waitingDraft(w) {
+    return view.draftWaiting || { term: w.term, heard: w.heard || "" };
+  }
+
   function waitingPage(w) {
+    const draft = waitingDraft(w);
     return `<article class="page">
       <div class="kicker">${GLYPH.dictionary}<span>Dictionary</span><span class="sep">·</span><span class="dict-new">Seen once</span></div>
-      <h1 class="title">${esc(w.term)}</h1>
-      <p class="when">${w.heard ? `You fixed ${esc(quoted(w.heard))} to ${esc(quoted(w.term))} once. A second fix teaches it automatically.` : "You fixed this spelling once. A second fix teaches it automatically."}</p>
+      <input class="title dict-title" value="${esc(draft.term)}" aria-label="Word" spellcheck="false" autocomplete="off" data-focus="waiting-term">
+      <p class="when">${w.heard ? `You fixed ${esc(quoted(w.heard))} to ${esc(quoted(w.term))} once. A second fix teaches it automatically.` : "You fixed this spelling once. A second fix teaches it automatically."} Edit the word or what was heard before you learn it.</p>
       <div class="bar"><div class="bar-meta"><span>Waiting for a second fix</span></div><div class="bar-actions">
         <button class="act is-primary" data-act="learn"><span>Learn now</span></button>
         <button class="act" data-act="ignore"><span>Ignore</span></button>
       </div></div>
       ${message()}
+      <section class="dict-section">
+        <h2 class="dict-h"><label for="dict-heard">Heard as</label></h2>
+        <div class="dict-rule">
+          <input id="dict-heard" class="dict-field" value="${esc(draft.heard)}" placeholder="optional" spellcheck="false" autocomplete="off" data-focus="waiting-heard" aria-describedby="dict-heard-help">
+          <span class="dict-arrow">→ ${esc(draft.term)}</span>
+        </div>
+        <p class="dict-help" id="dict-heard-help">When the model writes this, see.computer writes the word instead. Leave it empty to learn the spelling alone.</p>
+      </section>
       <p class="dict-help">Learning adds it to learned.md. Ignoring means see.computer won’t suggest it again.</p>
     </article>`;
   }
@@ -333,6 +348,26 @@
       });
       fresh.addEventListener("blur", () => { if (!rendering) finish(true); });
     }
+    const waiting = view.selected?.kind === "waiting" ? find(view.selected) : null;
+    const spelling = $('[data-focus="waiting-term"]', d);
+    const heard = $("#dict-heard", d);
+    if (waiting && spelling && heard) {
+      const arrow = $(".dict-arrow", d);
+      const sync = () => {
+        view.draftWaiting = { term: spelling.value, heard: heard.value };
+        arrow.textContent = `→ ${spelling.value.trim() || waiting.term}`;
+      };
+      for (const [input, recorded] of [[spelling, waiting.term], [heard, waiting.heard || ""]]) {
+        input.addEventListener("input", sync);
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+          if (e.key === "Escape") { e.preventDefault(); input.value = recorded; sync(); input.blur(); }
+        });
+      }
+      spelling.addEventListener("blur", () => {
+        if (!rendering && !spelling.value.trim()) { spelling.value = waiting.term; sync(); }
+      });
+    }
     const boost = $("#dict-boost", d);
     if (boost) {
       let timer = null;
@@ -372,7 +407,13 @@
     if (act === "retry") reload();
     if (act === "new-cancel") cancelNew();
     if (!item) return;
-    if (act === "learn") edit({ op: "learn", term: item.term }, { kind: "word", key: keyOf(item.term) });
+    if (act === "learn") {
+      const draft = waitingDraft(item);
+      const term = draft.term.trim() || item.term;
+      const heard = draft.heard.trim();
+      const edited = term !== item.term || heard !== (item.heard || "") ? { term, heard: heard || null } : undefined;
+      edit({ op: "learn", term: item.term, edited }, { kind: "word", key: keyOf(term) });
+    }
     if (act === "ignore") edit({ op: "ignore", term: item.term }, neighbour());
     if (act === "park") edit({ op: "park", term: item.term });
     if (act === "unpark") edit({ op: "unpark", term: item.term });
@@ -406,8 +447,7 @@
       const first = opening();
       view.selected = first ? { kind: first.kind, key: first.key } : null;
     }
-    // A confirmation belongs to the word it was opened for, never the next.
-    if (!same(before, view.selected)) view.confirming = false;
+    if (!same(before, view.selected)) { view.confirming = false; view.draftWaiting = null; }
     if (view.active) { renderList(); renderDetail(); }
   }
 
@@ -428,7 +468,7 @@
       view.confirming = false;
       if (done) done();
       accept(snap, selection);
-      L.toast(op.op === "learn" ? `Learned ${quoted(op.term)}. It applies to your next dictation.` : "Saved. It applies to your next dictation.");
+      L.toast(op.op === "learn" ? `Learned ${quoted(op.edited?.term || op.term)}. It applies to your next dictation.` : "Saved. It applies to your next dictation.");
     } catch (error) {
       view.confirming = false;
       view.message = { text: String(error), error: true };
