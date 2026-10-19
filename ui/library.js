@@ -28,6 +28,8 @@
 
   let kind = "all";
   let query = "";
+  // Until the first load answers, the panes say so instead of sitting empty.
+  let loaded = false;
   let currentId = null;
   // The transcript line being fixed, and the text typed so far, which a
   // reload must not throw away.
@@ -72,6 +74,7 @@
     return i.title;
   }
   function rowSub(i) {
+    if (i.state === "cloud") return "Downloading from iCloud…";
     if (i.kind === "dictation") return i.lines[0]?.text ?? "";
     if (i.kind === "take") return [fmt.dur(i.durationMs), `${i.media.filter((m) => m.kind !== "clip").length} captures`].filter(Boolean).join(" · ");
     if (i.state === "recording") return i.lines[0]?.text || "Recording…";
@@ -102,11 +105,11 @@
       $(".row-glyph", el).innerHTML = GLYPH[i.kind];
       $(".row-title", el).textContent = rowTitle(i);
       $(".row-sub", el).textContent = rowSub(i);
-      $(".row-time", el).textContent = i.state === "recording" ? "live" : i.kind === "dictation" ? `${fmt.clock(i.lines[0].startMs)}–${fmt.clock(i.lines.at(-1).startMs)}` : fmt.clock(i.at);
+      $(".row-time", el).textContent = i.state === "recording" ? "live" : i.state === "cloud" ? "" : i.kind === "dictation" ? `${fmt.clock(i.lines[0].startMs)}–${fmt.clock(i.lines.at(-1).startMs)}` : fmt.clock(i.at);
       el.addEventListener("click", () => select(i.id));
       list.appendChild(el);
     }
-    if (!rows.length) list.innerHTML = '<div class="empty">Nothing matches.</div>';
+    if (!rows.length) list.innerHTML = `<div class="empty">${loaded ? "Nothing matches." : "Loading…"}</div>`;
     $("#count").textContent = `${rows.length} of ${items.length}`;
   }
 
@@ -121,11 +124,13 @@
   function kicker(i) {
     const state = i.state === "recording" ? '<span class="state rec">Recording</span>'
       : i.state === "transcribing" ? '<span class="state busy">Transcribing</span>'
-      : i.state === "failed" ? '<span class="state bad">Failed</span>' : "";
+      : i.state === "failed" ? '<span class="state bad">Failed</span>'
+      : i.state === "cloud" ? '<span class="state busy">In iCloud</span>' : "";
     return `<div class="kicker">${GLYPH[i.kind]}<span>${NOUN[i.kind]}</span>${state ? '<span class="sep">·</span>' + state : ""}</div>`;
   }
 
   function title(i) {
+    if (i.state === "cloud" && i.kind !== "dictation") return i.title;
     if (i.kind === "dictation") return `${fmt.long(i.at).split(",")[0]}'s dictations`;
     if (i.kind === "take") {
       const full = i.lines.map((l) => l.text).join(" ").trim();
@@ -138,6 +143,7 @@
 
   function when(i) {
     const start = fmt.long(i.at);
+    if (i.state === "cloud") return start;
     if (i.kind === "dictation") return `${start} · ${i.lines.length} entries from ${fmt.clock(i.lines[0].startMs)} to ${fmt.clock(i.lines.at(-1).startMs)}`;
     if (i.state === "recording") return `${start} · started ${fmt.clock(i.at)}`;
     if (i.durationMs == null) return `${start} · ${fmt.clock(i.at)}`;
@@ -146,6 +152,7 @@
 
   function meta(i) {
     const parts = [];
+    if (i.state === "cloud") return "";
     if (i.kind === "meeting") {
       const you = i.lines.filter((l) => l.speaker === "you").length, them = i.lines.length - you;
       if (i.state !== "transcribing") parts.push(`<span><span class="you">You</span> ${you} · <span class="them">Them</span> ${them}</span>`);
@@ -169,7 +176,7 @@
 
   function actions(i) {
     const a = [];
-    a.push(`<button class="act is-primary" data-act="copy">${ICON.copy}<span>Copy</span></button>`);
+    if (i.state !== "cloud") a.push(`<button class="act is-primary" data-act="copy">${ICON.copy}<span>Copy</span></button>`);
     if (i.kind === "take" && i.share?.url) a.push(`<button class="act" data-act="link">${ICON.link}<span>Share link</span></button>`);
     a.push(`<button class="act" data-act="finder" title="${esc(i.files.markdown || i.files.folder)}">${ICON.finder}<span>Reveal</span></button>`);
     return a.join("");
@@ -185,6 +192,7 @@
   function notice(i) {
     if (i.state === "recording") return `<div class="notice rec">${ICON.rec}<div><strong>Recording this call.</strong> New lines appear during the call. The transcript and audio appear here when processing finishes.</div></div>`;
     if (i.state === "transcribing") return `<div class="notice">${ICON.spin}<div><strong>Transcribing ${fmt.dur(i.durationMs)} of audio.</strong> The transcript will appear here when it is ready.</div></div>`;
+    if (i.state === "cloud") return `<div class="notice">${ICON.spin}<div><strong>Downloading from iCloud.</strong> macOS moved this file to iCloud to free up space on this Mac. It appears here once it downloads.</div></div>`;
     if (i.state === "failed") return `<div class="notice bad">${ICON.warn}<div><strong>Transcription failed.</strong> ${esc(i.error || "The audio is still in the folder.")}</div></div>`;
     return "";
   }
@@ -229,7 +237,7 @@
   }
 
   function lines(i) {
-    if (i.state === "transcribing") return `<div class="skeleton"><div class="bone w85"></div><div class="bone w40"></div><div class="bone w60"></div><div class="bone w85"></div></div>`;
+    if (i.state === "transcribing" || i.state === "cloud") return `<div class="skeleton"><div class="bone w85"></div><div class="bone w40"></div><div class="bone w60"></div><div class="bone w85"></div></div>`;
     const out = [];
     const posters = new Set(i.media.filter((m) => m.kind === "clip").map((m) => m.poster));
     const media = i.media.filter((m) => m.kind !== "audio" && !(m.kind === "frame" && posters.has(m.path))).sort((a, b) => a.atMs - b.atMs);
@@ -254,7 +262,7 @@
     if (dictionary()) return dictionary().renderDetail();
     const d = $("#detail");
     const i = items.find((x) => x.id === currentId);
-    if (!i) { d.innerHTML = '<div class="blank">Pick something on the left.</div>'; return; }
+    if (!i) { d.innerHTML = `<div class="blank">${loaded ? "Pick something on the left." : "Loading your library…"}</div>`; return; }
     d.innerHTML = `<article class="page">
       ${kicker(i)}
       <h1 class="title">${esc(title(i))}</h1>
@@ -388,6 +396,7 @@
     try {
       const next = await tauri.core.invoke("library_items");
       if (version !== loadVersion) return;
+      loaded = true;
       items = next.sort((a, b) => b.at - a.at);
       if (!currentId || !items.some((i) => i.id === currentId)) currentId = items[0]?.id ?? null;
       if (dictionary()) { dictionary().reload(); return; }
@@ -450,10 +459,16 @@
     let start = null;
     try { start = decodeURIComponent(location.hash.slice(1)) || null; } catch { start = null; }
     if (params.get("kind")) setKind(params.get("kind"));
-    await reload();
-    await route(start);
+    // Listening first, so a Review click during a slow first load still lands.
     tauri.event.listen("library-changed", reload);
     tauri.event.listen("library-select", ({ payload }) => route(payload));
     window.addEventListener("focus", reload);
+    // The Dictionary loads on its own, so it opens without waiting for every
+    // dictation, take and meeting to be read.
+    const toDictionary = start === "dictionary" || !!start?.startsWith("dictionary:");
+    if (toDictionary) await route(start);
+    else { renderList(); renderDetail(); }
+    await reload();
+    if (!toDictionary) await route(start);
   });
 })();

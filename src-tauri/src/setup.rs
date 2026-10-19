@@ -171,7 +171,10 @@ fn state(trigger: &Mutex<Trigger>) -> State {
                 required: permission.required(),
             })
             .collect(),
-        trigger: trigger.lock().unwrap_or_else(PoisonError::into_inner).label(),
+        trigger: trigger
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .label(),
         dictated: DICTATED.load(Ordering::Relaxed),
     }
 }

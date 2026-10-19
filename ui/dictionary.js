@@ -41,6 +41,14 @@
     ];
   }
 
+  // A fix waiting for review, or else the word that came up most recently.
+  function opening() {
+    const rows = visible();
+    const heard = rows.filter((o) => o.kind === "word" && !o.item.parked && o.item.recent.length)
+      .sort((a, b) => b.item.recent[0].atMs - a.item.recent[0].atMs);
+    return rows.find((o) => o.kind === "waiting") || heard[0] || rows[0];
+  }
+
   function find(sel) {
     if (!view.snap || !sel) return null;
     if (sel.kind === "waiting") return view.snap.waiting.find((w) => keyOf(w.term) === sel.key) || null;
@@ -73,8 +81,16 @@
     const list = $("#list");
     const scroll = list.scrollTop;
     list.innerHTML = "";
-    if (!view.snap) return;
+    if (!view.snap) {
+      if (!view.message) list.innerHTML = '<div class="empty">Loading your words…</div>';
+      return;
+    }
     const rows = visible();
+    // Fixes are the first thing here. With none waiting, the list says
+    // where they come from instead of opening on a word with no history.
+    if (!view.snap.waiting.length && !L.query().trim() && rows.length) {
+      list.insertAdjacentHTML("beforeend", '<div class="day">Seen once</div><p class="list-hint">Nothing to review. When you fix a word after dictating it, or fix a line in the Library, it shows up here.</p>');
+    }
     let group = null;
     for (const o of rows) {
       if (o.group !== group) {
@@ -136,7 +152,8 @@
   }
 
   function recentEl(w) {
-    if (!w.recent.length) return `<p class="dict-help">Not seen in your ${plural(view.snap.lines, "saved line", "saved lines")} yet.</p>`;
+    const cloud = view.snap.inIcloud ? ` ${plural(view.snap.inIcloud, "file is", "files are")} still downloading from iCloud, so this may change.` : "";
+    if (!w.recent.length) return `<p class="dict-help">Not seen in your ${plural(view.snap.lines, "saved line", "saved lines")} yet.${cloud}</p>`;
     return `<div class="lines dict-recent">${w.recent.map((r, idx) => {
       const isMeeting = r.item.startsWith("meeting:");
       return `<button class="line is-dictation dict-hit" data-recent="${idx}" title="Open in the Library">
@@ -249,7 +266,7 @@
       : null;
     rendering = true;
     if (!view.snap) {
-      d.innerHTML = view.message ? `<div class="blank-wrap">${message()}<button class="act" data-act="retry"><span>Try again</span></button></div>` : "";
+      d.innerHTML = view.message ? `<div class="blank-wrap">${message()}<button class="act" data-act="retry"><span>Try again</span></button></div>` : '<div class="blank">Loading your words…</div>';
     } else if (view.selected?.kind === "new") {
       d.innerHTML = newPage();
     } else {
@@ -386,7 +403,7 @@
     if (selection !== undefined) view.selected = selection;
     if (view.selected && view.selected.kind !== "new" && !find(view.selected)) view.selected = null;
     if (!view.selected) {
-      const first = visible()[0];
+      const first = opening();
       view.selected = first ? { kind: first.kind, key: first.key } : null;
     }
     // A confirmation belongs to the word it was opened for, never the next.
@@ -411,7 +428,7 @@
       view.confirming = false;
       if (done) done();
       accept(snap, selection);
-      L.toast("Saved. It applies to your next dictation.");
+      L.toast(op.op === "learn" ? `Learned ${quoted(op.term)}. It applies to your next dictation.` : "Saved. It applies to your next dictation.");
     } catch (error) {
       view.confirming = false;
       view.message = { text: String(error), error: true };
@@ -484,7 +501,8 @@
         const sel = view.snap?.waiting.some((w) => keyOf(w.term) === key) ? { kind: "waiting", key } : { kind: "word", key };
         if (find(sel)) choose(sel);
       };
-      if (view.snap) run(); else reload().then(run);
+      // A fix the card just announced may be newer than the snapshot.
+      reload().then(run);
     },
     move(delta) {
       const rows = visible();

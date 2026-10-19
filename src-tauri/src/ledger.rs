@@ -150,14 +150,40 @@ impl Ledger {
                     }
                     Command::Event(event) => {
                         if append(&root, &event).is_ok() {
-                            if let Event::Corrected { id, text, .. } = &event {
-                                corrected.insert(id.clone(), text.clone());
-                                let _ = write_corpus(&root, &corrected);
-                            }
-                            let correct = matches!(event, Event::Corrected { .. });
+                            let read_back = match &event {
+                                Event::Corrected {
+                                    id, text, source, ..
+                                } => {
+                                    corrected.insert(id.clone(), text.clone());
+                                    let _ = write_corpus(&root, &corrected);
+                                    Some((id.clone(), text.clone(), *source == Source::ReadBack))
+                                }
+                                _ => None,
+                            };
                             events.push(event);
-                            if correct {
-                                promote(&root, &vocabulary, &words, &mut events, &pill);
+                            if let Some((id, text, read_back)) = read_back {
+                                let names = promote(&root, &vocabulary, &words, &mut events);
+                                // A fix made in another app gets the card, which says
+                                // what was seen and opens it; one made here gets a flash.
+                                let fix = read_back
+                                    .then(|| {
+                                        fix_notice(&events, &id, &text, &vocabulary, &words, &names)
+                                    })
+                                    .flatten();
+                                match (fix, &pill) {
+                                    (Some(fix), Some(pill)) => {
+                                        // Words learned that the card does not name
+                                        // still get their flash, before it.
+                                        let others: Vec<_> = names
+                                            .iter()
+                                            .filter(|n| **n != fix.wrote)
+                                            .cloned()
+                                            .collect();
+                                        announce(&Some(pill.clone()), &others);
+                                        let _ = pill.send(PillEvent::Fixed(fix));
+                                    }
+                                    _ => announce(&pill, &names),
+                                }
                             }
                             update_learning(&snapshot, &events, &vocabulary, &words);
                         }
@@ -195,7 +221,8 @@ impl Ledger {
                                 let _ = write_corpus(&root, &corrected);
                             }
                             events.push(event);
-                            promote(&root, &vocabulary, &words, &mut events, &pill);
+                            let names = promote(&root, &vocabulary, &words, &mut events);
+                            announce(&pill, &names);
                             update_learning(&snapshot, &events, &vocabulary, &words);
                         }
                     }
@@ -559,20 +586,53 @@ fn save_promotion(
     }
 }
 
+/// Saves what the evidence now supports and returns the terms it taught.
 fn promote(
     root: &Path,
     vocabulary: &Path,
     words: &crate::learn::Words,
     events: &mut Vec<Event>,
-    pill: &Option<mpsc::Sender<PillEvent>>,
-) {
+) -> Vec<String> {
     let promotions = crate::learn::promotions(events, &known_terms(vocabulary), words);
     let mut names: Vec<_> = promotions.iter().map(|p| p.term.clone()).collect();
     names.dedup();
     for promotion in promotions {
         save_promotion(root, vocabulary, events, promotion);
     }
-    announce(pill, &names);
+    names
+}
+
+/// The first spelling in a correction the learner can use, as the pill's
+/// card shows it, or `None` when the fix teaches nothing: grammar, a lowered
+/// capital, or a word the user told it to forget.
+fn fix_notice(
+    events: &[Event],
+    id: &Id,
+    edited: &str,
+    vocabulary: &Path,
+    words: &crate::learn::Words,
+    learned: &[String],
+) -> Option<crate::pill::Fix> {
+    let pasted = events.iter().find_map(|event| match event {
+        Event::Dictated { id: seen, text, .. } if seen == id => Some(text.as_str()),
+        _ => None,
+    })?;
+    let known = known_terms(vocabulary);
+    let waiting = crate::learn::waiting(events, &known, words);
+    // A word this fix taught comes first: that is the news.
+    crate::learn::swaps(pasted, edited)
+        .into_iter()
+        .filter(|swap| crate::learn::learnable(swap, words))
+        .filter_map(|swap| {
+            let learned = learned.contains(&swap.wrote);
+            let open = waiting.iter().any(|w| w.term == swap.wrote) || known.contains(&swap.wrote);
+            (learned || open).then_some(crate::pill::Fix {
+                heard: swap.heard,
+                wrote: swap.wrote,
+                learned,
+            })
+        })
+        .min_by_key(|fix| !fix.learned)
 }
 
 /// Every spelling either file holds, so a casing the user already has is
@@ -1027,5 +1087,51 @@ mod tests {
         ledger.corrected(&id, "ignored", Source::Manual);
         ledger.flush();
         assert!(read(&root).is_empty());
+    }
+
+    #[test]
+    fn a_read_back_fix_shows_what_was_seen_and_then_what_was_learned() {
+        let root = std::env::temp_dir().join(format!(
+            "see-ledger-fix-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap()
+        ));
+        let (pill, notices) = mpsc::channel();
+        let ledger = Ledger::start_at(
+            root.clone(),
+            Arc::new(AtomicBool::new(true)),
+            500,
+            Some(root.join("vocabulary.md")),
+            Some(pill),
+        );
+        for (said, fixed) in [
+            (
+                "I sent the file to Larston yesterday.",
+                "I sent the file to Larsten yesterday.",
+            ),
+            ("I want to go home.", "I want too go home."),
+            ("Ask Larston about it.", "Ask Larsten about it."),
+        ] {
+            let id = ledger.mint();
+            ledger.dictated(
+                &id,
+                said,
+                crate::mic::Audio16k::from_samples(vec![0.0; 160]),
+            );
+            ledger.corrected(&id, fixed, Source::ReadBack);
+        }
+        ledger.flush();
+        let shown: Vec<_> = notices
+            .try_iter()
+            .map(|event| match event {
+                PillEvent::Fixed(fix) => format!("{} -> {} {}", fix.heard, fix.wrote, fix.learned),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            vec!["Larston -> Larsten false", "Larston -> Larsten true"]
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }
