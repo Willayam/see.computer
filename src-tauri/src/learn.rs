@@ -60,12 +60,27 @@ pub fn swaps(pasted: &str, edited: &str) -> Vec<Swap> {
     }
     let anchors = alignment(&a, &b);
     let anchored: HashSet<usize> = anchors.iter().map(|&(_, y)| y).collect();
-    let clause_ends = |token: &str| token.ends_with(['.', ',', '!', '?', ';', ':']);
+    let clause_ends = |token: &str| {
+        token.ends_with([')', ']', '}', '"', '”', '»'])
+            || token
+                .trim_end_matches(['\'', '’'])
+                .ends_with(['.', ',', '!', '?', ';', ':'])
+    };
+    let clause_opens = |token: &str| token.starts_with(['(', '[', '{', '"', '“', '«']);
+    let neighbour = |left: usize, right: usize, word: usize| {
+        (anchored.contains(&word)
+            && !clause_ends(b[left])
+            && !clause_opens(b[right])
+            && !strip(b[word]).is_empty())
+        .then(|| strip(b[word]).to_owned())
+    };
     let around = |start: usize, end: usize| {
-        let before = (start > 0 && anchored.contains(&(start - 1)) && !clause_ends(b[start - 1]))
-            .then(|| strip(b[start - 1]).to_owned());
-        let after = (end < b.len() && anchored.contains(&end) && !clause_ends(b[end - 1]))
-            .then(|| strip(b[end]).to_owned());
+        let before = (start > 0)
+            .then(|| neighbour(start - 1, start, start - 1))
+            .flatten();
+        let after = (end < b.len())
+            .then(|| neighbour(end - 1, end, end))
+            .flatten();
         (before, after)
     };
     let mut changed = 0usize;
@@ -925,6 +940,28 @@ mod tests {
             .is_empty(),
             "a function word says nothing about which word was meant"
         );
+    }
+
+    #[test]
+    fn punctuation_between_words_is_not_a_neighbour() {
+        let words = Words::from_list(&["so", "of", "potato", "mode"]);
+        for (pasted, edited) in [
+            ("potato - mode", "poteto - mode"),
+            ("potato & mode", "poteto & mode"),
+            ("potato — mode", "poteto — mode"),
+            ("so \"potato.\" Mode", "so \"poteto.\" Mode"),
+            ("so 'potato.' Mode", "so 'poteto.' Mode"),
+            ("of potato) Mode", "of poteto) Mode"),
+            ("potato (mode)", "poteto (mode)"),
+        ] {
+            let learned = learned_swaps(pasted, edited, &words);
+            assert!(
+                learned
+                    .iter()
+                    .all(|s| s.heard.trim() != "potato" && !s.heard.contains("mode")),
+                "{pasted:?} learned {learned:?}"
+            );
+        }
     }
 
     #[test]
