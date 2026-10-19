@@ -648,9 +648,8 @@ fn fix_notice(
     let known = known_terms(vocabulary);
     let waiting = crate::learn::waiting(events, &known, words);
     // A word this fix taught comes first: that is the news.
-    crate::learn::swaps(pasted, edited)
+    crate::learn::learned_swaps(pasted, edited, words)
         .into_iter()
-        .filter(|swap| crate::learn::learnable(swap, words))
         .filter_map(|swap| {
             let learned = learned.contains(&swap.wrote);
             let open = waiting.iter().any(|w| w.term == swap.wrote) || known.contains(&swap.wrote);
