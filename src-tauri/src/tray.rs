@@ -397,7 +397,9 @@ impl Panel {
                 .get(index)
                 .cloned()
             {
-                let _ = self.ledger.edit(crate::vocabulary::Edit::Learn { term });
+                let _ = self
+                    .ledger
+                    .edit(crate::vocabulary::Edit::Learn { term, edited: None });
             }
             return None;
         }
