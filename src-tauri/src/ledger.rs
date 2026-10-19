@@ -139,6 +139,7 @@ impl Ledger {
             update_learning(&snapshot, &events, &vocabulary, &words);
             let _ = write_corpus(&root, &corrected);
             prune(&root, keep_audio, 50, &corrected.keys().cloned().collect());
+            let _ = compact(&root, &mut events, 500, 50);
             while let Ok(command) = rx.recv() {
                 match command {
                     Command::Dictated(mut event, audio) => {
@@ -156,6 +157,7 @@ impl Ledger {
                         }
                         let protected = corrected.keys().cloned().collect();
                         prune(&root, keep_audio, 50, &protected);
+                        let _ = compact(&root, &mut events, 500, 50);
                     }
                     Command::Event(event) => {
                         if append(&root, &event).is_ok() {
@@ -435,6 +437,78 @@ fn append(root: &Path, event: &Event) -> std::io::Result<()> {
         .open(root.join("events.jsonl"))?;
     serde_json::to_writer(&mut file, event)?;
     file.write_all(b"\n")
+}
+
+fn compact(root: &Path, events: &mut Vec<Event>, keep: usize, slack: usize) -> std::io::Result<()> {
+    let corrected: HashSet<Id> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Corrected { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    let uncorrected: Vec<Id> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Dictated { id, .. } if !corrected.contains(id) => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    if uncorrected.len() <= keep.saturating_add(slack) {
+        return Ok(());
+    }
+    let retain: HashSet<Id> = uncorrected
+        .iter()
+        .rev()
+        .take(keep)
+        .cloned()
+        .chain(corrected)
+        .collect();
+    let mut kept = Vec::with_capacity(events.len());
+    for event in events.iter() {
+        let id = match event {
+            Event::Dictated { id, .. } | Event::Landed { id, .. } | Event::Corrected { id, .. } => {
+                Some(id)
+            }
+            _ => None,
+        };
+        if id.is_some_and(|id| !retain.contains(id)) {
+            continue;
+        }
+        let mut event = event.clone();
+        if let Event::Dictated { audio, .. } = &mut event {
+            if audio.as_ref().is_some_and(|path| !root.join(path).exists()) {
+                *audio = None;
+            }
+        }
+        kept.push(event);
+    }
+    let temp = root.join("events.jsonl.tmp");
+    let mut file = fs::File::create(&temp)?;
+    for event in &kept {
+        serde_json::to_writer(&mut file, event)?;
+        file.write_all(b"\n")?;
+    }
+    file.sync_all()?;
+    fs::rename(temp, root.join("events.jsonl"))?;
+    *events = kept;
+    let referenced: HashSet<PathBuf> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Dictated {
+                audio: Some(path), ..
+            } => Some(root.join(path)),
+            _ => None,
+        })
+        .collect();
+    if let Ok(files) = fs::read_dir(root.join("audio")) {
+        for file in files.flatten() {
+            if !referenced.contains(&file.path()) {
+                let _ = fs::remove_file(file.path());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_audio(path: &Path, audio: &crate::mic::Audio16k) -> Result<(), hound::Error> {
@@ -923,6 +997,43 @@ mod tests {
         for index in [1, 2] {
             assert!(!root.join(format!("audio/{}.wav", ids[index].0)).exists());
         }
+    }
+
+    #[test]
+    fn compaction_keeps_corrected_dictations_and_referenced_audio() {
+        let (ledger, root) = fixture(2);
+        let mut ids = Vec::new();
+        for index in 0..5 {
+            let id = ledger.mint();
+            ledger.dictated(&id, "word", crate::mic::Audio16k::silence(0.01));
+            if index == 0 {
+                ledger.corrected(&id, "Word", Source::Manual);
+            }
+            ids.push(id);
+        }
+        ledger.flush();
+        let mut events = read(&root);
+        compact(&root, &mut events, 2, 0).unwrap();
+        assert_eq!(read(&root), events);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, Event::Corrected { id, .. } if id == &ids[0])));
+        for (index, id) in ids.iter().enumerate() {
+            let retained = [0, 3, 4].contains(&index);
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, Event::Dictated { id: found, .. } if found == id)),
+                retained
+            );
+            assert_eq!(root.join(format!("audio/{}.wav", id.0)).exists(), retained);
+        }
+        assert!(events.iter().all(|e| match e {
+            Event::Dictated {
+                audio: Some(path), ..
+            } => root.join(path).exists(),
+            _ => true,
+        }));
     }
 
     #[test]

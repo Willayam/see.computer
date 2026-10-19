@@ -6,6 +6,30 @@
 // dictating into keeps its focus and the synthetic Command+V still lands there.
 #import <AppKit/AppKit.h>
 
+void see_readback_app_terminated(int pid);
+
+void see_watch_app_termination(void) {
+    [[[NSWorkspace sharedWorkspace] notificationCenter]
+        addObserverForName:NSWorkspaceDidTerminateApplicationNotification
+        object:nil queue:nil usingBlock:^(NSNotification *notification) {
+            NSRunningApplication *app = notification.userInfo[NSWorkspaceApplicationKey];
+            if (app) see_readback_app_terminated(app.processIdentifier);
+        }];
+}
+
+void see_library_close_on_command_q(void) {
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
+        NSEventModifierFlags flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+        NSWindow *window = NSApp.keyWindow;
+        if (event.keyCode == 12 && flags == NSEventModifierFlagCommand &&
+            [window.title isEqualToString:@"Library"]) {
+            [window close];
+            return nil;
+        }
+        return event;
+    }];
+}
+
 typedef struct {
     const char *id;
     const char *label;
