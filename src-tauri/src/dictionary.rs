@@ -42,13 +42,16 @@ impl Dictionary {
     fn snapshot(&self) -> Result<Snapshot, String> {
         let files = self.files();
         let stamp = self.stamp(&files);
+        let root = self.history.root();
+        crate::library::fetch(&root, std::time::Duration::from_secs(3));
         let (vocabulary, learned) = files
             .read()
             .map_err(|error| format!("Unable to read your dictionary: {error}."))?;
         let learning = self.ledger.learning();
-        let corpus = Corpus::new(crate::library::spoken(&self.history.root()));
+        let corpus = Corpus::new(crate::library::spoken(&root));
         let mut snapshot = snapshot(&vocabulary, &learned, &learning, &corpus);
         snapshot.stamp = stamp;
+        snapshot.in_icloud = crate::library::in_icloud(&root);
         Ok(snapshot)
     }
 
@@ -141,8 +144,11 @@ impl Forms {
 }
 
 #[derive(Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     stamp: String,
+    /// Files still downloading from iCloud, whose lines the counts lack.
+    in_icloud: usize,
     /// How many dictation and meeting lines the counts cover.
     lines: usize,
     words: Vec<Word>,
@@ -320,6 +326,7 @@ fn snapshot(
         .collect();
     Snapshot {
         stamp: String::new(),
+        in_icloud: 0,
         lines: corpus.lines.len(),
         words,
         waiting,

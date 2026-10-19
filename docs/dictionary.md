@@ -76,6 +76,28 @@ UIs: 61% in Electron or Chromium (T3 Code, Grok, Discord, Chrome) and 32% in
 WebKit (Conductor). Electron exposes no Accessibility tree until a client asks
 for one, so `target.rs` reports "unknown" there.
 
+**Read-back never caught a fix in T3 Code.** On 2026-10-16 every T3 Code
+watch ended "unchanged" three to four seconds after its paste. A paste leaves
+a space after the words, and a TipTap composer with text in it reads back as
+that text plus the one space. `region()` looked for the text after the
+dictation from the start of the field, found the space after "I", and cut
+the snapshot to one word. Three polls in a row then failed to resemble the
+dictation, and the watch ended before the user had typed anything.
+
+**Nothing showed that a fix was seen.** A read-back sighting weighs 1, so it
+only became a "seen once" entry in the menu and the Dictionary, and nothing
+on screen said so.
+
+**The Library opened blank.** With the disk nearly full, macOS had moved
+every file the Library reads to iCloud, 204 of them on 2026-10-16: day files,
+transcripts, meeting files and share records. Reading one waits for its
+download, 1.2 to 1.4 s each, one after another, so `library_items` ran for
+minutes and the window showed nothing meanwhile. The Dictionary route waited
+for that load before it loaded itself, and then opened on the first word
+alphabetically, "AGENTS.md", which had never been dictated: "0 right · 0
+misheard · Not seen in your 2,919 saved lines yet". The counts were right.
+Codex had 34 right and 3 misheard, Claude 18.
+
 **No eval seed from Wispr Flow.** Its local database keeps audio for only 3
 history rows, none of them edited. The personal eval corpus has to come from
 see.computer itself.
@@ -161,7 +183,22 @@ field clears. Text typed before or after the dictated words is trimmed away,
 and an edit that grows or shrinks the dictation beyond a few words is treated
 as a rewrite and not recorded. In Electron apps it sets
 `AXManualAccessibility`, the same switch screen readers use, so the field
-becomes readable. It stops when "Save Dictation History" is off.
+becomes readable. It stops when "Save Dictation History" is off. The text
+before and after the dictation are its anchors. An anchor that is only
+whitespace is ignored, and one that reached the edge of the field is matched
+at that edge. With `SEE_COMPUTER_READBACK_LOG` set, a watch that gives up
+logs why: `lost no-anchor`, `lost unlike`, `lost too-long`, or the
+Accessibility error.
+
+**Seeing a fix.** When read-back records a correction with a spelling the
+learner can use, the pill shows a card such as `Larston → Larsten · Seen
+once`, or `Learned` when this fix taught the word. Review opens the word in
+the Dictionary, where Learn now and Ignore sit at the top of the list. The
+card waits until no dictation is on screen and closes after six seconds
+unless the pointer rests on it. It is a nonactivating panel, so it never
+takes focus from the app being typed into. A correction that teaches
+nothing, such as a grammar fix, still goes to the ledger and the eval corpus
+but shows no card.
 
 **Fixing a line in the Library** is the explicit path for text that was
 already sent or an app that exposes nothing. Every dictation and finished
@@ -250,6 +287,17 @@ its lines in both files instead of adding a second entry, and when
 `learned.md` holds a new casing of a `vocabulary.md` term, the decoder uses
 the learned spelling and points the term's rules at it (`Lexicon::refresh`).
 
+**Opening the Library.** The Dictionary loads on its own, without waiting
+for the Library's dictations, takes and meetings, and both panes say they
+are loading. It opens on the newest fix waiting for review, or else on the
+word that came up most recently, and says where fixes appear when none are
+waiting. Before reading, the Library asks iCloud for every evicted file it
+needs in one batch through `NSFileManager`, waits up to 3 s, and shows what
+is still missing as "Downloading from iCloud". A watcher reloads the Library
+as the files arrive, and loads made while it runs do not wait again. Asking
+in one batch brought 30 files back in 2.5 s, where reading them took about
+0.8 s each.
+
 ## What is verified
 
 - Unit and controller tests: 240 pass, one live sharing test is ignored.
@@ -305,8 +353,27 @@ the learned spelling and points the term's rules at it (`Lexicon::refresh`).
   focused field before.
 - Not verified live: screen context during a real dictation into T3 Code.
   The eval applies context from text files, not from a live window.
-- Read-back against a live field is checked on
-  `t3code/improve-dictionary-feedback`, where its fix lives.
+- On 2026-10-16, after the fixes: 238 tests pass and clippy passes with
+  warnings denied. New tests cover a paste that ends its field, with each
+  trailing form an editor reported, and the cards a read-back fix sends:
+  seen once, then learned, and none for a grammar fix.
+- Read-back live on 2026-10-16, in a scratch Electron 44.4.5 app (the
+  version T3 Code ships) with a TipTap editor like T3 Code's composer. A
+  dictation was replayed from one of the user's "Larston" recordings and
+  pasted with Cmd+V. "Larston" was changed to "Larsten" with real key presses
+  and sent with Return. Before the fix the log read `lost unlike` three
+  seconds after the paste, with no edit made. After it the log read
+  `corrected`, and the ledger held "I sent the file to Larsten yesterday."
+  seven seconds after the paste. In the same run the card showed, a real
+  click on Review opened the Library on Larsten under Seen once, and Learn
+  now wrote `- larston -> Larsten` to `learned.md` and said so in a toast.
+- T3 Code itself was only read, never typed into. Its composer is a TipTap
+  editor whose value is its text plus a trailing space, the case the fix
+  handles, and the element read-back holds stayed valid while the user typed.
+- The iCloud batch was measured against the real folder: 204 evicted files,
+  an answer in 3.2 s with 166 placeholders, and every file back 18 s later.
+- Not verified live: read-back in T3 Code and in TextEdit, the card when a
+  dictation starts while it is up, and the iCloud placeholders on screen.
 
 ## Roadmap
 
@@ -314,7 +381,7 @@ Ranked by expected gain per unit of work. Built items are in this branch.
 
 | # | idea | needs | latency | privacy | expected gain | status |
 |---|---|---|---|---|---|---|
-| 1 | Correction read-back after paste | AX polling, Electron switch | none on the paste path | reads only the field it pasted into; edited text kept locally | the main input to every other item | built, live AX unverified |
+| 1 | Correction read-back after paste | AX polling, Electron switch | none on the paste path | reads only the field it pasted into; edited text kept locally | the main input to every other item | built; verified in an Electron TipTap editor |
 | 2 | Learner with review queue and rules | ledger events | none | local | rules: held-out term recall 15/58 → 26/58 | built |
 | 3 | Personal eval corpus and regression score | ledger audio + corrections | none | audio stays local | turns "feels worse" into a number per change | built (`corpus.tsv`, `see-computer eval`) |
 | 4 | Dual decode, keep only boosted hunks that land a term | second greedy pass over the same encoder output | +10.7 ms median per clip | none | errors 187 → 182 at margin 3; margin 4 no longer ends up worse than boost-off (188 vs 190 errors) | built |
@@ -334,6 +401,10 @@ Fixes the audit or the review found that this branch does not make:
   so a reused process id does not inherit the paste guard.
 - Compact the ledger. Its events stay in memory and on disk without bound,
   which is small for a year of dictation but has no ceiling.
+- A fix to a word already in `vocabulary.md` gets a card but no Seen once
+  entry, because the queue lists only new words.
+- The menu's recents still read day files directly, so an evicted day file
+  stalls them for about a second.
 
 ## Measuring
 

@@ -47,6 +47,7 @@
   .cglyph i.b3 { height: 15px; }
   .cglyph i.b4 { height: 9px; }
   .cglyph i.b5 { height: 5px; }
+  .cglyph svg.book { width: 15px; height: 15px; }
   .cglyph svg { width: 16px; height: 12.5px; display: block;
                 filter: drop-shadow(0 0 5px rgba(90,200,250,.5)); }
   #cnote { flex: 0 0 auto; margin-right: 9px; padding: 2px 6px; border-radius: 5px;
@@ -172,7 +173,10 @@ const CARD_MIN = 240, CARD_MAX = 640, CARD_H = 40, CARD_MARGIN = 48, CARD_MARGIN
 const cardEl = document.getElementById('card');
 const glyphEl = document.getElementById('cglyph'), noteEl = document.getElementById('cnote');
 const saidEl = document.getElementById('csaid'), copyEl = document.getElementById('ccopy');
-let carded = false, cardWidth = 0, collapseTimer = 0, dismissTimer = 0, fittedTimer = 0;
+const ICON_BOOK = '<svg class="book" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M3 2.5h8.5a1.5 1.5 0 0 1 1.5 1.5v9.5H4.5A1.5 1.5 0 0 1 3 12z"/><path d="M3 12a1.5 1.5 0 0 1 1.5-1.5H13M6 5.5h4"/></svg>';
+/* A fix card goes away on its own; the pointer resting on it holds it. */
+const FIX_SHOWN_MS = 6000, FIX_AFTER_HOVER_MS = 2500;
+let carded = false, cardKind = null, cardWidth = 0, collapseTimer = 0, dismissTimer = 0, fittedTimer = 0, fixTimer = 0;
 
 function showCard(payload) {
   /* A card left over from the last one must not collapse this one, and its
@@ -180,20 +184,23 @@ function showCard(payload) {
   clearTimeout(collapseTimer);
   clearTimeout(dismissTimer);
   clearTimeout(fittedTimer);
+  clearTimeout(fixTimer);
   carded = true;
+  cardKind = payload.kind;
   clearText();
   st = 'hidden';
   document.body.classList.add('carded');
   /* A capture gets video.fill, a dictation gets the waveform: the same pair the
      tray uses in its glyph column (DICTATION and CLIP in tray.rs). */
-  glyphEl.innerHTML = payload.note
-    ? ICON_VIDEO
+  const fixed = cardKind === 'fixed';
+  glyphEl.innerHTML = fixed ? ICON_BOOK
+    : payload.note ? ICON_VIDEO
     : [1, 2, 3, 4, 5].map((n) => `<i class="b${n}"></i>`).join('');
   noteEl.textContent = payload.note || '';
   saidEl.textContent = payload.text || '';
   copyEl.classList.remove('done');
   copyEl.style.width = '';
-  copyEl.textContent = 'Copied';
+  copyEl.textContent = fixed ? 'Review' : 'Copied';
   /* measure at natural width, then clamp */
   saidEl.style.width = '';
   cardEl.style.width = 'auto';
@@ -201,7 +208,8 @@ function showCard(payload) {
   /* Pin the button at its widest label first, so pressing it never reflows the
      row and shoves the dismiss out of the clipped card. */
   copyEl.style.width = Math.ceil(copyEl.getBoundingClientRect().width) + 'px';
-  copyEl.textContent = 'Copy';
+  copyEl.textContent = fixed ? 'Review' : 'Copy';
+  copyEl.title = fixed ? 'Open it in the Dictionary' : '';
   const natural = Math.ceil(cardEl.getBoundingClientRect().width);
   const width = Math.max(CARD_MIN, Math.min(CARD_MAX, natural));
   /* A long transcript has to give back the overshoot, and only it can. */
@@ -218,7 +226,12 @@ function showCard(payload) {
      zero opacity inside an enlarged window that has already stopped being
      click-through, which is the shape of the capability bug. */
   fittedTimer = setTimeout(openCard, 400);
+  if (fixed) fixTimer = setTimeout(hideCard, FIX_SHOWN_MS);
 }
+cardEl.addEventListener('mouseenter', () => clearTimeout(fixTimer));
+cardEl.addEventListener('mouseleave', () => {
+  if (carded && cardKind === 'fixed') fixTimer = setTimeout(hideCard, FIX_AFTER_HOVER_MS);
+});
 /* The chip's own resting width, so the card looks like that chip stretching. */
 const CHIP_W = 46;
 window.__TAURI__.event.listen('pill-fitted', openCard);
@@ -239,14 +252,21 @@ function openCard() {
 function hideCard() {
   if (!carded) return;
   carded = false;
+  clearTimeout(fixTimer);
   cardEl.style.width = CHIP_W + 'px';
   cardEl.className = '';
   document.body.classList.remove('carded');
   /* Told after the collapse finishes, so the window shrinks once the card is
      gone rather than mid-animation. Matches the 340ms width transition. */
-  dismissTimer = setTimeout(() => window.__TAURI__.event.emit('pill-action', 'dismiss'), 340);
+  const kind = cardKind;
+  dismissTimer = setTimeout(() => window.__TAURI__.event.emit('pill-action', `dismiss-${kind}`), 340);
 }
 copyEl.addEventListener('click', () => {
+  if (carded && cardKind === 'fixed') {
+    window.__TAURI__.event.emit('pill-action', 'review');
+    hideCard();
+    return;
+  }
   if (!carded || copyEl.classList.contains('done')) return;
   window.__TAURI__.event.emit('pill-action', 'copy');
   copyEl.textContent = 'Copied';
@@ -257,7 +277,7 @@ document.getElementById('cx').addEventListener('click', hideCard);
 
 window.__TAURI__.event.listen('pill', ({ payload: p }) => {
   clearTimeout(hideTimer);
-  if (p.kind === 'held') { showCard(p); return; }
+  if (p.kind === 'held' || p.kind === 'fixed') { showCard(p); return; }
   if (carded) hideCard();
   if (p.kind === 'hide') { activity = null; st = 'hidden'; clearText(); return; }
   if (p.kind === 'show') { activity = p; applyActivity(p); return; }
