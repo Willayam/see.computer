@@ -224,8 +224,16 @@ Two sightings promote the term. A mishearing seen twice also promotes a
 rule, `heard -> Term`, which rewrites what the model heard. A rule is the
 only fix for a term the model is confident it heard as an ordinary word, and
 it applies to terms already in `vocabulary.md`. Because a rule rewrites every
-future occurrence, one whose heard form is made of ordinary words ("potato")
-needs three separate dictations. A fix typed into the dialog counts as two
+future occurrence, rules are learned as phrases sized to be safe. A fix
+that changes a name and plain words together is split, so "t three tree air"
+-> "T3 triage" teaches "t three -> T3" and nothing about "triage"; a name of
+several words ("Wispr Flow") stays whole. A heard form made of ordinary
+words takes the unchanged word after it, or else before it, in the same
+clause: fixing "potato mode" teaches "potato mode -> poteto mode" and leaves
+a plain "potato" alone. Function words ("was", "in") do not count as that
+neighbour, and with no other neighbour nothing is learned. Lone letters are
+spelled-out names ("t three", "m c p"), not ordinary words. Such a phrase
+still needs three separate dictations. A fix typed into the dialog counts as two
 sightings for terms and for rules on unknown words. Learned lines go to
 `learned.md` beside `vocabulary.md`, the pill says `Learned "Term"`, and a
 term the user forgets never comes back.
@@ -235,6 +243,16 @@ voice's corrections ("superbase -> Supabase", "versal -> Vercel", "work os ->
 WorkOS") were applied through the real engine to the other voice, which they
 never saw. Its term recall rose from 15/58 to 26/58 and its mean per-clip WER
 fell from 28.2% to 24.1%.
+
+**Rules against boost alone, 2026-10-19.** No rules existed before
+2026-10-16, so 2,729 earlier dictations show the boost on its own. It never
+produced poteto (0 of 55), Cocco (0 of 9), Inkarnate (0 of 8) or PostHog
+(0 of 5). Replaying 109 ledger clips with the rules stripped matched the
+no-vocabulary output on every one of those words. Raising the term weight to
+20 changed nothing, because the margin gate never lets a token the model is
+sure against into the running; widening the margin to 8 reached them only by
+filling 67 of 109 clips with "Cocc La Cocco". The boost fixes near misses
+("claw" -> Claude); rules fix confident mishearings.
 
 **Dual decoding.** The engine runs the encoder once and greedy-decodes its
 output twice, with and without the vocabulary bias (`engine/parakeet.rs`,

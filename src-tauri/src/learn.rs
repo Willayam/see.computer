@@ -12,6 +12,8 @@ pub struct Swap {
     pub heard: String,
     pub wrote: String,
     pub opens_sentence: bool,
+    pub clause_before: Option<String>,
+    pub clause_after: Option<String>,
 }
 
 fn strip(token: &str) -> &str {
@@ -57,6 +59,15 @@ pub fn swaps(pasted: &str, edited: &str) -> Vec<Swap> {
         return Vec::new();
     }
     let anchors = alignment(&a, &b);
+    let anchored: HashSet<usize> = anchors.iter().map(|&(_, y)| y).collect();
+    let clause_ends = |token: &str| token.ends_with(['.', ',', '!', '?', ';', ':']);
+    let around = |start: usize, end: usize| {
+        let before = (start > 0 && anchored.contains(&(start - 1)) && !clause_ends(b[start - 1]))
+            .then(|| strip(b[start - 1]).to_owned());
+        let after = (end < b.len() && anchored.contains(&end) && !clause_ends(b[end - 1]))
+            .then(|| strip(b[end]).to_owned());
+        (before, after)
+    };
     let mut changed = 0usize;
     let mut out = Vec::new();
     let (mut ai, mut bj) = (0, 0);
@@ -83,10 +94,13 @@ pub fn swaps(pasted: &str, edited: &str) -> Vec<Swap> {
                 .collect::<Vec<_>>()
                 .join(" ");
             if !heard.is_empty() && !wrote.is_empty() {
+                let (before, after) = around(bj, y);
                 out.push(Swap {
                     heard,
                     wrote,
                     opens_sentence: bj == 0 || b[bj - 1].ends_with(['.', '!', '?']),
+                    clause_before: before,
+                    clause_after: after,
                 });
             }
         }
@@ -95,10 +109,13 @@ pub fn swaps(pasted: &str, edited: &str) -> Vec<Swap> {
             let new = strip(b[y]);
             if old != new && old.to_lowercase() == new.to_lowercase() {
                 changed += 1;
+                let (before, after) = around(y, y + 1);
                 out.push(Swap {
                     heard: old.into(),
                     wrote: new.into(),
                     opens_sentence: y == 0 || b[y - 1].ends_with(['.', '!', '?']),
+                    clause_before: before,
+                    clause_after: after,
                 });
             }
         }
@@ -110,6 +127,181 @@ pub fn swaps(pasted: &str, edited: &str) -> Vec<Swap> {
     } else {
         out
     }
+}
+
+pub fn learned_swaps(pasted: &str, edited: &str, words: &Words) -> Vec<Swap> {
+    swaps(pasted, edited)
+        .into_iter()
+        .flat_map(|swap| split_names_from_plain_words(swap, words))
+        .filter(|swap| learnable(swap, words))
+        .filter_map(|swap| widen(swap, words))
+        .collect()
+}
+
+fn ordinary(heard: &str, words: &Words) -> bool {
+    let spelled_out_letter =
+        |word: &str| word.chars().count() == 1 && !matches!(word, "a" | "i" | "A" | "I");
+    heard
+        .split_whitespace()
+        .all(|word| !spelled_out_letter(word) && words.knows(word))
+}
+
+const FUNCTION_WORDS: &[&str] = &[
+    "a", "an", "the", "and", "or", "but", "so", "to", "of", "in", "on", "at", "for", "with",
+    "from", "by", "as", "if", "is", "was", "are", "were", "be", "been", "it", "its", "this",
+    "that", "these", "those", "i", "you", "we", "they", "he", "she", "my", "your", "our", "their",
+    "me", "us", "them", "just", "then", "than", "do", "did", "not", "no",
+];
+
+fn widen(swap: Swap, words: &Words) -> Option<Swap> {
+    if !ordinary(&swap.heard, words) {
+        return Some(swap);
+    }
+    let context_word = |word: &Option<String>| {
+        word.clone()
+            .filter(|w| !FUNCTION_WORDS.contains(&w.to_lowercase().as_str()))
+    };
+    let (heard, wrote) = match (
+        context_word(&swap.clause_after),
+        context_word(&swap.clause_before),
+    ) {
+        (Some(after), _) => (
+            format!("{} {}", swap.heard, after.to_lowercase()),
+            format!("{} {after}", swap.wrote),
+        ),
+        (None, Some(before)) => (
+            format!("{} {}", before.to_lowercase(), swap.heard),
+            format!("{before} {}", swap.wrote),
+        ),
+        (None, None) => return None,
+    };
+    Some(Swap {
+        heard,
+        wrote,
+        ..swap
+    })
+}
+
+fn split_names_from_plain_words(swap: Swap, words: &Words) -> Vec<Swap> {
+    let wrote: Vec<&str> = swap.wrote.split_whitespace().collect();
+    let heard: Vec<&str> = swap.heard.split_whitespace().collect();
+    let plain = |index: usize, word: &str| {
+        !learnable(
+            &Swap {
+                heard: String::new(),
+                wrote: word.to_owned(),
+                opens_sentence: index == 0 && swap.opens_sentence,
+                clause_before: None,
+                clause_after: None,
+            },
+            words,
+        )
+    };
+    struct Run {
+        start: usize,
+        end: usize,
+        plain: bool,
+    }
+    let mut runs: Vec<Run> = Vec::new();
+    for (index, word) in wrote.iter().enumerate() {
+        let is_plain = plain(index, word);
+        match runs.last_mut() {
+            Some(run) if run.plain == is_plain => run.end = index + 1,
+            _ => runs.push(Run {
+                start: index,
+                end: index + 1,
+                plain: is_plain,
+            }),
+        }
+    }
+    if runs.len() < 2 || heard.len() < runs.len() {
+        return vec![swap];
+    }
+    let spoken = |words: &[&str]| -> Vec<char> {
+        const DIGITS: [&str; 10] = [
+            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        ];
+        let mut out = Vec::new();
+        for c in words.concat().chars().flat_map(char::to_lowercase) {
+            match c.to_digit(10) {
+                Some(d) => out.extend(DIGITS[d as usize].chars()),
+                None if c.is_alphabetic() => out.push(c),
+                None => {}
+            }
+        }
+        out
+    };
+    let mut best: Option<(usize, Vec<usize>)> = None;
+    let mut cuts = vec![0usize; runs.len() + 1];
+    cuts[runs.len()] = heard.len();
+    fn each_partition(
+        cuts: &mut Vec<usize>,
+        at: usize,
+        total: usize,
+        visit: &mut dyn FnMut(&[usize]),
+    ) {
+        if at == cuts.len() - 1 {
+            visit(cuts);
+            return;
+        }
+        let remaining = cuts.len() - 1 - at;
+        for cut in cuts[at - 1] + 1..=total - remaining {
+            cuts[at] = cut;
+            each_partition(cuts, at + 1, total, visit);
+        }
+    }
+    each_partition(&mut cuts, 1, heard.len(), &mut |cuts| {
+        let cost = runs
+            .iter()
+            .enumerate()
+            .map(|(i, &Run { start, end, .. })| {
+                distance(
+                    &spoken(&heard[cuts[i]..cuts[i + 1]]),
+                    &spoken(&wrote[start..end]),
+                )
+            })
+            .sum();
+        if best.as_ref().is_none_or(|(least, _)| cost < *least) {
+            best = Some((cost, cuts.to_vec()));
+        }
+    });
+    let Some((_, cuts)) = best else {
+        return vec![swap];
+    };
+    runs.iter()
+        .enumerate()
+        .map(|(i, &Run { start, end, .. })| Swap {
+            heard: heard[cuts[i]..cuts[i + 1]].join(" "),
+            wrote: wrote[start..end].join(" "),
+            opens_sentence: start == 0 && swap.opens_sentence,
+            clause_before: if start == 0 {
+                swap.clause_before.clone()
+            } else {
+                None
+            },
+            clause_after: if end == wrote.len() {
+                swap.clause_after.clone()
+            } else {
+                None
+            },
+        })
+        .collect()
+}
+
+fn distance(a: &[char], b: &[char]) -> usize {
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, x) in a.iter().enumerate() {
+        let mut current = vec![i + 1];
+        for (j, y) in b.iter().enumerate() {
+            current.push(
+                (previous[j + 1] + 1)
+                    .min(current[j] + 1)
+                    .min(previous[j] + usize::from(x != y)),
+            );
+        }
+        previous = current;
+    }
+    previous[b.len()]
 }
 
 /// The words a model could plausibly write unprompted. macOS ships the list,
@@ -430,10 +622,7 @@ fn candidates(events: &[Event], words: &Words) -> Vec<(String, Vec<Sighting>)> {
         let Some(pasted) = dictated.get(id) else {
             continue;
         };
-        for swap in swaps(pasted, edited) {
-            if !learnable(&swap, words) {
-                continue;
-            }
+        for swap in learned_swaps(pasted, edited, words) {
             let index = match terms.iter().position(|(term, _)| *term == swap.wrote) {
                 Some(index) => index,
                 None => {
@@ -476,8 +665,7 @@ pub fn promotions(events: &[Event], known: &[String], words: &Words) -> Vec<Prom
         for heard in heard_forms {
             let same: Vec<_> = sightings.iter().filter(|s| s.heard == heard).collect();
             let learned = done.is_some_and(|done| done.rules.contains(heard));
-            let ordinary = heard.split_whitespace().all(|word| words.knows(word));
-            let supported = if ordinary {
+            let supported = if ordinary(heard, words) {
                 same.iter().map(|s| &s.id).collect::<HashSet<_>>().len() >= 3
             } else {
                 weight(same.iter().copied()) >= 2
@@ -568,7 +756,9 @@ mod tests {
             vec![Swap {
                 heard: "Git hub".into(),
                 wrote: "GitHub".into(),
-                opens_sentence: false
+                opens_sentence: false,
+                clause_before: Some("on".into()),
+                clause_after: None,
             }]
         );
         let found = swaps(
@@ -614,7 +804,9 @@ mod tests {
                     &Swap {
                         heard: heard.into(),
                         wrote: wrote.into(),
-                        opens_sentence: opens
+                        opens_sentence: opens,
+                        clause_before: None,
+                        clause_after: None,
                     },
                     &words
                 ),
@@ -705,8 +897,8 @@ mod tests {
         assert_eq!(
             promotions(&events, &["poteto".into()], &words),
             vec![Promotion {
-                term: "poteto".into(),
-                heard: Some("potato".into()),
+                term: "poteto mode".into(),
+                heard: Some("potato mode".into()),
                 from: vec![Id::test("1"), Id::test("2"), Id::test("3")]
             }]
         );
@@ -726,7 +918,69 @@ mod tests {
         }
         assert_eq!(
             promotions(&events, &[], &words)[0].heard.as_deref(),
-            Some("potato")
+            Some("use potato")
+        );
+    }
+
+    #[test]
+    fn an_ordinary_heard_word_is_learned_with_its_neighbour() {
+        let words = Words::from_list(&["use", "potato", "mode", "just", "is", "different"]);
+        let learned = learned_swaps("use potato mode now", "use poteto mode now", &words);
+        assert_eq!(
+            learned
+                .iter()
+                .map(|s| (s.heard.as_str(), s.wrote.as_str()))
+                .collect::<Vec<_>>(),
+            [("potato mode", "poteto mode")]
+        );
+        assert!(
+            learned_swaps("potato", "poteto", &words).is_empty(),
+            "an ordinary word with nothing around it is not learned"
+        );
+        assert!(
+            learned_swaps("so potato. Mode", "so poteto. Mode", &words)
+                .iter()
+                .all(|s| s.heard == "so potato"),
+            "the neighbour comes from the same clause"
+        );
+        assert!(
+            learned_swaps(
+                "in corner was late",
+                "in Klarna was late",
+                &Words::from_list(&["in", "corner", "was", "late"])
+            )
+            .is_empty(),
+            "a function word says nothing about which word was meant"
+        );
+    }
+
+    #[test]
+    fn a_name_fixed_together_with_plain_words_is_learned_alone() {
+        let words = Words::from_list(&[
+            "is", "there", "a", "t", "three", "tree", "air", "triage", "skill", "whisper", "flow",
+            "the",
+        ]);
+        let learned = learned_swaps(
+            "is there a t three tree air skill",
+            "is there a T3 triage skill",
+            &words,
+        );
+        assert_eq!(
+            learned
+                .iter()
+                .map(|s| (s.heard.as_str(), s.wrote.as_str()))
+                .collect::<Vec<_>>(),
+            [("t three", "T3")],
+            "a lone letter is a spelled-out name, so it needs no neighbour"
+        );
+        let whole = learned_swaps("use the whisper flo app", "use the Wispr Flow app", &words);
+        assert_eq!(
+            whole
+                .iter()
+                .map(|s| (s.heard.as_str(), s.wrote.as_str()))
+                .collect::<Vec<_>>(),
+            [("whisper flo", "Wispr Flow")],
+            "a name of several words stays whole"
         );
     }
 
@@ -737,6 +991,8 @@ mod tests {
             heard: "20".into(),
             wrote: "2026".into(),
             opens_sentence: false,
+            clause_before: None,
+            clause_after: None,
         };
         assert!(!learnable(&swap, &words));
     }
