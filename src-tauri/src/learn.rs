@@ -418,53 +418,24 @@ pub fn learnable(swap: &Swap, words: &Words) -> bool {
 /// Stricter than the correction test, because nobody confirmed these words:
 /// a capital that opens a line or sentence, a dictionary word, and a plain
 /// lowercase word all stay out. A label like "Settings" or a description
-/// like "Comparing prices" would otherwise be boosted like a name.
+/// like "Comparing prices" would otherwise be boosted like a name. So does a
+/// dictionary word capitalized mid-sentence: boosted from a quoted "Yeah.",
+/// the decoder wrote "Yeah. Yeah." into the silence before every dictation.
 pub fn context_terms(text: &str, words: &Words) -> Vec<String> {
-    // A word the text also writes in lowercase is a word, wherever it is
-    // capitalized: "And" opening a clause, "Add" on a button.
-    let lowercase: HashSet<&str> = text
-        .split_whitespace()
-        .map(strip)
-        .filter(|token| token.chars().all(char::is_lowercase))
-        .collect();
-    // (term, weak, count): a weak term is a dictionary word capitalized
-    // inside a sentence, "the rows in Convex", and ranks after the rest.
-    let mut found: Vec<(String, bool, usize)> = Vec::new();
+    let mut found: Vec<(String, usize)> = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
     for line in text.lines() {
         // A word alone on its line is a label or a name, not a sentence.
         let mut opens = line.split_whitespace().nth(1).is_some();
-        // A title-case label capitalizes everything; a sentence does not.
-        let count = line.split_whitespace().count();
-        let capitals = line
-            .split_whitespace()
-            .filter(|part| strip(part).chars().next().is_some_and(char::is_uppercase))
-            .count();
-        let prose = count >= 4 && capitals * 2 < count;
         for part in line.split_whitespace() {
             // "Larsten's" counts as Larsten, and "I'll" as I.
             let token = strip(strip(part).split(['\'', '’']).next().unwrap_or_default());
-            let weak = || {
-                prose
-                    && !opens
-                    && token.chars().count() >= 3
-                    && token.chars().next().is_some_and(char::is_uppercase)
-                    && token.chars().skip(1).all(char::is_lowercase)
-                    && !lowercase.contains(token.to_lowercase().as_str())
-            };
-            let kind = if token.len() > 64 {
-                None
-            } else if names_something(token, opens, words) {
-                Some(false)
-            } else {
-                weak().then_some(true)
-            };
-            if let Some(weak) = kind {
+            if token.len() <= 64 && names_something(token, opens, words) {
                 match seen.get(&token.to_lowercase()) {
-                    Some(&index) => found[index].2 += 1,
+                    Some(&index) => found[index].1 += 1,
                     None => {
                         seen.insert(token.to_lowercase(), found.len());
-                        found.push((token.to_owned(), weak, 1));
+                        found.push((token.to_owned(), 1));
                     }
                 }
             }
@@ -472,14 +443,16 @@ pub fn context_terms(text: &str, words: &Words) -> Vec<String> {
         }
     }
     // Stable, so equally frequent terms keep the order they were seen in.
-    found.sort_by_key(|(_, weak, count)| (*weak, std::cmp::Reverse(*count)));
-    found.into_iter().map(|(term, _, _)| term).collect()
+    found.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    found.into_iter().map(|(term, _)| term).collect()
 }
 
-/// Short forms a window shows everywhere that the word list lacks.
+/// Short forms a window shows everywhere, and spoken words, that the word
+/// list lacks.
 const ORDINARY: &[&str] = &[
     "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec", "mon",
-    "tue", "wed", "thu", "fri", "sat", "sun", "am", "pm", "kb", "mb", "gb", "tb", "ok",
+    "tue", "wed", "thu", "fri", "sat", "sun", "am", "pm", "kb", "mb", "gb", "tb", "ok", "okay",
+    "yup", "hmm", "gonna", "wanna", "gotta", "uh", "nah",
 ];
 
 fn names_something(token: &str, opens: bool, words: &Words) -> bool {

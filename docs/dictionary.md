@@ -129,9 +129,13 @@ internal punctuation (`claude.ai`), letters mixed with digits, all caps the
 word list does not know, and capitalized words the word list does not know.
 A capital that opens a sentence does not count, but a word alone on its line
 does, since that is a label or a name. Dictionary words, plain lowercase
-words, month and day names, and units stay out. A dictionary word
-capitalized inside a sentence, as in "the rows in Convex", counts when the
-text never writes it in lowercase, and ranks after the rest. Terms are
+words, month and day names, units, and spoken words the list lacks
+("okay", "gonna") stay out. So does a dictionary word capitalized inside a
+sentence. That rule used to keep it, as in "the rows in Convex", but on
+2026-10-19 a reply quoting "Yeah." put "Yeah" on the boost list and every
+dictation came out as "Yeah. Yeah. ..." until the window changed. In the
+ledger, 213 such terms had been offered and the 10 that landed were "Yeah",
+"And", "Copy", "Notification" and "Shape", never a name. Terms are
 ranked by how often they appear. A dictation gets at most 32 screen terms,
 then at most 8 Daybook terms, with no spelling twice (`context::gather`).
 Before this, each dictation was boosted with 62 to 65 terms, among them
