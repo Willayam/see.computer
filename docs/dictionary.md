@@ -235,7 +235,9 @@ several words ("Wispr Flow") stays whole. A heard form made of ordinary
 words takes the unchanged word after it, or else before it, in the same
 clause: fixing "potato mode" teaches "potato mode -> poteto mode" and leaves
 a plain "potato" alone. Function words ("was", "in") do not count as that
-neighbour, and with no other neighbour nothing is learned. Lone letters are
+neighbour, and with no other neighbour nothing is learned. A dash, `&`,
+bracket or quote mark between the two words ends the clause too, so
+"potato - mode" and `"potato." Mode` have no neighbour there. Lone letters are
 spelled-out names ("t three", "m c p"), not ordinary words. Such a phrase
 still needs three separate dictations. A fix typed into the dialog counts as two
 sightings for terms and for rules on unknown words. Learned lines go to
