@@ -327,7 +327,7 @@ fn heartbeat_is_fresh(last_callback_ms: u64, now_ms: u64, timeout_ms: u64) -> bo
     now_ms.saturating_sub(last_callback_ms) < timeout_ms
 }
 
-struct StreamingResampler {
+pub(crate) struct StreamingResampler {
     from: u32,
     to: u32,
     input: Vec<f32>,
@@ -336,7 +336,7 @@ struct StreamingResampler {
 }
 
 impl StreamingResampler {
-    fn new(from: u32, to: u32) -> Self {
+    pub(crate) fn new(from: u32, to: u32) -> Self {
         Self {
             from,
             to,
@@ -352,7 +352,7 @@ impl StreamingResampler {
         self.output_index = 0;
     }
 
-    fn push(&mut self, input: &[f32], finalize: bool) -> Vec<f32> {
+    pub(crate) fn push(&mut self, input: &[f32], finalize: bool) -> Vec<f32> {
         if self.from == self.to {
             return input.to_vec();
         }
@@ -410,6 +410,29 @@ fn append_input(shared: &Shared, data: &[f32], rate: u32, channels: u16) {
             .fetch_max(peak.to_bits(), Ordering::Relaxed);
     }
     level_tap().push(data, rate, channels);
+    if let Ok(sink) = meeting_sink().try_lock() {
+        if let Some(tx) = sink.as_ref() {
+            let _ = tx.send(Block {
+                samples: data.to_vec(),
+                rate,
+                channels,
+            });
+        }
+    }
+}
+
+pub struct Block {
+    pub samples: Vec<f32>,
+    pub rate: u32,
+    pub channels: u16,
+}
+
+/// Raw device input copied out while a meeting records. A static for the same
+/// reason as `level_tap`: the session owns the stream and a meeting only listens.
+pub fn meeting_sink() -> &'static Mutex<Option<std::sync::mpsc::Sender<Block>>> {
+    static SINK: std::sync::OnceLock<Mutex<Option<std::sync::mpsc::Sender<Block>>>> =
+        std::sync::OnceLock::new();
+    SINK.get_or_init(|| Mutex::new(None))
 }
 
 /// The last ~100 ms of mono input, read by the pill's level emitter at ~30 Hz.

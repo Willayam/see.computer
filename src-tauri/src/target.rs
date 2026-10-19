@@ -104,7 +104,23 @@ const TIMEOUT_SECONDS: f32 = 0.25;
 /// can be read back and checked rather than argued about.
 pub struct Observation {
     pub focus: Focus,
+    pub element: Option<Element>,
+    pub pid: i32,
     pub app: String,
+    pub bundle: String,
+}
+
+pub struct Element(*mut c_void);
+unsafe impl Send for Element {}
+impl Element {
+    pub fn as_ptr(&self) -> *mut c_void {
+        self.0
+    }
+}
+impl Drop for Element {
+    fn drop(&mut self) {
+        unsafe { CFRelease(self.0) }
+    }
 }
 
 /// Appends one line per dictation recording which app was frontmost and what was
@@ -143,7 +159,7 @@ pub fn log(observation: &Observation, held: bool) {
     );
 }
 
-fn frontmost() -> Option<(i32, String)> {
+fn frontmost() -> Option<(i32, String, String)> {
     unsafe {
         use objc2::msg_send;
         use objc2::runtime::{AnyClass, AnyObject};
@@ -161,47 +177,55 @@ fn frontmost() -> Option<(i32, String)> {
         if pid <= 0 {
             return None;
         }
-        let name: *mut AnyObject = msg_send![app, localizedName];
-        let label = if name.is_null() {
-            String::new()
-        } else {
-            let utf8: *const std::ffi::c_char = msg_send![name, UTF8String];
-            if utf8.is_null() {
-                String::new()
-            } else {
-                std::ffi::CStr::from_ptr(utf8)
-                    .to_string_lossy()
-                    .into_owned()
-            }
-        };
-        Some((pid, label))
+        let label = ns_string(msg_send![app, localizedName]);
+        let bundle = ns_string(msg_send![app, bundleIdentifier]);
+        Some((pid, label, bundle))
     }
 }
 
-/// Reads no text. Only asks whether a caret could be placed, so nothing the
-/// user has written is ever pulled out of their app.
+unsafe fn ns_string(string: *mut objc2::runtime::AnyObject) -> String {
+    use objc2::msg_send;
+    if string.is_null() {
+        return String::new();
+    }
+    let utf8: *const std::ffi::c_char = msg_send![string, UTF8String];
+    if utf8.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(utf8)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// Reads no text. Readback alone reads the focused text after a paste so the
+/// learner can see an in-place correction.
 pub fn observe() -> Observation {
-    let (pid, app) = frontmost().unwrap_or((0, "?".to_owned()));
+    let (pid, app, bundle) = frontmost().unwrap_or((0, "?".to_owned(), String::new()));
+    let (focus, element) = classify(pid);
     Observation {
-        focus: classify(pid),
+        focus,
+        element,
+        pid,
         app,
+        bundle,
     }
 }
 
-fn classify(pid: i32) -> Focus {
+fn classify(pid: i32) -> (Focus, Option<Element>) {
     if pid <= 0 || !crate::paste::accessibility_trusted(false) {
-        return Focus::Unknown;
+        return (Focus::Unknown, None);
     }
     let (Some(focused), Some(range)) = (
         Attribute::new(c"AXFocusedUIElement"),
         Attribute::new(c"AXSelectedTextRange"),
     ) else {
-        return Focus::Unknown;
+        return (Focus::Unknown, None);
     };
     unsafe {
         let app = AXUIElementCreateApplication(pid);
         if app.is_null() {
-            return Focus::Unknown;
+            return (Focus::Unknown, None);
         }
         AXUIElementSetMessagingTimeout(app, TIMEOUT_SECONDS);
         let mut element: *mut c_void = std::ptr::null_mut();
@@ -210,19 +234,20 @@ fn classify(pid: i32) -> Focus {
         if status != AX_SUCCESS || element.is_null() {
             // kAXErrorNoValue (nothing focused, or an app that exposes nothing),
             // a timeout, or a denial. All of them mean "we cannot tell".
-            return Focus::Unknown;
+            return (Focus::Unknown, None);
         }
         AXUIElementSetMessagingTimeout(element, TIMEOUT_SECONDS);
         let mut settable: u8 = 0;
         let status = AXUIElementIsAttributeSettable(element, range.0, &mut settable);
-        CFRelease(element);
-        match (status, settable) {
+        let focus = match (status, settable) {
             (AX_SUCCESS, 1) => Focus::Editable,
             // A real element answered and said no. That is the confident
             // negative, and the only case that diverts the words to the pill.
+            (AX_SUCCESS, _) if crate::readback::opened_up(pid) => Focus::Unknown,
             (AX_SUCCESS, _) => Focus::NotEditable,
             _ => Focus::Unknown,
-        }
+        };
+        (focus, Some(Element(element)))
     }
 }
 

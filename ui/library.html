@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Library</title>
+  <link rel="stylesheet" href="library.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="side">
+      <div class="side-head">
+        <div class="brand"><span class="brand-dot"></span>see.computer</div>
+        <label class="search">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
+          <input id="search" type="search" placeholder="Search everything" autocomplete="off" spellcheck="false">
+        </label>
+        <div class="filters" role="tablist" aria-label="Kind">
+          <button class="chip is-on" data-kind="all" role="tab">All</button>
+          <button class="chip" data-kind="dictation" role="tab">Dictations</button>
+          <button class="chip" data-kind="take" role="tab">Takes</button>
+          <button class="chip" data-kind="meeting" role="tab">Meetings</button>
+          <button class="chip" data-kind="dictionary" role="tab"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h8.5a1.5 1.5 0 0 1 1.5 1.5v9.5H4.5A1.5 1.5 0 0 1 3 12z"/><path d="M3 12a1.5 1.5 0 0 1 1.5-1.5H13M6 5.5h4"/></svg>Dictionary</button>
+        </div>
+      </div>
+      <nav id="list" class="list" aria-label="Items"></nav>
+      <div class="side-foot">
+        <span id="count" class="count"></span>
+        <div class="foot-actions">
+          <button id="add-word" class="foot-btn" title="Add a word (⌘N)">+ add word</button>
+          <button id="theme" class="foot-btn" title="Appearance">theme: auto</button>
+        </div>
+      </div>
+    </aside>
+
+    <main id="detail" class="detail" tabindex="-1"></main>
+  </div>
+
+  <template id="t-row">
+    <button class="row" role="option">
+      <span class="row-glyph"></span>
+      <span class="row-main">
+        <span class="row-title"></span>
+        <span class="row-sub"></span>
+      </span>
+      <span class="row-time"></span>
+    </button>
+  </template>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="library.js"></script>
+  <script src="dictionary.js"></script>
+</body>
+</html>

@@ -31,6 +31,7 @@ pub struct Segment {
 pub struct Transcription {
     pub text: Option<Text>,
     pub segments: Vec<Segment>,
+    pub audio: Option<Audio16k>,
 }
 
 impl Transcription {
@@ -38,6 +39,7 @@ impl Transcription {
         Transcription {
             text: None,
             segments: Vec::new(),
+            audio: None,
         }
     }
 }
@@ -45,6 +47,7 @@ impl Transcription {
 #[derive(Default)]
 pub struct Utterance {
     pending: Vec<f32>,
+    whole: Vec<f32>,
     transcribed_samples: usize,
     segments: Vec<Segment>,
     texts: Vec<String>,
@@ -53,6 +56,7 @@ pub struct Utterance {
 
 impl Utterance {
     pub fn feed(&mut self, engine: &mut dyn Engine, audio: &Audio16k) {
+        self.whole.extend_from_slice(audio.samples());
         self.pending.extend_from_slice(audio.samples());
         while !self.chunk_error {
             let Some(cut) = chunk_cut(&self.pending) else {
@@ -75,6 +79,7 @@ impl Utterance {
         engine: &mut dyn Engine,
         tail: &Audio16k,
     ) -> Result<Transcription, EngineError> {
+        self.whole.extend_from_slice(tail.samples());
         self.pending.extend_from_slice(tail.samples());
         let result = (|| {
             if self.transcribed_samples == 0 {
@@ -88,9 +93,14 @@ impl Utterance {
                 Ok(Transcription {
                     text: Text::parse(self.texts.join(" ")),
                     segments: std::mem::take(&mut self.segments),
+                    audio: None,
                 })
             }
         })();
+        let result = result.map(|mut transcription| {
+            transcription.audio = Some(Audio16k::from_samples(std::mem::take(&mut self.whole)));
+            transcription
+        });
         self.reset();
         result
     }
@@ -109,6 +119,7 @@ impl Utterance {
 
     fn reset(&mut self) {
         self.pending.clear();
+        self.whole.clear();
         self.transcribed_samples = 0;
         self.segments.clear();
         self.texts.clear();
@@ -323,7 +334,11 @@ impl Engine for Canned {
                 }]
             })
             .unwrap_or_default();
-        Ok(Transcription { text, segments })
+        Ok(Transcription {
+            text,
+            segments,
+            audio: None,
+        })
     }
 }
 
@@ -414,6 +429,17 @@ mod tests {
         assert_eq!(utterance_engine.calls, plain_engine.calls);
     }
 
+    #[test]
+    fn utterance_finish_returns_fed_and_tail_audio() {
+        let mut engine = Counting::default();
+        let mut utterance = Utterance::default();
+        utterance.feed(&mut engine, &Audio16k::from_samples(vec![0.1, 0.2]));
+        let result = utterance
+            .finish(&mut engine, &Audio16k::from_samples(vec![0.3]))
+            .unwrap();
+        assert_eq!(result.audio.unwrap().samples(), &[0.1, 0.2, 0.3]);
+    }
+
     #[derive(Default)]
     struct Counting {
         calls: Vec<usize>,
@@ -425,6 +451,7 @@ mod tests {
             let call = self.calls.len();
             Ok(Transcription {
                 text: Text::parse(format!("call {call}")),
+                audio: None,
                 segments: vec![Segment {
                     start_ms: 0,
                     end_ms: audio.samples().len() as u64 * 1_000 / SAMPLE_RATE as u64,

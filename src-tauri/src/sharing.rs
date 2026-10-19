@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const HOST: &str = "https://see-computer-shares.cocco.workers.dev";
+const HOST: &str = "https://see.computer";
 const MAX_OBJECT: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -154,7 +154,7 @@ impl Sharing {
             return;
         }
         let result = (|| -> io::Result<Job> {
-            let id = random_hex(16)?;
+            let id = random_id()?;
             let job = Job {
                 id,
                 dir: dir.to_owned(),
@@ -591,7 +591,8 @@ impl Sharing {
     }
 }
 
-/// The original local path remains usable if sharing fails or a link is revoked.
+/// The paste is either the link or the local path, never both. The local
+/// path returns when sharing fails or a link is revoked.
 pub fn paste_link(markdown: &Path, local_paste: String) -> String {
     let Some(dir) = markdown.parent() else {
         return local_paste;
@@ -612,12 +613,8 @@ pub fn paste_link(markdown: &Path, local_paste: String) -> String {
     if !link.url.starts_with(&format!("{HOST}/s/")) {
         return local_paste;
     }
-    let paste = local_paste.replace(&markdown.to_string_lossy().to_string(), &link.url);
-    if link.state == "uploading" {
-        format!("{paste}\nUpload queued. Local copy: {}", markdown.display())
-    } else {
-        paste
-    }
+    // A queued upload finishes within seconds, so the paste is the link alone.
+    local_paste.replace(&markdown.to_string_lossy().to_string(), &link.url)
 }
 
 fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
@@ -745,6 +742,22 @@ fn complete_png(path: &Path) -> bool {
     file.seek(SeekFrom::End(-12)).is_ok()
         && file.read_exact(&mut end).is_ok()
         && end == [0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]
+}
+
+/// Seven base62 characters, the length of the share URL's last segment.
+fn random_id() -> io::Result<String> {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut file = std::fs::File::open("/dev/urandom")?;
+    let mut id = String::new();
+    let mut byte = [0_u8; 1];
+    while id.len() < 7 {
+        file.read_exact(&mut byte)?;
+        // 248 is the largest multiple of 62 below 256, so the modulo stays unbiased.
+        if byte[0] < 248 {
+            id.push(ALPHABET[usize::from(byte[0] % 62)] as char);
+        }
+    }
+    Ok(id)
 }
 
 fn random_hex(bytes: usize) -> io::Result<String> {

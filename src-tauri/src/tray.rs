@@ -1,12 +1,17 @@
 //! Menu-bar icon, and the state the glass panel is drawn from.
 
-use std::sync::{mpsc::Sender, Arc, Mutex, PoisonError};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::Sender,
+    Arc, Mutex, PoisonError,
+};
 use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::config::Config;
 use crate::history::History;
+use crate::ledger::{Learning, Ledger};
 use crate::menu::{self, Row};
 use crate::pill::{Notice, PillEvent};
 use crate::recents::{self, Payload};
@@ -43,6 +48,23 @@ const PANES: [(&str, &str, &str); 4] = [
 ];
 
 const RECENT_IDS: [&str; 5] = ["recent-0", "recent-1", "recent-2", "recent-3", "recent-4"];
+const WAIT_IDS: [&str; 5] = [
+    "dictionary-wait-0",
+    "dictionary-wait-1",
+    "dictionary-wait-2",
+    "dictionary-wait-3",
+    "dictionary-wait-4",
+];
+const LEARNED_IDS: [&str; 8] = [
+    "dictionary-learned-0",
+    "dictionary-learned-1",
+    "dictionary-learned-2",
+    "dictionary-learned-3",
+    "dictionary-learned-4",
+    "dictionary-learned-5",
+    "dictionary-learned-6",
+    "dictionary-learned-7",
+];
 const WARNING: &str = "exclamationmark.triangle.fill";
 /// Everything the panel is drawn from and everything a pick needs. Rust owns
 /// the whole menu state; the recent-row payloads live here so the native side
@@ -54,11 +76,16 @@ struct Panel {
     trigger: Arc<Mutex<Trigger>>,
     pill: Sender<PillEvent>,
     history: History,
+    ledger: Ledger,
     sharing: crate::sharing::Sharing,
     updater: crate::updater::Updater,
+    meetings: crate::meeting::controller::Meetings,
+    meeting_autostart: Arc<AtomicBool>,
     status: Arc<Mutex<EngineStatus>>,
     settings_expanded: Arc<Mutex<bool>>,
     payloads: Arc<Mutex<Vec<Payload>>>,
+    waiting: Arc<Mutex<Vec<String>>>,
+    learned: Arc<Mutex<Vec<String>>>,
     /// The recents as last read. They live in ~/Documents, which iCloud
     /// evicts under disk pressure, and one evicted day file held the main
     /// thread for 5 s. So the panel draws this copy and pokes `reread`.
@@ -71,9 +98,12 @@ pub struct Wiring {
     pub trigger: Arc<Mutex<Trigger>>,
     pub pill: Sender<PillEvent>,
     pub history: History,
+    pub ledger: Ledger,
     pub status: Arc<Mutex<EngineStatus>>,
     pub sharing: crate::sharing::Sharing,
     pub updater: crate::updater::Updater,
+    pub meetings: crate::meeting::controller::Meetings,
+    pub meeting_autostart: Arc<AtomicBool>,
 }
 
 pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
@@ -82,9 +112,12 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
         trigger,
         pill,
         history,
+        ledger,
         status,
         sharing,
         updater,
+        meetings,
+        meeting_autostart,
     } = wiring;
     let (reread, pokes) = std::sync::mpsc::channel::<()>();
     let panel = Panel {
@@ -93,11 +126,16 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
         trigger,
         pill,
         history,
+        ledger,
         sharing,
         updater,
+        meetings,
+        meeting_autostart,
         status,
         settings_expanded: Arc::new(Mutex::new(false)),
         payloads: Arc::new(Mutex::new(Vec::new())),
+        waiting: Arc::new(Mutex::new(Vec::new())),
+        learned: Arc::new(Mutex::new(Vec::new())),
         recents: Arc::new(Mutex::new(Vec::new())),
         reread,
     };
@@ -129,6 +167,14 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
     let _ = panel.reread.send(());
     let picked = panel.clone();
     menu::on_pick(move |id| picked.pick(id));
+    let watched = panel.clone();
+    panel.meetings.watch(move || {
+        let _ = watched.reread.send(());
+        let panel = watched.clone();
+        let _ = watched
+            .app
+            .run_on_main_thread(move || menu::refresh(&panel.main_rows()));
+    });
 
     let image = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
     TrayIconBuilder::with_id("main")
@@ -153,6 +199,29 @@ impl Panel {
     fn main_rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
         rows.extend(self.problem_rows());
+        let (label, symbol) = match self.meetings.status() {
+            crate::meeting::controller::Status::Idle => {
+                ("Record a meeting".to_owned(), "record.circle")
+            }
+            crate::meeting::controller::Status::Offered(app) => {
+                (format!("Record {} meeting", app.name), "record.circle")
+            }
+            crate::meeting::controller::Status::Recording { started_ms, .. } => {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                let minutes = now_ms.saturating_sub(started_ms) / 60_000;
+                let duration = if minutes == 0 {
+                    "under 1 min".to_owned()
+                } else {
+                    format!("{minutes} min")
+                };
+                (format!("Stop recording · {duration}"), "stop.circle")
+            }
+        };
+        rows.push(item("meeting", &label, false, Some(symbol)));
+        rows.push(Row::Separator);
 
         let recents = self.recents.lock().unwrap_or_else(PoisonError::into_inner);
         if recents.is_empty() {
@@ -166,13 +235,21 @@ impl Panel {
         let mut payloads = Vec::with_capacity(recents.len());
         for (index, recent) in recents.iter().enumerate() {
             let (label, symbol) = recent.row();
-            rows.push(item(RECENT_IDS[index], &label, false, Some(symbol)));
+            rows.push(match recent.payload {
+                Payload::Meeting(_) => Row::Line {
+                    id: RECENT_IDS[index],
+                    label,
+                    symbol,
+                },
+                _ => item(RECENT_IDS[index], &label, false, Some(symbol)),
+            });
             payloads.push(recent.payload.clone());
         }
         drop(recents);
         *self.payloads.lock().unwrap_or_else(PoisonError::into_inner) = payloads;
 
         rows.push(Row::Separator);
+        rows.push(submenu("dictionary", "Dictionary"));
         let settings_expanded = *self
             .settings_expanded
             .lock()
@@ -182,17 +259,22 @@ impl Panel {
             rows.extend(self.settings_rows());
         }
         rows.push(Row::Separator);
+        rows.push(item("library", "Library", false, Some("books.vertical")));
         rows.push(item("quit", "Quit see.computer", false, None));
         rows
     }
 
-    /// One problem, highest priority wins: the permission that breaks the
-    /// trigger, then a macOS shortcut that answers the same Globe taps, then a
-    /// broken model, then model loading.
-    /// Missing Accessibility deliberately has no row; history keeps the text.
+    /// One problem, highest priority wins: unfinished setup, then a macOS
+    /// shortcut that answers the same Globe taps, then a broken model, then
+    /// model loading.
     fn problem_rows(&self) -> Vec<Row> {
-        if let Some((id, label)) = alert() {
-            return vec![item(id, label, false, Some(WARNING))];
+        let missing = crate::setup::missing();
+        if missing > 0 {
+            let label = match missing {
+                1 => "Finish setup · 1 permission left".to_owned(),
+                count => format!("Finish setup · {count} permissions left"),
+            };
+            return vec![item("setup", &label, false, Some(WARNING))];
         }
         if let Some(claim) = self.globe_claim() {
             return vec![
@@ -259,6 +341,12 @@ impl Panel {
             None,
         ));
         rows.push(item(
+            "meeting-autostart",
+            "Auto-record meetings",
+            self.meeting_autostart.load(Ordering::Relaxed),
+            None,
+        ));
+        rows.push(item(
             "open-at-login",
             "Open at Login",
             open_at_login(&self.app),
@@ -287,14 +375,49 @@ impl Panel {
     }
 
     fn permission_rows(&self) -> Vec<Row> {
-        let mut rows = Vec::new();
+        let mut rows = vec![item("setup", "Open Setup…", false, None), Row::Separator];
         rows.extend(PANES.map(|(id, label, _)| item(id, &format!("{label}…"), false, None)));
         rows
     }
 
+    fn dictionary_rows(&self) -> Vec<Row> {
+        let fixable = last_dictation(&self.history).is_some();
+        let (rows, waiting, learned) = dictionary_rows(&self.ledger.learning(), fixable);
+        *self.waiting.lock().unwrap_or_else(PoisonError::into_inner) = waiting;
+        *self.learned.lock().unwrap_or_else(PoisonError::into_inner) = learned;
+        rows
+    }
+
     fn pick(&self, id: &str) -> Option<Vec<Row>> {
+        if let Some(index) = WAIT_IDS.iter().position(|row| *row == id) {
+            if let Some(term) = self
+                .waiting
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(index)
+                .cloned()
+            {
+                let _ = self.ledger.edit(crate::vocabulary::Edit::Learn { term });
+            }
+            return None;
+        }
+        if let Some(index) = LEARNED_IDS.iter().position(|row| *row == id) {
+            if let Some(term) = self
+                .learned
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(index)
+                .cloned()
+            {
+                self.ledger.forget(&term);
+                let _ = self
+                    .pill
+                    .send(PillEvent::Flash(Notice::Info(format!("Forgot \"{term}\""))));
+            }
+            return None;
+        }
         if let Some(index) = RECENT_IDS.iter().position(|recent_id| *recent_id == id) {
-            self.copy_recent(index);
+            self.pick_recent(index);
             return None;
         }
         if let Some((_, _, pane)) = PANES.iter().find(|(pane_id, _, _)| *pane_id == id) {
@@ -312,6 +435,26 @@ impl Panel {
             return Some(self.trigger_rows());
         }
         match id {
+            "dictionary" => Some(self.dictionary_rows()),
+            "dictionary-fix" => {
+                if let Some(route) = last_dictation(&self.history) {
+                    crate::library::show(&self.app, Some(route));
+                }
+                None
+            }
+            "dictionary-edit" => {
+                crate::library::show(&self.app, Some("dictionary".to_owned()));
+                None
+            }
+            "meeting" => {
+                self.meetings.toggle();
+                None
+            }
+            "meeting-autostart" => {
+                self.meeting_autostart.fetch_xor(true, Ordering::Relaxed);
+                self.save_config();
+                Some(self.main_rows())
+            }
             "sharing-toggle" => {
                 self.sharing.set_enabled(!self.sharing.enabled());
                 self.save_config();
@@ -351,6 +494,10 @@ impl Panel {
                 None
             }
             "permission-settings" => Some(self.permission_rows()),
+            "setup" => {
+                crate::setup::show(&self.app);
+                None
+            }
             "retry" => {
                 let _ = self.inbox.send(Msg::RetryEngine);
                 None
@@ -376,6 +523,10 @@ impl Panel {
                 }
                 Some(self.main_rows())
             }
+            "library" => {
+                crate::library::show(&self.app, None);
+                None
+            }
             "quit" => {
                 self.app.exit(0);
                 None
@@ -384,7 +535,7 @@ impl Panel {
         }
     }
 
-    fn copy_recent(&self, index: usize) {
+    fn pick_recent(&self, index: usize) {
         let Some(payload) = self
             .payloads
             .lock()
@@ -394,13 +545,18 @@ impl Panel {
         else {
             return;
         };
-        let text = payload.copy_text();
-        let result = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text));
-        match result {
-            Ok(()) => {
-                let _ = self.pill.send(PillEvent::Flash(Notice::Copied));
+        match payload.pick() {
+            recents::Pick::Copy(text) => {
+                let result =
+                    arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text));
+                match result {
+                    Ok(()) => {
+                        let _ = self.pill.send(PillEvent::Flash(Notice::Copied));
+                    }
+                    Err(error) => eprintln!("could not copy recent item: {error}"),
+                }
             }
-            Err(error) => eprintln!("could not copy recent item: {error}"),
+            recents::Pick::Library(id) => crate::library::show(&self.app, Some(id)),
         }
     }
 
@@ -409,6 +565,7 @@ impl Panel {
             trigger: current_trigger(&self.trigger),
             history: self.history.enabled(),
             sharing: self.sharing.enabled(),
+            meeting_autostart: self.meeting_autostart.load(Ordering::Relaxed),
         };
         if let Err(error) = config.save() {
             eprintln!("could not save preferences: {error}");
@@ -423,6 +580,81 @@ fn item(id: &'static str, label: &str, checked: bool, symbol: Option<&'static st
         checked,
         symbol,
     }
+}
+
+/// The Library route that opens the newest dictation's line ready to edit.
+fn last_dictation(history: &History) -> Option<String> {
+    use chrono::TimeZone;
+    let entry = history.recent(1).into_iter().next()?;
+    let at = chrono::Local.from_local_datetime(&entry.at).earliest()?;
+    Some(format!(
+        "edit:dictation:{}@{}",
+        entry.at.format("%Y-%m-%d"),
+        at.timestamp_millis()
+    ))
+}
+
+fn dictionary_rows(learning: &Learning, fixable: bool) -> (Vec<Row>, Vec<String>, Vec<String>) {
+    let count = learning.learned.len();
+    let summary = match count {
+        0 => "Learns from words you fix".to_owned(),
+        1 => "Learned 1 word from your fixes".to_owned(),
+        _ => format!("Learned {count} words from your fixes"),
+    };
+    let mut rows = vec![
+        Row::Hint(summary),
+        item(
+            if fixable { "dictionary-fix" } else { "" },
+            "Fix Last Dictation…",
+            false,
+            Some("pencil"),
+        ),
+        item(
+            "dictionary-edit",
+            "Edit Dictionary…",
+            false,
+            Some("character.book.closed"),
+        ),
+    ];
+    let waiting: Vec<_> = learning
+        .waiting
+        .iter()
+        .take(WAIT_IDS.len())
+        .map(|entry| entry.term.clone())
+        .collect();
+    if !waiting.is_empty() {
+        rows.push(Row::Separator);
+        rows.push(Row::Hint("Seen once. Click to learn now".to_owned()));
+        for (index, entry) in learning.waiting.iter().take(WAIT_IDS.len()).enumerate() {
+            let heard = entry
+                .heard
+                .first()
+                .map_or(String::new(), |heard| format!("  · heard \"{heard}\""));
+            rows.push(item(
+                WAIT_IDS[index],
+                &format!("{}{heard}", entry.term),
+                false,
+                None,
+            ));
+        }
+    }
+    let learned: Vec<_> = learning
+        .learned
+        .iter()
+        .take(LEARNED_IDS.len())
+        .cloned()
+        .collect();
+    if !learned.is_empty() {
+        rows.push(Row::Separator);
+        rows.push(Row::Hint("Learned. Click to forget".to_owned()));
+        for (index, term) in learned.iter().enumerate() {
+            rows.push(item(LEARNED_IDS[index], term, true, None));
+        }
+        if count > LEARNED_IDS.len() {
+            rows.push(item("dictionary-edit", "All Learned Words…", false, None));
+        }
+    }
+    (rows, waiting, learned)
 }
 
 fn submenu(id: &'static str, label: &str) -> Row {
@@ -440,16 +672,6 @@ fn disclosure(id: &'static str, label: &str, expanded: bool) -> Row {
     }
 }
 
-/// The one thing standing between the chosen trigger and hold-to-talk working,
-/// paired with the id of the row that fixes it. Queried live rather than
-/// stored, so granting the permission clears it on the next open.
-fn alert() -> Option<(&'static str, &'static str)> {
-    (!crate::trigger::listen_access_granted()).then_some((
-        "input-monitoring",
-        "Enable Input Monitoring for hold-to-talk",
-    ))
-}
-
 fn open_at_login(app: &AppHandle) -> bool {
     app.autolaunch().is_enabled().unwrap_or_else(|error| {
         eprintln!("could not read open-at-login status: {error}");
@@ -463,4 +685,65 @@ fn current_trigger(trigger: &Mutex<Trigger>) -> Trigger {
 
 fn open_path(path: impl AsRef<std::ffi::OsStr>) {
     let _ = std::process::Command::new("open").arg(path).spawn();
+}
+
+#[cfg(test)]
+mod dictionary_tests {
+    use super::*;
+
+    #[test]
+    fn empty_learning() {
+        let (rows, waiting, learned) = dictionary_rows(&Learning::default(), false);
+        assert_eq!(rows[0], Row::Hint("Learns from words you fix".into()));
+        assert_eq!(
+            rows[1],
+            item("", "Fix Last Dictation…", false, Some("pencil"))
+        );
+        assert!(waiting.is_empty() && learned.is_empty());
+    }
+
+    #[test]
+    fn learned_rows_are_checked_and_limited() {
+        let mut learning = Learning {
+            learned: vec!["Tauri".into()],
+            ..Default::default()
+        };
+        let (rows, _, payloads) = dictionary_rows(&learning, true);
+        assert_eq!(rows[0], Row::Hint("Learned 1 word from your fixes".into()));
+        assert!(rows.contains(&item(LEARNED_IDS[0], "Tauri", true, None)));
+        assert_eq!(payloads, ["Tauri"]);
+        learning.learned = (0..12).map(|n| format!("Term {n}")).collect();
+        let (rows, _, payloads) = dictionary_rows(&learning, true);
+        assert_eq!(payloads.len(), 8);
+        assert_eq!(
+            rows.last(),
+            Some(&item("dictionary-edit", "All Learned Words…", false, None))
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, Row::Item { checked: true, .. }))
+                .count(),
+            8
+        );
+    }
+
+    #[test]
+    fn waiting_row_shows_heard_form() {
+        let learning = Learning {
+            waiting: vec![crate::learn::Waiting {
+                term: "Supabase".into(),
+                heard: vec!["superbase".into()],
+                from: vec![],
+            }],
+            ..Default::default()
+        };
+        let (rows, waiting, _) = dictionary_rows(&learning, true);
+        assert!(rows.contains(&item(
+            WAIT_IDS[0],
+            "Supabase  · heard \"superbase\"",
+            false,
+            None
+        )));
+        assert_eq!(waiting, ["Supabase"]);
+    }
 }
