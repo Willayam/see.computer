@@ -21,13 +21,14 @@ pub fn log(folder: &Path, event: &str) {
         .append(true)
         .open(path)
     {
-        let _ = writeln!(
-            file,
-            "{}\t{}\t{}",
+        // One write per line, so lines from two threads never interleave.
+        let line = format!(
+            "{}\t{}\t{}\n",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
             folder.file_name().unwrap_or_default().to_string_lossy(),
             event
         );
+        let _ = file.write_all(line.as_bytes());
     }
 }
 
