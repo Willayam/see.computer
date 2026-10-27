@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -102,6 +103,7 @@ fn step(status: &Status, input: Input, autostart: bool, now_ms: i64) -> (Status,
 #[derive(Clone)]
 pub struct Meetings {
     tx: Sender<Input>,
+    notes_tx: Sender<PathBuf>,
     status: Arc<Mutex<Status>>,
     watcher: Watcher,
 }
@@ -128,6 +130,15 @@ impl Meetings {
     pub fn toggle(&self) {
         let _ = self.tx.send(Input::Toggle);
     }
+    pub fn retry(&self, folder: &Path) -> Result<(), String> {
+        requeue(folder)?;
+        notes::log(folder, "queued by Try again");
+        self.notes_tx
+            .send(folder.to_path_buf())
+            .map_err(|_| "Meetings are not running".to_owned())?;
+        notify(&self.watcher);
+        Ok(())
+    }
     pub fn quit(&self) {
         let _ = self.tx.send(Input::Quit);
     }
@@ -138,6 +149,16 @@ impl Meetings {
             .clone()
     }
 }
+fn requeue(folder: &Path) -> Result<(), String> {
+    let mut manifest = folder::read(folder).ok_or("This meeting has no manifest")?;
+    if manifest.state != State::Failed {
+        return Err("Only a failed meeting can be transcribed again".to_owned());
+    }
+    manifest.state = State::Transcribing;
+    manifest.error = None;
+    folder::write(folder, &manifest).map_err(|error| error.to_string())
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -182,15 +203,16 @@ fn sweep(root: &std::path::Path) -> Vec<std::path::PathBuf> {
 
 pub fn spawn(pill: Sender<PillEvent>, autostart: Arc<AtomicBool>) -> (Meetings, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel();
+    let (notes_tx, notes_rx) = mpsc::channel::<PathBuf>();
     let status = Arc::new(Mutex::new(Status::Idle));
     let watcher: Watcher = Arc::new(Mutex::new(None));
     let handle = Meetings {
         tx,
+        notes_tx: notes_tx.clone(),
         status: status.clone(),
         watcher: watcher.clone(),
     };
     let thread = qos::spawn("see-meetings", Class::Upkeep, move || {
-        let (notes_tx, notes_rx) = mpsc::channel::<std::path::PathBuf>();
         let notes_pill = pill.clone();
         let notes_watcher = watcher.clone();
         let notes_thread = qos::spawn("see-meeting-notes", Class::Upkeep, move || {
@@ -304,6 +326,35 @@ mod tests {
         name: "Slack",
         kind: Kind::Native,
     };
+    #[test]
+    fn requeue_only_failed_meetings() {
+        let root = std::env::temp_dir().join(format!(
+            "see-meeting-retry-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert_eq!(requeue(&root).unwrap_err(), "This meeting has no manifest");
+        let folder = folder::create(&root, Some("Zoom"), 1_781_000_000_000).unwrap();
+        let mut manifest = folder::read(&folder).unwrap();
+        manifest.state = State::Failed;
+        manifest.error = Some("Transcription failed".to_owned());
+        folder::write(&folder, &manifest).unwrap();
+        requeue(&folder).unwrap();
+        manifest.state = State::Transcribing;
+        manifest.error = None;
+        assert_eq!(folder::read(&folder), Some(manifest.clone()));
+
+        manifest.state = State::Done;
+        folder::write(&folder, &manifest).unwrap();
+        assert_eq!(
+            requeue(&folder).unwrap_err(),
+            "Only a failed meeting can be transcribed again"
+        );
+        assert_eq!(folder::read(&folder), Some(manifest));
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn reducer_rules() {
         let recording = Status::Recording {

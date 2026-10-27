@@ -280,6 +280,9 @@ h1.title {
 .notice strong { color: var(--ink); font-weight: 500; }
 .notice.rec { background: color-mix(in srgb, var(--rec) 9%, transparent); }
 .notice.bad { background: color-mix(in srgb, var(--rec) 9%, transparent); }
+.notice.bad > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.notice.bad .act { flex: 0 0 auto; align-self: center; }
+.notice.bad .act svg { font-size: 15px; margin-top: 0; color: inherit; }
 .notice svg { flex: 0 0 auto; font-size: 18px; margin-top: 1px; color: var(--ink); }
 .notice.rec svg, .notice.bad svg { color: var(--rec); }
 

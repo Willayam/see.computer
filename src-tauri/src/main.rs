@@ -136,6 +136,7 @@ fn main() {
             library::library_items,
             library::library_copy,
             library::library_reveal,
+            library::library_retry,
             library::library_fix,
             dictionary::dictionary_load,
             dictionary::dictionary_stamp,
@@ -146,6 +147,7 @@ fn main() {
             library::attach(app.handle());
             tauri::Manager::manage(app, setup_history.clone());
             tauri::Manager::manage(app, setup_ledger.clone());
+            tauri::Manager::manage(app, setup_meetings.clone());
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             updater.attach(app.handle());
             let cancel_app = app.handle().clone();

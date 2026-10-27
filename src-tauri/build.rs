@@ -47,6 +47,7 @@ fn main() {
             "library_items",
             "library_copy",
             "library_reveal",
+            "library_retry",
             "library_fix",
             "dictionary_load",
             "dictionary_stamp",

@@ -350,6 +350,23 @@ pub fn library_reveal(path: String, history: State<'_, History>) -> Result<(), S
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub fn library_retry(
+    folder: String,
+    meetings: State<'_, crate::meeting::controller::Meetings>,
+) -> Result<(), String> {
+    let folder = Path::new(&folder)
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if !crate::paths::documents()
+        .canonicalize()
+        .is_ok_and(|root| folder.starts_with(root))
+    {
+        return Err("path is outside the Library".to_owned());
+    }
+    meetings.retry(&folder)
+}
+
 /// Fixes one transcript line where the Library shows it, then teaches the
 /// learner from the fix, as the Fix dialog did. Dictations are rewritten by
 /// the history thread, which owns the day files; a finished meeting's
