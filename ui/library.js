@@ -194,7 +194,8 @@
     if (i.state === "recording") return `<div class="notice rec">${ICON.rec}<div><strong>Recording this call.</strong> New lines appear during the call. The transcript and audio appear here when processing finishes.</div></div>`;
     if (i.state === "transcribing") return `<div class="notice">${ICON.spin}<div><strong>Transcribing ${fmt.dur(i.durationMs)} of audio.</strong> The transcript will appear here when it is ready.</div></div>`;
     if (i.state === "cloud") return `<div class="notice">${ICON.spin}<div><strong>Downloading from iCloud.</strong> macOS moved this file to iCloud to free up space on this Mac. It appears here once it downloads.</div></div>`;
-    if (i.state === "failed") return `<div class="notice bad">${ICON.warn}<div><strong>Transcription failed.</strong> ${esc(i.error || "The audio is still in the folder.")}</div><button class="act" data-act="retry">${ICON.retry}<span>Try again</span></button></div>`;
+    // A meeting with no end time was cut off mid-recording and has nothing to transcribe again.
+    if (i.state === "failed") return `<div class="notice bad">${ICON.warn}<div><strong>Transcription failed.</strong> ${esc(i.error || "The audio is still in the folder.")}</div>${i.durationMs == null ? "" : `<button class="act" data-act="retry">${ICON.retry}<span>Try again</span></button>`}</div>`;
     return "";
   }
 

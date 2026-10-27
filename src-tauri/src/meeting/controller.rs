@@ -154,6 +154,11 @@ fn requeue(folder: &Path) -> Result<(), String> {
     if manifest.state != State::Failed {
         return Err("Only a failed meeting can be transcribed again".to_owned());
     }
+    // A recording cut off by a crash never got its WAV headers finished, so
+    // the tracks read as empty and a retry would mark the meeting done.
+    if manifest.ended_ms.is_none() {
+        return Err("This recording never finished, so its audio cannot be read".to_owned());
+    }
     manifest.state = State::Transcribing;
     manifest.error = None;
     folder::write(folder, &manifest).map_err(|error| error.to_string())
@@ -339,6 +344,15 @@ mod tests {
         let folder = folder::create(&root, Some("Zoom"), 1_781_000_000_000).unwrap();
         let mut manifest = folder::read(&folder).unwrap();
         manifest.state = State::Failed;
+        manifest.error = Some("see.computer quit while this meeting was recording".to_owned());
+        folder::write(&folder, &manifest).unwrap();
+        assert_eq!(
+            requeue(&folder).unwrap_err(),
+            "This recording never finished, so its audio cannot be read"
+        );
+        assert_eq!(folder::read(&folder), Some(manifest.clone()));
+
+        manifest.ended_ms = Some(manifest.started_ms + 60_000);
         manifest.error = Some("Transcription failed".to_owned());
         folder::write(&folder, &manifest).unwrap();
         requeue(&folder).unwrap();
