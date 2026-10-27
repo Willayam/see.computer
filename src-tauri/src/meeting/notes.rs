@@ -7,12 +7,51 @@ use crate::mic::Audio16k;
 use super::folder::{self, State, MARKDOWN, THEM, YOU};
 use super::transcript;
 
+pub fn log(folder: &Path, event: &str) {
+    use std::io::Write;
+    if cfg!(test) {
+        return;
+    }
+    let path = crate::paths::meeting_log();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(
+            file,
+            "{}\t{}\t{}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            folder.file_name().unwrap_or_default().to_string_lossy(),
+            event
+        );
+    }
+}
+
 /// Transcribe both tracks and write meeting.md.
 pub fn write_notes(folder: &Path, engine: &mut dyn Engine) -> Result<PathBuf, String> {
     let manifest = folder::read(folder).ok_or("meeting manifest missing or invalid")?;
-    fetch(&folder.join(YOU), &folder.join(THEM))?;
+    if let Some(waited) = fetch(&folder.join(YOU), &folder.join(THEM))? {
+        log(
+            folder,
+            &format!("downloaded from iCloud in {} s", waited.as_secs()),
+        );
+    }
+    let started = Instant::now();
     let you = track(&folder.join(YOU), engine)?;
+    log(
+        folder,
+        &format!("{YOU} transcribed in {} s", started.elapsed().as_secs()),
+    );
+    let started = Instant::now();
     let them = track(&folder.join(THEM), engine)?;
+    log(
+        folder,
+        &format!("{THEM} transcribed in {} s", started.elapsed().as_secs()),
+    );
     let lines = transcript::merge(&you, &them);
     let markdown = folder.join(MARKDOWN);
     std::fs::write(&markdown, transcript::render(&manifest, &lines))
@@ -25,12 +64,14 @@ pub fn write_notes(folder: &Path, engine: &mut dyn Engine) -> Result<PathBuf, St
 /// 2026-10-27 every read made while iCloud was still evicting the file failed
 /// with "Operation timed out". Asking iCloud for the file and waiting until it
 /// is local worked in the same state.
-fn fetch(you: &Path, them: &Path) -> Result<(), String> {
+fn fetch(you: &Path, them: &Path) -> Result<Option<Duration>, String> {
     let mut left: Vec<_> = [you, them]
         .into_iter()
         .filter(|path| crate::library::evicted(path))
         .map(Path::to_path_buf)
         .collect();
+    let downloading = !left.is_empty();
+    let started = Instant::now();
     crate::library::download(&left);
     let deadline = Instant::now() + Duration::from_secs(30 * 60);
     while !left.is_empty() {
@@ -43,7 +84,7 @@ fn fetch(you: &Path, them: &Path) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(500));
         left.retain(|path| crate::library::evicted(path));
     }
-    Ok(())
+    Ok(downloading.then(|| started.elapsed()))
 }
 
 fn track(path: &Path, engine: &mut dyn Engine) -> Result<Vec<Segment>, String> {
@@ -90,7 +131,9 @@ fn track(path: &Path, engine: &mut dyn Engine) -> Result<Vec<Segment>, String> {
 
 /// Load an independent engine, write the notes, and record the result in the manifest.
 pub fn transcribe(folder: &Path) -> Result<PathBuf, String> {
-    let result = (|| {
+    log(folder, "started");
+    let started = Instant::now();
+    let mut result = (|| {
         let files = crate::engine::Models::default_root()
             .ensure(&mut |_| {})
             .map_err(|error| error.to_string())?;
@@ -108,7 +151,14 @@ pub fn transcribe(folder: &Path) -> Result<PathBuf, String> {
                 manifest.error = Some(error.clone());
             }
         }
-        folder::write(folder, &manifest).map_err(|error| error.to_string())?;
+        if let Err(error) = folder::write(folder, &manifest) {
+            result = Err(error.to_string());
+        }
+    }
+    let seconds = started.elapsed().as_secs();
+    match &result {
+        Ok(_) => log(folder, &format!("done in {seconds} s")),
+        Err(error) => log(folder, &format!("failed after {seconds} s: {error}")),
     }
     result
 }
