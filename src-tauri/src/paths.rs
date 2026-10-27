@@ -44,6 +44,11 @@ pub fn focus_log() -> PathBuf {
     app_support().join("focus-log.tsv")
 }
 
+/// One line per meeting transcription step.
+pub fn meeting_log() -> PathBuf {
+    app_support().join("meeting-log.tsv")
+}
+
 /// Where history goes when macOS denies Documents.
 pub fn history_fallback() -> PathBuf {
     app_support().join("history")

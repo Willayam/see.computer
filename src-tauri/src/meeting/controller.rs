@@ -163,7 +163,10 @@ fn sweep(root: &std::path::Path) -> Vec<std::path::PathBuf> {
             continue;
         };
         match manifest.state {
-            State::Transcribing => pending.push(path),
+            State::Transcribing => {
+                notes::log(&path, "queued at launch");
+                pending.push(path);
+            }
             State::Recording => {
                 manifest.state = State::Failed;
                 manifest.error = Some("see.computer quit while this meeting was recording".into());
@@ -257,6 +260,7 @@ pub fn spawn(pill: Sender<PillEvent>, autostart: Arc<AtomicBool>) -> (Meetings, 
                         if let Some(started) = recording.take() {
                             match started.stop(now) {
                                 Ok(folder) => {
+                                    notes::log(&folder, "queued after recording");
                                     let _ = notes_tx.send(folder);
                                 }
                                 Err(error) => {
