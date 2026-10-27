@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::engine::{Engine, Segment, Utterance};
 use crate::mic::Audio16k;
@@ -9,6 +10,7 @@ use super::transcript;
 /// Transcribe both tracks and write meeting.md.
 pub fn write_notes(folder: &Path, engine: &mut dyn Engine) -> Result<PathBuf, String> {
     let manifest = folder::read(folder).ok_or("meeting manifest missing or invalid")?;
+    fetch(&folder.join(YOU), &folder.join(THEM))?;
     let you = track(&folder.join(YOU), engine)?;
     let them = track(&folder.join(THEM), engine)?;
     let lines = transcript::merge(&you, &them);
@@ -16,6 +18,32 @@ pub fn write_notes(folder: &Path, engine: &mut dyn Engine) -> Result<PathBuf, St
     std::fs::write(&markdown, transcript::render(&manifest, &lines))
         .map_err(|error| error.to_string())?;
     Ok(markdown)
+}
+
+/// macOS evicts meeting audio from iCloud Documents when the disk fills. A
+/// plain read of an evicted track leaves the download to the kernel, and on
+/// 2026-10-27 every read made while iCloud was still evicting the file failed
+/// with "Operation timed out". Asking iCloud for the file and waiting until it
+/// is local worked in the same state.
+fn fetch(you: &Path, them: &Path) -> Result<(), String> {
+    let mut left: Vec<_> = [you, them]
+        .into_iter()
+        .filter(|path| crate::library::evicted(path))
+        .map(Path::to_path_buf)
+        .collect();
+    crate::library::download(&left);
+    let deadline = Instant::now() + Duration::from_secs(30 * 60);
+    while !left.is_empty() {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{} is still downloading from iCloud",
+                left[0].file_name().unwrap_or_default().to_string_lossy()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        left.retain(|path| crate::library::evicted(path));
+    }
+    Ok(())
 }
 
 fn track(path: &Path, engine: &mut dyn Engine) -> Result<Vec<Segment>, String> {

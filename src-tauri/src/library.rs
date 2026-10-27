@@ -267,7 +267,7 @@ pub(crate) fn fetch(history_root: &Path, wait: std::time::Duration) {
     });
 }
 
-fn download(paths: &[std::path::PathBuf]) {
+pub(crate) fn download(paths: &[std::path::PathBuf]) {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject};
     objc2::rc::autoreleasepool(|_| unsafe {
