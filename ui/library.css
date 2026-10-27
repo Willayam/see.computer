@@ -271,6 +271,12 @@ h1.title {
 .media img { max-height: 220px; }
 .media figcaption { margin-top: 5px; font: 400 11.5px/1.4 var(--mono); color: var(--faint); }
 
+.cloud-placeholder, .cloud-status {
+  background: var(--soft); color: var(--mute); border-radius: 8px; font-size: 13.5px;
+}
+.cloud-placeholder { display: grid; place-items: center; aspect-ratio: 16 / 10; width: 100%; }
+.cloud-status { padding: 6px 10px; }
+
 /* States */
 .notice {
   display: flex; gap: 12px; align-items: flex-start;

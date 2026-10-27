@@ -2,6 +2,7 @@
   const tauri = window.__TAURI__;
   let items = [];
   let loadVersion = 0;
+  const requestedDownloads = new Set();
   const $ = (sel, root = document) => root.querySelector(sel);
   const params = new URLSearchParams(location.search);
   const mediaUrl = (path) => esc(tauri.core.convertFileSrc(path));
@@ -187,7 +188,7 @@
     const tracks = i.kind === "meeting" && i.state !== "recording" ? i.media.filter((m) => m.kind === "audio") : [];
     if (!tracks.length) return "";
     return `<div class="audio">${tracks.map((m) =>
-      `<div class="audio-track ${m.speaker}"><span>${m.speaker}.wav</span><audio controls preload="none" src="${mediaUrl(m.path)}"></audio></div>`).join("")}</div>`;
+      `<div class="audio-track ${m.speaker}"><span>${m.speaker}.wav</span>${m.cloud ? '<div class="cloud-status">Downloading from iCloud</div>' : `<audio controls preload="none" src="${mediaUrl(m.path)}"></audio>`}</div>`).join("")}</div>`;
   }
 
   function notice(i) {
@@ -232,7 +233,7 @@
 
   function mediaEl(m) {
     const cap = m.kind === "clip" ? `Clip at ${fmt.offset(m.atMs)} · ${fmt.dur(m.durationMs)}` : `${m.kind === "shot" ? "Screenshot" : "Frame"} at ${fmt.offset(m.atMs)}`;
-    const body = m.kind === "clip"
+    const body = m.cloud ? '<div class="cloud-placeholder">Downloading from iCloud</div>' : m.kind === "clip"
       ? `<video controls preload="metadata" ${m.poster ? `poster="${mediaUrl(m.poster)}"` : ""} src="${mediaUrl(m.path)}"></video>`
       : `<img src="${mediaUrl(m.path)}" alt="${cap}" loading="lazy">`;
     return `<div class="line is-media"><span class="line-time">${fmt.offset(m.atMs)}</span><figure class="media">${body}<figcaption>${cap}</figcaption></figure></div>`;
@@ -275,6 +276,14 @@
       ${lines(i)}
       ${files(i)}
     </article>`;
+    if (i.media.some((m) => m.cloud) && !requestedDownloads.has(i.id)) {
+      requestedDownloads.add(i.id);
+      const paths = i.media.flatMap((m) => [m.path, m.poster]).filter(Boolean);
+      tauri.core.invoke("library_download", { paths }).catch((error) => {
+        requestedDownloads.delete(i.id);
+        toast(`Download failed: ${error}`);
+      });
+    }
     const fix = $(".fix", d);
     if (fix) {
       fix.addEventListener("input", () => { editing.draft = fix.value; });
