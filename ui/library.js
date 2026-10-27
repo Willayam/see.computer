@@ -23,6 +23,7 @@
     edit: '<svg viewBox="0 0 16 16"><path d="M10.5 3 13 5.5 6 12.5H3.5V10z"/><path d="M9 4.5 11.5 7"/></svg>',
     plus: '<svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>',
     minus: '<svg viewBox="0 0 16 16"><path d="M3 8h10"/></svg>',
+    retry: '<svg viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.5-3.6"/><path d="M12 2v3h-3"/></svg>',
   };
   const NOUN = { dictation: "Dictations", take: "Screen take", meeting: "Meeting" };
 
@@ -193,7 +194,8 @@
     if (i.state === "recording") return `<div class="notice rec">${ICON.rec}<div><strong>Recording this call.</strong> New lines appear during the call. The transcript and audio appear here when processing finishes.</div></div>`;
     if (i.state === "transcribing") return `<div class="notice">${ICON.spin}<div><strong>Transcribing ${fmt.dur(i.durationMs)} of audio.</strong> The transcript will appear here when it is ready.</div></div>`;
     if (i.state === "cloud") return `<div class="notice">${ICON.spin}<div><strong>Downloading from iCloud.</strong> macOS moved this file to iCloud to free up space on this Mac. It appears here once it downloads.</div></div>`;
-    if (i.state === "failed") return `<div class="notice bad">${ICON.warn}<div><strong>Transcription failed.</strong> ${esc(i.error || "The audio is still in the folder.")}</div></div>`;
+    // A meeting with no end time was cut off mid-recording and has nothing to transcribe again.
+    if (i.state === "failed") return `<div class="notice bad">${ICON.warn}<div><strong>Transcription failed.</strong> ${esc(i.error || "The audio is still in the folder.")}</div>${i.durationMs == null ? "" : `<button class="act" data-act="retry">${ICON.retry}<span>Try again</span></button>`}</div>`;
     return "";
   }
 
@@ -296,6 +298,7 @@
     if (btn.dataset.act === "copy-line") copy(i.lines[+btn.dataset.idx].text, btn, "Line copied");
     if (btn.dataset.act === "link") copy(i.share.url, btn, "Share link copied");
     if (btn.dataset.act === "finder") reveal(i.files.markdown || i.files.folder);
+    if (btn.dataset.act === "retry") retry(i, btn);
     if (btn.dataset.act === "fix") startFix(i.id, +btn.dataset.idx);
     if (btn.dataset.act === "fix-save") saveFix();
     if (btn.dataset.act === "fix-cancel") { editing = null; renderDetail(); }
@@ -334,6 +337,15 @@
       toast(msg);
       setTimeout(() => { btn.classList.remove("done"); btn.innerHTML = prev; }, 1400);
     } catch (error) { toast(`Copy failed: ${error}`); }
+  }
+
+  async function retry(i, btn) {
+    btn.disabled = true;
+    try { await tauri.core.invoke("library_retry", { folder: i.files.folder }); }
+    catch (error) {
+      btn.disabled = false;
+      toast(`Retry failed: ${error}`);
+    }
   }
 
   async function reveal(path) {
