@@ -45,6 +45,7 @@ struct Media {
     speaker: Option<&'static str>,
     path: String,
     poster: Option<String>,
+    cloud: bool,
 }
 
 #[derive(Serialize)]
@@ -172,6 +173,29 @@ pub async fn library_items(history: State<'_, History>) -> Result<Vec<Item>, Str
     let root = history.root();
     fetch(&root, std::time::Duration::from_secs(3));
     Ok(items(&root))
+}
+
+#[tauri::command]
+pub async fn library_download(paths: Vec<String>) {
+    let Ok(root) = crate::paths::documents().canonicalize() else {
+        return;
+    };
+    let paths: Vec<_> = paths
+        .into_iter()
+        .filter_map(|path| Path::new(&path).canonicalize().ok())
+        .filter(|path| path.starts_with(&root) && evicted(path))
+        .collect();
+    if paths.is_empty() {
+        return;
+    }
+    download(&paths);
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        while paths.iter().any(|path| evicted(path)) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        changed();
+    });
 }
 
 /// When the disk fills, macOS moves files in an iCloud Documents folder to
@@ -653,6 +677,7 @@ fn meeting(path: &Path) -> Option<Item> {
                 speaker: Some(speaker),
                 path: path_string(&file),
                 poster: None,
+                cloud: evicted(&file),
             })
         })
         .collect();
@@ -753,6 +778,7 @@ fn take(path: &Path) -> Option<Item> {
                         speaker: None,
                         path: path_string(&path.join(file)),
                         poster: None,
+                        cloud: evicted(&path.join(file)),
                     });
                 }
             }
@@ -776,6 +802,8 @@ fn take(path: &Path) -> Option<Item> {
                             .and_then(serde_json::Value::as_u64),
                         speaker: None,
                         path: path_string(&path.join(file)),
+                        cloud: evicted(&path.join(file))
+                            || poster.as_ref().is_some_and(|file| evicted(Path::new(file))),
                         poster,
                     });
                 }
@@ -796,6 +824,7 @@ fn take(path: &Path) -> Option<Item> {
                             speaker: None,
                             path: path_string(&path.join(file)),
                             poster: None,
+                            cloud: evicted(&path.join(file)),
                         });
                     }
                 }
@@ -879,6 +908,7 @@ fn bare_movie(path: &Path) -> Option<Item> {
             speaker: None,
             path: path_string(path),
             poster: None,
+            cloud: evicted(path),
         }],
         paste,
         files: Files {

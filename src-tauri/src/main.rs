@@ -134,6 +134,7 @@ fn main() {
         // replace the first.
         .invoke_handler(tauri::generate_handler![
             library::library_items,
+            library::library_download,
             library::library_copy,
             library::library_reveal,
             library::library_retry,
