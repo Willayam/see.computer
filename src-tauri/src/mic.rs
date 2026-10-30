@@ -86,7 +86,13 @@ enum Inner {
         channels: u16,
         liveness_timeout_ms: u64,
     },
-    Replay(Audio16k),
+    /// The file plays out at the speed it was recorded, so a replayed take
+    /// feeds the engine during the hold the way a live microphone does.
+    Replay {
+        audio: Audio16k,
+        armed_at: Instant,
+        sent: usize,
+    },
 }
 
 struct Shared {
@@ -104,7 +110,11 @@ impl Mic {
     pub fn open(source: Source) -> Result<Mic, MicError> {
         match source {
             Source::Replay(path) => Ok(Mic {
-                inner: Inner::Replay(Audio16k::from_wav(&path)?),
+                inner: Inner::Replay {
+                    audio: Audio16k::from_wav(&path)?,
+                    armed_at: Instant::now(),
+                    sent: 0,
+                },
                 resampler: None,
             }),
             Source::Default => {
@@ -129,7 +139,7 @@ impl Mic {
 
     pub fn is_live(&self) -> bool {
         match &self.inner {
-            Inner::Replay(_) => true,
+            Inner::Replay { .. } => true,
             Inner::Live {
                 shared,
                 liveness_timeout_ms,
@@ -150,7 +160,7 @@ impl Mic {
     /// hearing, or that macOS answers with silence, does.
     pub fn heard(&self) -> bool {
         match &self.inner {
-            Inner::Replay(audio) => audio.samples().iter().any(|sample| *sample != 0.0),
+            Inner::Replay { audio, .. } => audio.samples().iter().any(|sample| *sample != 0.0),
             Inner::Live { shared, .. } => shared.peak_bits.load(Ordering::Relaxed) != 0,
         }
     }
@@ -158,6 +168,10 @@ impl Mic {
     pub fn arm(&mut self) -> Armed {
         if let Some(resampler) = self.resampler.as_mut() {
             resampler.reset();
+        }
+        if let Inner::Replay { armed_at, sent, .. } = &mut self.inner {
+            *armed_at = Instant::now();
+            *sent = 0;
         }
         if let Inner::Live { shared, .. } = &self.inner {
             if let Ok(preroll) = shared.preroll.lock() {
@@ -173,6 +187,18 @@ impl Mic {
     }
 
     pub fn drain(&mut self, _armed: &Armed) -> Audio16k {
+        if let Inner::Replay {
+            audio,
+            armed_at,
+            sent,
+        } = &mut self.inner
+        {
+            let played = (armed_at.elapsed().as_secs_f64() * f64::from(RATE)) as usize;
+            let end = played.min(audio.samples().len()).max(*sent);
+            let block = audio.samples()[*sent..end].to_vec();
+            *sent = end;
+            return Audio16k::from_samples(block);
+        }
         let Inner::Live {
             shared, channels, ..
         } = &self.inner
@@ -195,7 +221,9 @@ impl Mic {
 
     pub fn disarm(&mut self, _armed: Armed) -> Audio16k {
         match &self.inner {
-            Inner::Replay(audio) => audio.clone(),
+            Inner::Replay { audio, sent, .. } => {
+                Audio16k::from_samples(audio.samples()[*sent..].to_vec())
+            }
             Inner::Live {
                 shared,
                 device_rate,

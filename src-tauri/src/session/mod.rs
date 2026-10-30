@@ -197,6 +197,8 @@ struct Controller {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     next_turn: u64,
+    /// The engine's number for the take now live, which its previews carry.
+    utterance: u64,
 }
 
 impl Controller {
@@ -235,6 +237,7 @@ impl Controller {
             tx: inbox.0,
             rx: inbox.1,
             next_turn: 0,
+            utterance: 0,
         }
     }
 
@@ -284,6 +287,13 @@ impl Controller {
         let message = msg_label(&msg);
         if let Msg::TriggerEdge { at, .. } = msg {
             self.trail.record_at(from, message, from, at);
+            return;
+        }
+        // Not trailed, since a take sends one every 400 ms or more.
+        if let Msg::Engine(engine::Event::Preview(utterance, text)) = msg {
+            if utterance == self.utterance && matches!(self.session, Session::Dictating { .. }) {
+                let _ = self.pill.send(PillEvent::Preview(text));
+            }
             return;
         }
         if matches!(msg, Msg::Quit) {
@@ -399,7 +409,7 @@ impl Controller {
                             }
                             let armed = mic.arm();
                             self.share_take = self.sharing.enabled();
-                            self.engine.begin_context(crate::context::begin());
+                            self.utterance = self.engine.begin_context(crate::context::begin());
                             self.engine.warm();
                             self.show(Activity::Listening);
                             Session::Dictating {
@@ -1182,6 +1192,7 @@ pub fn msg_label(message: &Msg) -> &'static str {
         Msg::UpdateAborted => "UpdateAborted",
         Msg::Engine(engine::Event::Progress(_)) => "EngineProgress",
         Msg::Engine(engine::Event::Ready(_)) => "EngineReady",
+        Msg::Engine(engine::Event::Preview(..)) => "EnginePreview",
         Msg::Engine(engine::Event::Done(_, _)) => "EngineDone",
         Msg::Packaged(_, Ok(_)) => "PackagedOk",
         Msg::Packaged(_, Err(_)) => "PackagedErr",

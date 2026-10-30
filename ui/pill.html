@@ -2,9 +2,13 @@
 <meta charset="utf-8">
 <style>
   html, body { margin: 0; background: transparent; overflow: hidden; }
-  #cv { position: fixed; inset: 0; width: 260px; height: 48px; }
+  /* The chip and its notices hold the bottom edge, where they sit in the
+     260x48 window, so they stay put in the larger window previews rest at. */
+  /* Width and offset come from JS (CV_W in the preview section): the capsule
+     grows to MAX_W and the canvas holds that plus a margin for the shadow. */
+  #cv { position: fixed; left: 50%; bottom: 0; height: 48px; }
   #pill {
-    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%) translateY(4px);
+    position: fixed; left: 50%; top: calc(100% - 24px); transform: translate(-50%, -50%) translateY(4px);
     padding: 8px 14px; border-radius: 999px; color: #fff; font: 500 13px/1 -apple-system, system-ui;
     background: rgba(20,20,22,.92); opacity: 0; transition: opacity .12s ease-out, transform .12s ease-out;
     display: flex; align-items: center; gap: 8px; white-space: nowrap;
@@ -70,10 +74,28 @@
         color: rgba(255,255,255,.38); transition: color .12s ease-out, background .12s ease-out; }
   #cx:hover { color: rgba(255,255,255,.92); background: rgba(255,255,255,.10); }
   #cx svg { width: 9px; height: 9px; }
-  body.carded #cv, body.carded #pill { display: none; }
+  body.carded #cv, body.carded #pill, body.carded #iwrap { display: none; }
+  /* ---- the words so far: inside the chip, to the right of the bars ---- */
+  /* The canvas draws the capsule; this is only the text, laid over the canvas's
+     exact rectangle (width and offset set from JS, from CV_W), so an x in the
+     canvas is the same x here. No background of its own, so there is never a
+     second shape. placeWords() writes the mask that clips the text at the
+     capsule's edges and the line's position, each frame the capsule moves.
+     Opacity follows the chip's own fade. */
+  #iwrap { position: fixed; left: 50%; bottom: 11px; height: 24px; opacity: 0; pointer-events: none; }
+  #iclip { position: absolute; inset: 0; overflow: hidden; }
+  /* Anchored at the right, because once the line is full its right end is
+     what stays put. placeWords() moves it with a transform; words arrive with a Web Animation (blurIn), not a CSS rule, so
+     the blur and its timing live with the other tunables. */
+  #iline { position: absolute; right: 0; top: 0; white-space: nowrap; will-change: transform;
+           font: 400 12px/24px -apple-system, system-ui, "SF Pro Text", Helvetica, sans-serif;
+           letter-spacing: -.003em; -webkit-font-smoothing: antialiased;
+           color: rgba(255,255,255,.5); transition: color .25s ease-out; }
+  #iclip.isettled #iline { color: rgba(255,255,255,.36); }
 </style>
 <canvas id="cv" role="img" aria-label="Dictation status"></canvas>
 <div id="pill"><span id="dot"></span><span id="text"></span></div>
+<div id="iwrap" aria-hidden="true"><div id="iclip"><div id="iline"></div></div></div>
 <div id="card"><div class="row" id="crow">
   <span class="cglyph" id="cglyph"></span><span id="cnote"></span><span id="csaid"></span>
   <button id="ccopy">Copy</button><span id="crule"></span>
@@ -100,6 +122,8 @@ const TUNE = { resp: 0.3, damp: 0.7, wilt: 0.5, thresh: 0.05, load: 1.5 };
 const DIMS = {
   armed: { w: 14, h: 14 }, rest: { w: 46, h: 19 },
   full: { w: 76, h: 24 }, load: { w: 20, h: 20 },
+  /* No fixed wide size: from the first preview word the capsule's width is capW
+     (preview section), which fits the line and only ever grows, up to MAX_W. */
 };
 const RED = [255, 59, 48], CYAN = [80, 200, 245];
 const WHITE = [255, 255, 255];
@@ -261,6 +285,197 @@ function hideCard() {
   const kind = cardKind;
   dismissTimer = setTimeout(() => window.__TAURI__.event.emit('pill-action', `dismiss-${kind}`), 340);
 }
+/* ---------- the preview: the words so far, in a capsule that grows with them ---------- */
+/* The words are DOM text over the canvas, one span per word, left-aligned
+   after the bars. The mask placeWords() writes each frame clips them at the
+   capsule's edges, so no glyph shows over the desktop. Once the line no
+   longer fits at MAX_W it pins PAD_R inside the right edge, and old words
+   step left and leave through the fade by the bars. Every preview redraws
+   from the first word that changed, and each redrawn word blurs in. */
+
+/* Tunables. Everything below derives from them. */
+const MAX_W = 320;           // the capsule stops growing here and the line starts stepping
+const CAP_H = 24;            // the talking chip's height, so growing is a change of width only
+const WIDE_PAD = 10;         // capsule edge to the bar cluster
+const CLUSTER_W = 54;        // the 13 bars, packed; same count as the talking chip
+const SLOT_GAP = 10;         // bar cluster to the first letter
+const PAD_R = 12;            // last letter to the capsule's right edge, at rest. 2 more than the
+                             // 10 on the left: the round cap curves in at the glyphs' top and
+                             // bottom, and a trailing comma or period carries little ink.
+const FADE_R = 6;            // the soft edge the capsule's right end uncovers words through
+const FADE_L_IN = 8;         // the left fade's width while the line grows. It sits before the
+                             // first letter, where nothing is, so the first glyph stays whole.
+const FADE_L = 32;           // the left fade once the line is full and steps: old words leave through it
+const BLUR_MS = 320, BLUR_PX = 2;             // a word's entrance, from opacity 0 and blur(2px), ease-out
+const STAGGER_MS = 45, STAGGER_MAX_MS = 270;  // each word of a burst starts this much after the one before
+const SETTLE_K = 18;         // per second: a step, and the left fade's widening, are 95% done after about 170 ms
+const CV_MARGIN = 26;        // canvas room each side of MAX_W for the shadow and the lock ring
+
+/* Derived. Change the tunables, not these. */
+const TEXT_X = WIDE_PAD + CLUSTER_W + SLOT_GAP;  // the first letter, from the capsule's left edge
+const EDGE_R = PAD_R - FADE_R;                   // the right fade ends where the text rests, so the
+                                                 // moving edge reveals a word and never cuts it
+const CV_W = MAX_W + 2 * CV_MARGIN, CX = CV_W / 2;  // the canvas, and the capsule's centre in it
+const fitW = w => TEXT_X + w + PAD_R;            // the capsule width that fits a line w wide
+
+const iwrapEl = document.getElementById('iwrap'), iclipEl = document.getElementById('iclip');
+const ilineEl = document.getElementById('iline');
+/* The text layer is the canvas's rectangle, so both share one x. */
+iwrapEl.style.width = CV_W + 'px'; iwrapEl.style.marginLeft = -CX + 'px';
+let previewWords = [];
+const still = matchMedia('(prefers-reduced-motion: reduce)');
+let wide = false, full = false, closing = false, shownAlpha = -1;
+let capW = 0;      // the capsule's target width; only ever grows within a take
+let openW = 0;     // capW after the first word: the bars gather over this first growth
+let lineW = 0;     // the line's measured width
+let stepX = 0;     // how far right of its rest the line sits; settles to 0
+let fadeU = 0;     // 0: the left fade sits before the text; 1: the 32 px exit fade. Eases once full.
+let spans = [];
+function makeSpan(word) {
+  const s = document.createElement('span');
+  s.className = 'iw';
+  s.textContent = word;
+  return s;
+}
+function addSpan(word) {
+  if (ilineEl.childNodes.length) ilineEl.appendChild(document.createTextNode(' '));
+  const s = makeSpan(word);
+  ilineEl.appendChild(s);
+  spans.push(s);
+  return s;
+}
+/* A word's entrance: from opacity 0 and blur(2px), 320 ms ease-out, held at the
+   start through the stagger delay. Reduced motion drops the blur. */
+function blurIn(s, delay) {
+  const from = { opacity: 0 }, to = { opacity: 1 };
+  if (!still.matches) { from.filter = `blur(${BLUR_PX}px)`; to.filter = 'blur(0px)'; }
+  s.animate([from, to], { duration: BLUR_MS, delay, easing: 'ease-out', fill: 'backwards' });
+}
+function apply(words, same) {
+  if (!words.length && !wide) return;
+  const W = store.sw.x, w0 = lineW;
+  /* Keep the complete raw line so its measured width has the same origin
+     before and after a rewrite, even when the changed word is offscreen. */
+  ilineEl.textContent = '';
+  spans = [];
+  const burst = [];
+  words.forEach((word, i) => {
+    const s = addSpan(word);
+    if (i >= same) burst.push(s);
+  });
+  lineW = ilineEl.getBoundingClientRect().width;
+  burst.forEach((s, k) => blurIn(s, Math.min(k * STAGGER_MS, STAGGER_MAX_MS)));
+  const fit = fitW(lineW);
+  if (!wide) { wide = true; openW = Math.min(MAX_W, Math.ceil(fit)); }
+  if (!full && fit > MAX_W) {
+    full = true;
+    /* The line turns from left-aligned to right-pinned without a jump: it is
+       pushed right by exactly how much it does not fit, then settles. */
+    if (!still.matches) stepX = fit - W;
+  } else if (full && !still.matches) {
+    /* Pinned at the right, the new word would shove the old ones left in this
+       frame. Push the line right by its width instead, and let it settle. */
+    stepX += lineW - w0;
+  }
+  capW = Math.max(capW, Math.min(MAX_W, Math.ceil(fit)));
+  if (still.matches) {
+    /* Reduced motion: the width snaps, the line does not slide. */
+    store.sw.x = capW; store.sw.v = 0; store.sh.x = CAP_H; store.sh.v = 0;
+    fadeU = full ? 1 : 0;
+  }
+  /* Compensate before the next paint. Width changes preserve the line's
+     left position, including a second rewrite during an unfinished step. */
+  placeWords(still.matches ? capW : W);
+}
+function showPreview(text) {
+  const words = text.split(/\s+/).filter(Boolean);
+  let same = 0;
+  while (same < words.length && words[same] === previewWords[same]) same++;
+  apply(words, same);
+  previewWords = words;
+}
+function settlePreview() {
+  if (!wide) return;
+  iclipEl.classList.add('isettled');
+}
+/* The words stay while the chip fades; the frame loop clears them once it is
+   gone, or at once if the next take starts before that. */
+function hidePreview() { if (wide) closing = true; else previewWords = []; }
+function finishHide() {
+  wide = false; full = false; closing = false;
+  capW = 0; openW = 0; lineW = 0; stepX = 0; fadeU = 0;
+  previewWords = [];
+  spans = [];
+  ilineEl.textContent = '';
+  ilineEl.style.transform = '';
+  placedMask = ''; placedTx = Infinity;   // so the next take's first frame is written even if it matches
+  iclipEl.classList.remove('isettled');
+  /* Snap the shell to its armed size while it is invisible, so the next take
+     blooms in from the small chip rather than shrinking down from the capsule. */
+  store.sw.x = DIMS.armed.w; store.sw.v = 0; store.sh.x = DIMS.armed.h; store.sh.v = 0;
+}
+/* Where the bars sit in a capsule W wide. Shared with draw(), and the words
+   start SLOT_GAP past where the cluster ends (TEXT_X). The bars gather over
+   the first growth, from the talking width to openW: u is 0 at the talking
+   chip and 1 once the cluster is at the left end, and from then on the
+   cluster rides the capsule's left edge, moving by half of each growth like
+   the words. The talking span is held at the talking width once the growth
+   starts, so the bars only ever move left, away from the words, and the
+   count stays at 13. */
+function clusterAt(W) {
+  const u = wide ? Math.max(0, Math.min(1, (W - DIMS.full.w) / Math.max(1, openW - DIMS.full.w))) : 0;
+  const Wt = wide ? Math.min(W, DIMS.full.w) : W;
+  const pad = Math.min(10, Math.max(4, Wt * 0.1)), spanW = Math.max(6, Wt - pad * 2);
+  const innerW = spanW + (CLUSTER_W - spanW) * u;
+  const x0 = (CX - spanW / 2) + ((CX - W / 2 + WIDE_PAD) - (CX - spanW / 2)) * u;
+  return { x0, innerW };
+}
+/* The text's mask and position for a capsule W wide, in the text layer's
+   coordinates (the canvas's). The mask is one gradient with four stops: the
+   left fade, then opaque, then the right fade, which ends EDGE_R inside the
+   capsule's right edge and starts where the text rests, so the growing edge
+   uncovers a word through it. The left fade sits before the first letter
+   while the line grows and moves into the text as the line turns full
+   (fadeU), where old words leave through it. The stops are kept in order, so
+   a slot narrower than its fades, early in the opening, is a soft sliver. */
+let placedMask = '', placedTx = Infinity;   /* Infinity, not NaN: a NaN compare is false and would skip the first write */
+function placeWords(W) {
+  const xL = CX - W / 2, xR = CX + W / 2, textX = xL + TEXT_X;
+  const a = textX - FADE_L_IN * (1 - fadeU), b = Math.max(a, textX + FADE_L * fadeU);
+  const d = Math.max(b, xR - EDGE_R), c = Math.max(b, d - FADE_R);
+  const mask = `linear-gradient(to right, transparent ${a.toFixed(1)}px, #000 ${b.toFixed(1)}px, `
+             + `#000 ${c.toFixed(1)}px, transparent ${d.toFixed(1)}px)`;
+  if (mask !== placedMask) {
+    placedMask = mask;
+    iclipEl.style.webkitMaskImage = mask;
+    iclipEl.style.maskImage = mask;
+  }
+  /* Left-aligned after the bars until full, then pinned PAD_R inside the right
+     edge. The line's box is anchored at the layer's right edge (CSS), so the
+     transform is the distance from there. */
+  const right = (full ? xR - PAD_R : textX + lineW) + stepX;
+  const tx = right - CV_W;
+  if (Math.abs(tx - placedTx) > 0.01) {
+    placedTx = tx;
+    ilineEl.style.transform = `translate3d(${tx.toFixed(2)}px,0,0)`;
+  }
+}
+/* Called every frame with the chip's geometry and the frame's dt: the step
+   and the left fade ease (95% in about 170 ms), the mask and the line follow
+   the capsule, and the text follows the chip's own fade out. */
+function syncWords(g, dt) {
+  if (closing && (g.sc < 0.02 || taking(st))) finishHide();
+  if (wide) {
+    if (stepX) { stepX -= stepX * Math.min(1, dt * SETTLE_K); if (Math.abs(stepX) < 0.2) stepX = 0; }
+    if (full && fadeU < 1) { fadeU += (1 - fadeU) * Math.min(1, dt * SETTLE_K); if (fadeU > 0.995) fadeU = 1; }
+    placeWords(g.W);
+  }
+  const a = wide ? Math.min(1, g.sc) : 0;
+  if (Math.abs(a - shownAlpha) < 0.004 && (a === 0) === (shownAlpha === 0)) return;
+  shownAlpha = a;
+  iwrapEl.style.opacity = a.toFixed(3);
+}
+
 copyEl.addEventListener('click', () => {
   if (carded && cardKind === 'fixed') {
     window.__TAURI__.event.emit('pill-action', 'review');
@@ -276,17 +491,24 @@ copyEl.addEventListener('click', () => {
 document.getElementById('cx').addEventListener('click', hideCard);
 
 window.__TAURI__.event.listen('pill', ({ payload: p }) => {
+  if (p.kind === 'preview') { showPreview(p.text); return; }
   clearTimeout(hideTimer);
-  if (p.kind === 'held' || p.kind === 'fixed') { showCard(p); return; }
+  if (p.kind === 'held' || p.kind === 'fixed') { hidePreview(); showCard(p); return; }
   if (carded) hideCard();
-  if (p.kind === 'hide') { activity = null; st = 'hidden'; clearText(); return; }
-  if (p.kind === 'show') { activity = p; applyActivity(p); return; }
+  if (p.kind === 'hide') { activity = null; st = 'hidden'; clearText(); hidePreview(); return; }
+  if (p.kind === 'show') {
+    activity = p;
+    applyActivity(p);
+    /* Released: keep the last raw preview, dimmed, while the final pass runs. */
+    if (st === 'transcribe') settlePreview();
+    return;
+  }
   // 'bars' and 'flash' both ride the same decay; only the shutter pinches.
   if (p.kind === 'shot') {
     fx[SHOT_FEEDBACK === 'shutter' ? 'shutter' : 'flash'] = 1;
     return;
   }
-  if (p.ends) { activity = null; st = 'hidden'; }
+  if (p.ends) { activity = null; st = 'hidden'; hidePreview(); }
   notice = true;
   showText(p.tone, p.text);
   hideTimer = setTimeout(() => {
@@ -342,10 +564,15 @@ function geom(dt) {
   const loading = st === 'transcribe' || st === 'save';
   store.pres += ((listening && talking ? 1 : 0) - store.pres) * Math.min(1, dt * (talking ? 7 : TUNE.wilt));
   const resp = TUNE.resp * (loading ? 0.72 : 1);
-  const K = Math.pow(2 * Math.PI / resp, 2), C = 2 * TUNE.damp * Math.sqrt(K);
+  /* The widen is critically damped: 170 px of travel would show the bloom's
+     usual overshoot as a bounce. */
+  const K = Math.pow(2 * Math.PI / resp, 2), C = 2 * (wide ? 1 : TUNE.damp) * Math.sqrt(K);
   store.sw.K = K; store.sw.C = C; store.sh.K = K; store.sh.C = C;
   let tw, th;
-  if (listening) {
+  /* Wide holds through talking, silence, the final pass and the fade out; capW
+     only ever grows within a take. finishHide() resets it unseen. */
+  if (wide) { tw = capW; th = CAP_H; }
+  else if (listening) {
     tw = DIMS.rest.w + (DIMS.full.w - DIMS.rest.w) * store.pres;
     th = DIMS.rest.h + (DIMS.full.h - DIMS.rest.h) * store.pres;
   } else if (loading) { tw = DIMS.load.w; th = DIMS.load.h; }
@@ -358,7 +585,9 @@ function geom(dt) {
 /* ---------- drawing ---------- */
 const cv = document.getElementById('cv');
 const dpr = window.devicePixelRatio || 2;
-cv.width = 260 * dpr; cv.height = 48 * dpr;
+cv.width = CV_W * dpr; cv.height = 48 * dpr;
+/* Sized from the same constants as the capsule, so a new MAX_W needs no CSS change. */
+cv.style.width = CV_W + 'px'; cv.style.marginLeft = -CX + 'px';
 const ctx = cv.getContext('2d');
 function bodyShell(cx, cy, w, h, r, ring) {
   ctx.save();
@@ -387,7 +616,7 @@ function fillGlow(x, y, w, h, r, a, col) {
   ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill();
   ctx.restore();
 }
-let last = performance.now();
+let last = performance.now(), fadeGlyph = 'bars';
 function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
   const t = now / 1000;
@@ -409,30 +638,39 @@ function frame(now) {
     draw(t, g.W, H, morph, pinch);
     ctx.globalAlpha = 1;
   }
+  syncWords(g, dt);
   requestAnimationFrame(frame);
 }
 function draw(t, W, H, morph, pinch) {
-  const cx = 130, cy = 25;
+  const cx = CX, cy = 25;
   // A shot whitens the sound itself rather than the chip behind it, so the
   // thing that flashes is the thing that was listening.
   const lift = SHOT_FEEDBACK === 'bars' && fx.flash > 0 ? Math.pow(fx.flash, 0.55) : 0;
   const accent = mix(morphColor(morph), WHITE, lift);
   bodyShell(cx, cy, W, H, Math.min(W, H) / 2, (st === 'lock' || activity?.activity === 'recording-locked') ? accent : null);
-  const pad = Math.min(10, Math.max(4, W * 0.1)), innerW = Math.max(6, W - pad * 2);
-  const maxBarH = H - 10, x0 = cx - innerW / 2, lineTh = 2.5;
-  if (st === 'transcribe' || st === 'save') {
+  /* Past the talking width the sound moves from the middle to a cluster at the
+     left end, in step with the first growth, and the dot goes with it.
+     clusterAt() holds the geometry, since the words start where it ends. */
+  const { x0, innerW } = clusterAt(W);
+  const fx0 = x0 + innerW / 2;
+  const maxBarH = H - 10, lineTh = 2.5;
+  /* While the wide capsule fades out, `st` is already hidden; keep whatever
+     was drawn last, or the dot would turn into a 54 px line for the fade. */
+  const dot = st === 'transcribe' || st === 'save' || (st === 'hidden' && wide && fadeGlyph === 'dot');
+  if (st !== 'hidden') fadeGlyph = dot ? 'dot' : 'bars';
+  if (dot) {
     /* breathing bloom: swells and settles, no rotation */
     const speed = (st === 'save' ? 1.7 : 1) * TUNE.load;
     const r = Math.max(3, Math.min(W, H) / 2 - 5);
     const p = 0.5 + 0.5 * Math.sin(t * speed * Math.PI * 1.6);
-    const grad = ctx.createRadialGradient(cx, cy, 0.4, cx, cy, r * (0.5 + 0.6 * p));
+    const grad = ctx.createRadialGradient(fx0, cy, 0.4, fx0, cy, r * (0.5 + 0.6 * p));
     grad.addColorStop(0, css(accent, 0.55 + 0.35 * p)); grad.addColorStop(1, css(accent, 0));
     ctx.fillStyle = grad;
-    ctx.beginPath(); ctx.arc(cx, cy, r + 3, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(fx0, cy, r + 3, 0, 7); ctx.fill();
     ctx.save();
     ctx.shadowColor = css(accent, 0.9); ctx.shadowBlur = 7;
     ctx.fillStyle = css(accent, 0.75 + 0.25 * p);
-    ctx.beginPath(); ctx.arc(cx, cy, 1.9, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(fx0, cy, 1.9, 0, 7); ctx.fill();
     ctx.restore();
     return;
   }
