@@ -1,6 +1,7 @@
 //! Speech to text through one worker-owned Parakeet engine.
 
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Sender, TryRecvError};
+use std::time::{Duration, Instant};
 
 use crate::mic::Audio16k;
 use crate::text::Text;
@@ -23,6 +24,16 @@ const CHUNK_TARGET: usize = 20 * SAMPLE_RATE;
 const CHUNK_MAX: usize = 30 * SAMPLE_RATE;
 const CUT_SEARCH: usize = 5 * SAMPLE_RATE;
 const CUT_WINDOW: usize = SAMPLE_RATE / 5;
+/// A preview waits for this much new audio, or for three times what the last
+/// one cost to decode if that is longer. A long take, whose pending chunk takes
+/// half a second to read, then leaves the engine idle two thirds of the time.
+const PREVIEW_STEP: Duration = Duration::from_millis(400);
+/// Less than this and the model has too little to say anything sensible.
+const PREVIEW_MIN: usize = SAMPLE_RATE * 6 / 10;
+
+pub fn previews_enabled() -> bool {
+    std::env::var("SEE_COMPUTER_PREVIEW").as_deref() != Ok("0")
+}
 
 /// One spoken sentence with its position in the audio.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +67,9 @@ pub struct Utterance {
     segments: Vec<Segment>,
     texts: Vec<String>,
     chunk_error: bool,
+    /// Length of `whole` when the last preview ran, and what that preview cost.
+    previewed: usize,
+    preview_cost: Duration,
 }
 
 impl Utterance {
@@ -109,6 +123,31 @@ impl Utterance {
         result
     }
 
+    pub fn preview_due(&self) -> bool {
+        let step = PREVIEW_STEP.max(self.preview_cost * 3).as_secs_f64() * SAMPLE_RATE as f64;
+        !self.chunk_error
+            && self.pending.len() >= PREVIEW_MIN
+            && (self.whole.len() - self.previewed) as f64 >= step
+    }
+
+    /// What the take reads as so far: the chunks already transcribed, then a
+    /// throwaway pass over the audio not yet cut into one. Nothing it decodes
+    /// is kept, so the final transcription is exactly what it was.
+    pub fn preview(&mut self, engine: &mut dyn Engine) -> Option<String> {
+        let started = Instant::now();
+        self.previewed = self.whole.len();
+        let tail = engine
+            .transcribe(&Audio16k::from_samples(self.pending.clone()))
+            .ok();
+        self.preview_cost = started.elapsed();
+        let mut parts = self.texts.clone();
+        parts.extend(
+            tail.and_then(|tail| tail.text)
+                .map(|text| text.as_str().to_owned()),
+        );
+        (!parts.is_empty()).then(|| parts.join(" "))
+    }
+
     fn append(&mut self, mut transcription: Transcription, offset_samples: usize) {
         let offset_ms = offset_samples as u64 * 1_000 / SAMPLE_RATE as u64;
         for segment in &mut transcription.segments {
@@ -128,6 +167,8 @@ impl Utterance {
         self.segments.clear();
         self.texts.clear();
         self.chunk_error = false;
+        self.previewed = 0;
+        self.preview_cost = Duration::ZERO;
     }
 }
 
@@ -216,6 +257,10 @@ pub struct JobId(u64);
 pub enum Event {
     Progress(Progress),
     Ready(Result<(), EngineError>),
+    /// The words so far, while the take is still live. Tagged with the
+    /// utterance `begin_context` numbered, so one still in flight when a take
+    /// was cancelled cannot land on the next.
+    Preview(u64, String),
     Done(JobId, Result<Transcription, EngineError>),
 }
 
@@ -225,7 +270,7 @@ enum Job {
     /// reclaims the mmapped weights while the app sits idle, and paying the
     /// page-in during the recording hides it from the release-to-paste path.
     Warm,
-    Context(std::sync::mpsc::Receiver<Vec<crate::context::Term>>),
+    Context(u64, std::sync::mpsc::Receiver<Vec<crate::context::Term>>),
     Feed(Audio16k),
     Discard,
     Transcribe(JobId, Audio16k),
@@ -234,6 +279,7 @@ enum Job {
 pub struct Worker {
     jobs: Sender<Job>,
     next: u64,
+    utterance: u64,
     context_used: std::sync::Arc<std::sync::Mutex<Vec<crate::context::Term>>>,
 }
 
@@ -283,7 +329,17 @@ impl Worker {
             };
             let mut utterance = Utterance::default();
             let mut context: Option<std::sync::mpsc::Receiver<Vec<crate::context::Term>>> = None;
-            while let Ok(job) = rx.recv() {
+            let previews = previews_enabled();
+            let mut current = 0;
+            let mut queued = None;
+            loop {
+                let job = match queued.take() {
+                    Some(job) => job,
+                    None => match rx.recv() {
+                        Ok(job) => job,
+                        Err(_) => break,
+                    },
+                };
                 if let Some(receiver) = &context {
                     if let Ok(terms) = receiver.try_recv() {
                         engine.set_context(&terms);
@@ -298,7 +354,8 @@ impl Worker {
                     Job::Warm => {
                         let _ = engine.transcribe(&Audio16k::silence(1.0));
                     }
-                    Job::Context(receiver) => {
+                    Job::Context(id, receiver) => {
+                        current = id;
                         utterance.reset();
                         engine.set_context(&[]);
                         used.lock()
@@ -321,11 +378,26 @@ impl Worker {
                         }
                     }
                 }
+                // Only with nothing else waiting, so a release already in the
+                // queue never sits behind a preview. One that arrives during
+                // the pass still waits for it, at most one preview's cost.
+                if previews && utterance.preview_due() {
+                    match rx.try_recv() {
+                        Ok(job) => queued = Some(job),
+                        Err(TryRecvError::Empty) => {
+                            if let Some(text) = utterance.preview(engine.as_mut()) {
+                                let _ = reply.send(Event::Preview(current, text).into());
+                            }
+                        }
+                        Err(TryRecvError::Disconnected) => break,
+                    }
+                }
             }
         });
         Worker {
             jobs,
             next: 0,
+            utterance: 0,
             context_used,
         }
     }
@@ -345,8 +417,14 @@ impl Worker {
         let _ = self.jobs.send(Job::Warm);
     }
 
-    pub fn begin_context(&self, context: std::sync::mpsc::Receiver<Vec<crate::context::Term>>) {
-        let _ = self.jobs.send(Job::Context(context));
+    /// Starts an utterance and returns the number its previews carry.
+    pub fn begin_context(
+        &mut self,
+        context: std::sync::mpsc::Receiver<Vec<crate::context::Term>>,
+    ) -> u64 {
+        self.utterance = self.utterance.wrapping_add(1);
+        let _ = self.jobs.send(Job::Context(self.utterance, context));
+        self.utterance
     }
 
     pub fn context_used(&self) -> Vec<crate::context::Term> {
@@ -410,7 +488,7 @@ mod tests {
                     break;
                 }
                 Event::Ready(result) => result.expect("ready"),
-                Event::Progress(_) => {}
+                Event::Progress(_) | Event::Preview(..) => {}
             }
         }
     }
@@ -475,6 +553,25 @@ mod tests {
         assert_eq!(actual.text, expected.text);
         assert_eq!(actual.segments, expected.segments);
         assert_eq!(utterance_engine.calls, plain_engine.calls);
+    }
+
+    #[test]
+    fn preview_reads_pending_audio_and_leaves_the_final_pass_alone() {
+        let mut engine = Counting::default();
+        let mut utterance = Utterance::default();
+        utterance.feed(&mut engine, &Audio16k::silence(0.5));
+        assert!(!utterance.preview_due());
+        utterance.feed(&mut engine, &Audio16k::silence(0.1));
+        assert!(utterance.preview_due());
+        assert_eq!(utterance.preview(&mut engine).as_deref(), Some("call 1"));
+        assert!(!utterance.preview_due());
+
+        let result = utterance
+            .finish(&mut engine, &Audio16k::silence(0.1))
+            .expect("finish");
+        assert_eq!(engine.calls, [PREVIEW_MIN, PREVIEW_MIN + SAMPLE_RATE / 10]);
+        assert_eq!(result.text.expect("text").as_str(), "call 2");
+        assert_eq!(result.segments.len(), 1);
     }
 
     #[test]

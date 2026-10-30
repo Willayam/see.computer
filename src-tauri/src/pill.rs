@@ -24,6 +24,8 @@ pub enum PillEvent {
     /// Read-back recorded a fix to a word the learner can use. Waits for the
     /// pill to be idle, so it never covers a dictation.
     Fixed(Fix),
+    /// What the take reads as so far, shown in the chip beside the bars.
+    Preview(String),
     Hide,
 }
 
@@ -159,6 +161,9 @@ enum Wire {
         text: String,
         note: &'static str,
     },
+    Preview {
+        text: String,
+    },
     Hide,
 }
 
@@ -219,11 +224,23 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                 fix = Some(next);
                 continue;
             }
+            if let PillEvent::Preview(text) = event {
+                // One that lost the race with the end of its take has
+                // nothing left to describe.
+                if current.is_some() {
+                    let _ = app.emit_to("pill", "pill", Wire::Preview { text });
+                    last_wire = std::time::Instant::now();
+                }
+                continue;
+            }
             let starts_activity = matches!(event, PillEvent::Show(_)) && current.is_none();
             match &event {
                 PillEvent::Show(activity) => current = Some(*activity),
                 PillEvent::Finish(_) | PillEvent::Hide | PillEvent::Held(_) => current = None,
-                PillEvent::Shot | PillEvent::Flash(_) | PillEvent::Fixed(_) => {}
+                PillEvent::Shot
+                | PillEvent::Flash(_)
+                | PillEvent::Fixed(_)
+                | PillEvent::Preview(_) => {}
             }
             let wire = match event {
                 PillEvent::Show(activity) => Wire::Show(activity),
@@ -245,14 +262,14 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                     Wire::Held(held)
                 }
                 PillEvent::Hide => Wire::Hide,
-                PillEvent::Fixed(_) => continue,
+                PillEvent::Fixed(_) | PillEvent::Preview(_) => continue,
             };
             if starts_activity {
                 let dispatcher = app.clone();
                 let window = window.clone();
                 let _ = dispatcher.run_on_main_thread(move || move_to_cursor_monitor(&window));
             }
-            // Anything that is not the card returns the window to the chip's
+            // Anything that is not the card returns the window to its resting
             // size and makes it click-through again.
             if !matches!(wire, Wire::Held(_)) {
                 if let Ok(mut slot) = card.lock() {
@@ -260,7 +277,7 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                         let dispatcher = app.clone();
                         let window = window.clone();
                         let _ = dispatcher.run_on_main_thread(move || {
-                            resize_and_centre(&window, (IDLE_SIZE.0 as f64, IDLE_SIZE.1 as f64));
+                            resize_and_centre(&window, rest_size());
                             set_click_through(&window, true);
                         });
                     }
@@ -426,7 +443,7 @@ fn attach_card_listeners(
                 }
                 let window = acting_window.clone();
                 let _ = acting.run_on_main_thread(move || {
-                    resize_and_centre(&window, (IDLE_SIZE.0 as f64, IDLE_SIZE.1 as f64));
+                    resize_and_centre(&window, rest_size());
                     set_click_through(&window, true);
                 });
             }
@@ -456,6 +473,23 @@ fn set_click_through(window: &WebviewWindow, through: bool) {
 
 /// The chip's own size, and the ceiling the card may stretch to.
 const IDLE_SIZE: (u32, u32) = (260, 48);
+/// Wider than the canvas `pill.html` derives from `MAX_W` and `CV_MARGIN`,
+/// which holds the capsule at its widest with its shadow and lock ring.
+const PREVIEW_SIZE: (u32, u32) = (520, 150);
+
+/// The window's size whenever no card is up. With previews on it is already
+/// big enough for the widest capsule before a take starts, so a take never
+/// resizes the window under the chip. The webview repaints a frame after the
+/// window grows, and in that frame the chip would jump. The window is
+/// transparent and click-through, so the extra room costs nothing.
+fn rest_size() -> (f64, f64) {
+    let (width, height) = if crate::engine::previews_enabled() {
+        PREVIEW_SIZE
+    } else {
+        IDLE_SIZE
+    };
+    (width as f64, height as f64)
+}
 
 /// Per-frame band energies for the pill's spectrum, on the prototype's scale:
 /// 24 log-spaced bands 85 Hz..8 kHz, each already normalized 0..1.
@@ -566,7 +600,7 @@ fn resize_and_centre(window: &WebviewWindow, logical: (f64, f64)) {
 }
 
 fn move_to_cursor_monitor(window: &WebviewWindow) {
-    place(window, (IDLE_SIZE.0 as f64, IDLE_SIZE.1 as f64));
+    resize_and_centre(window, rest_size());
 }
 
 /// Centres on the monitor under the cursor, sized by the caller. The size is

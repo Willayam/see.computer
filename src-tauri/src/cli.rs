@@ -9,6 +9,7 @@ use crate::engine::{EngineError, Transcription};
 pub enum Cmd {
     Transcribe(PathBuf),
     TranscribeLive(PathBuf),
+    TranscribePreview(PathBuf),
     Clip(PathBuf),
     /// The manifest, and the vocabulary to score terms against when it should
     /// differ from the one the decoder is boosting, as in a boost-off run.
@@ -22,6 +23,7 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
     match args.next().as_deref() {
         Some("transcribe") => match args.next().as_deref() {
             Some("--live") => args.next().map(PathBuf::from).map(Cmd::TranscribeLive),
+            Some("--preview") => args.next().map(PathBuf::from).map(Cmd::TranscribePreview),
             Some(path) => Some(Cmd::Transcribe(PathBuf::from(path))),
             None => None,
         },
@@ -44,6 +46,7 @@ pub fn run(cmd: Cmd) -> i32 {
     match cmd {
         Cmd::Transcribe(path) => transcribe(path),
         Cmd::TranscribeLive(path) => transcribe_live(path),
+        Cmd::TranscribePreview(path) => transcribe_preview(path),
         Cmd::Clip(path) => clip(path),
         Cmd::Eval(path, terms) => eval(path, terms),
         Cmd::Meetings => meetings(),
@@ -192,6 +195,55 @@ fn transcribe_live(path: PathBuf) -> i32 {
         "tail transcription: {:.3} ms",
         inference.as_secs_f64() * 1_000.0
     );
+    print_text(result)
+}
+
+/// Feeds the file in the controller's 200 ms blocks and prints every preview
+/// the worker would have sent, with the point in the audio it describes and
+/// what it cost to decode. The worker skips one when the next block is
+/// already queued; this replay never queues, so it shows the most it would run.
+fn transcribe_preview(path: PathBuf) -> i32 {
+    let audio = match crate::mic::Audio16k::from_wav(&path) {
+        Ok(audio) => audio,
+        Err(error) => {
+            eprintln!("{error}");
+            return 1;
+        }
+    };
+    eprintln!("audio: {:.3}s", audio.seconds());
+    let result = match on_engine_thread(move |engine| {
+        let block = crate::mic::RATE as usize / 5;
+        let mut utterance = crate::engine::Utterance::default();
+        let mut busy = Duration::ZERO;
+        let mut fed = 0;
+        for samples in audio.samples().chunks(block) {
+            utterance.feed(
+                engine,
+                &crate::mic::Audio16k::from_samples(samples.to_vec()),
+            );
+            fed += samples.len();
+            if utterance.preview_due() {
+                let started = Instant::now();
+                let text = utterance.preview(engine).unwrap_or_default();
+                let cost = started.elapsed();
+                busy += cost;
+                eprintln!(
+                    "{:6.1}s {:6.0} ms  {text}",
+                    fed as f64 / f64::from(crate::mic::RATE),
+                    cost.as_secs_f64() * 1_000.0
+                );
+            }
+        }
+        eprintln!(
+            "previews: {:.0} ms of decoding over {:.1}s of audio",
+            busy.as_secs_f64() * 1_000.0,
+            audio.seconds()
+        );
+        utterance.finish(engine, &crate::mic::Audio16k::from_samples(Vec::new()))
+    }) {
+        Ok(result) => result,
+        Err(code) => return code,
+    };
     print_text(result)
 }
 

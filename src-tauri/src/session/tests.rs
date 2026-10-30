@@ -500,6 +500,31 @@ fn stale_job_is_ignored_and_cancel_drains_dictation() {
 }
 
 #[test]
+fn only_the_live_take_previews_reach_the_pill() {
+    let (mut controller, pill, _) = test_controller();
+    controller.step(Msg::MainPressed);
+    let live = controller.utterance;
+    controller.step(Msg::Engine(engine::Event::Preview(
+        live - 1,
+        "cancelled take".to_owned(),
+    )));
+    controller.step(Msg::Engine(engine::Event::Preview(
+        live,
+        "hello".to_owned(),
+    )));
+    controller.step(Msg::MainReleased);
+    controller.step(Msg::Engine(engine::Event::Preview(live, "late".to_owned())));
+    let previews: Vec<_> = pill
+        .try_iter()
+        .filter_map(|event| match event {
+            PillEvent::Preview(text) => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(previews, ["hello"]);
+}
+
+#[test]
 fn tap_guard_finishes_nothing_heard() {
     let (mut controller, pill, _) = test_controller_with_fixture(0.4, 0);
     controller.step(Msg::MainPressed);
