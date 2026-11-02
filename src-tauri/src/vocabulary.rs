@@ -362,7 +362,9 @@ impl Edit {
                 vocabulary.change(term, heard.as_deref(), &entry);
                 learned.change(term, heard.as_deref(), &entry);
                 let mut notes = Vec::new();
-                if changed {
+                // A word that gains a replacement is still wanted.
+                let kept_word = heard.is_none() && same(term, &entry.term);
+                if changed && !kept_word {
                     notes.push(Note::Forgot(term.clone(), heard.clone()));
                 }
                 notes.push(Note::Added(entry.term, entry.heard));
@@ -465,6 +467,24 @@ fn read(path: &Path) -> io::Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_word_that_gains_a_replacement_is_not_forgotten() {
+        let mut vocabulary = Document::parse("- Zentrix\n");
+        let mut learned = Document::default();
+        let notes = Edit::Change {
+            term: "Zentrix".into(),
+            heard: None,
+            to: "zentrixx -> Zentrix".into(),
+        }
+        .apply(&mut vocabulary, &mut learned)
+        .unwrap();
+        assert_eq!(
+            notes,
+            [Note::Added("Zentrix".into(), Some("zentrixx".into()))]
+        );
+        assert_eq!(vocabulary.render(), "- zentrixx -> Zentrix\n");
+    }
+
     #[test]
     fn pair_edits_preserve_position_weights_and_comments() {
         let mut vocabulary =
