@@ -355,8 +355,8 @@ Library load.
 ## What is verified
 
 - The learner, replayed on 2026-11-02 over the real ledger with the installed
-  dictionaries. The queue held 9 names and no phrase with a neighbour word
-  stuck to it. On the personal corpus the release build matched main line for
+  dictionaries. The queue held 8 names and one inflected Swedish word that the
+  dictionaries do not know, and no phrase with a neighbour word stuck to it. On the personal corpus the release build matched main line for
   line, 199 errors and 8/12 terms. Adding the waiting names to a scratch
   vocabulary cut that to 198 errors on both builds. On the jargon corpus both
   builds gave 172 errors, with no context and with this document as screen
