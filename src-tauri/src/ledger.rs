@@ -129,14 +129,15 @@ impl Ledger {
         crate::qos::spawn("see-ledger", crate::qos::Class::Upkeep, move || {
             let _ = fs::create_dir_all(root.join("audio"));
             let mut events = read(&root);
-            let words = crate::learn::Words::system();
+            let words = crate::learn::Words::shared();
             let mut corrected = BTreeMap::new();
             for event in &events {
                 if let Event::Corrected { id, text, .. } = event {
                     corrected.insert(id.clone(), text.clone());
                 }
             }
-            update_learning(&snapshot, &events, &vocabulary, &words);
+            promote(&root, &vocabulary, words, &mut events);
+            update_learning(&snapshot, &events, &vocabulary, words);
             let _ = write_corpus(&root, &corrected);
             prune(&root, keep_audio, 50, &corrected.keys().cloned().collect());
             let _ = compact(&root, &mut events, 500, 50);
@@ -173,12 +174,12 @@ impl Ledger {
                             };
                             events.push(event);
                             if let Some((id, text, read_back)) = read_back {
-                                let names = promote(&root, &vocabulary, &words, &mut events);
+                                let names = promote(&root, &vocabulary, words, &mut events);
                                 // A fix made in another app gets the card, which says
                                 // what was seen and opens it; one made here gets a flash.
                                 let fix = read_back
                                     .then(|| {
-                                        fix_notice(&events, &id, &text, &vocabulary, &words, &names)
+                                        fix_notice(&events, &id, &text, &vocabulary, words, &names)
                                     })
                                     .flatten();
                                 match (fix, &pill) {
@@ -196,7 +197,7 @@ impl Ledger {
                                     _ => announce(&pill, &names),
                                 }
                             }
-                            update_learning(&snapshot, &events, &vocabulary, &words);
+                            update_learning(&snapshot, &events, &vocabulary, words);
                         }
                     }
                     Command::Fixed(fixed) => {
@@ -232,9 +233,9 @@ impl Ledger {
                                 let _ = write_corpus(&root, &corrected);
                             }
                             events.push(event);
-                            let names = promote(&root, &vocabulary, &words, &mut events);
+                            let names = promote(&root, &vocabulary, words, &mut events);
                             announce(&pill, &names);
-                            update_learning(&snapshot, &events, &vocabulary, &words);
+                            update_learning(&snapshot, &events, &vocabulary, words);
                         }
                     }
                     Command::Forget(term) => {
@@ -249,15 +250,15 @@ impl Ledger {
                                         events.push(event);
                                     }
                                 }
-                                update_learning(&snapshot, &events, &vocabulary, &words);
+                                update_learning(&snapshot, &events, &vocabulary, words);
                             }
                             Err(error) => eprintln!("could not forget {term}: {error}"),
                         }
                     }
                     Command::Edit(edit, reply) => {
                         let result =
-                            apply_edit(&root, &vocabulary, &words, &mut events, &pill, edit);
-                        update_learning(&snapshot, &events, &vocabulary, &words);
+                            apply_edit(&root, &vocabulary, words, &mut events, &pill, edit);
+                        update_learning(&snapshot, &events, &vocabulary, words);
                         let _ = reply.send(result);
                     }
                     #[cfg(test)]
@@ -572,7 +573,7 @@ fn prune(root: &Path, keep: usize, slack: usize, corrected: &HashSet<Id>) {
     }
 }
 
-const HEADER: &str = "# see.computer learned words\n#\n# Spellings you corrected in your own dictations, learned after two sightings\n# (or one fix in the Fix dialog). These are boosted like vocabulary.md, and a\n# line \"heard -> Word\" also rewrites what the model heard. Delete a line to\n# stop it; it will not be learned again.\n";
+const HEADER: &str = "# see.computer learned words\n#\n# Spellings you corrected in your own dictations, learned after two sightings\n# (or one fix in the Fix dialog). These are boosted like vocabulary.md, and a\n# line \"heard -> Word\" also rewrites what the model heard. Put a neighbour in brackets\n# on the left to rewrite only beside it, like \"potato (mode) -> poteto\".\n# Delete a line to stop it; it will not be learned again.\n";
 
 fn save_promotion(
     root: &Path,
@@ -621,7 +622,10 @@ fn promote(
     words: &crate::learn::Words,
     events: &mut Vec<Event>,
 ) -> Vec<String> {
-    let promotions = crate::learn::promotions(events, &known_terms(vocabulary), words);
+    let Ok(known) = read_known_terms(vocabulary) else {
+        return Vec::new();
+    };
+    let promotions = crate::learn::promotions(events, &known, words);
     let mut names: Vec<_> = promotions.iter().map(|p| p.term.clone()).collect();
     names.dedup();
     for promotion in promotions {
@@ -665,17 +669,19 @@ fn fix_notice(
 /// Every spelling either file holds, so a casing the user already has is
 /// known even where the decoder prefers the other one.
 fn known_terms(vocabulary: &Path) -> Vec<String> {
-    let (vocabulary, learned) = crate::vocabulary::Files::beside(vocabulary)
-        .read()
-        .unwrap_or_default();
-    vocabulary
+    read_known_terms(vocabulary).unwrap_or_default()
+}
+
+fn read_known_terms(vocabulary: &Path) -> std::io::Result<Vec<String>> {
+    let (vocabulary, learned) = crate::vocabulary::Files::beside(vocabulary).read()?;
+    Ok(vocabulary
         .lines()
         .chain(learned.lines())
         .filter_map(|line| match line {
             crate::vocabulary::Line::Active(entry) => Some(entry.term),
             _ => None,
         })
-        .collect()
+        .collect())
 }
 
 fn announce(pill: &Option<mpsc::Sender<PillEvent>>, names: &[String]) {
@@ -816,7 +822,7 @@ fn apply_edit(
                 .ok_or(GONE)?;
             let (spelling, heard) = match edited {
                 Some(c) => (c.term, c.heard),
-                None => (waiting.term.clone(), waiting.heard.into_iter().next()),
+                None => (waiting.term.clone(), waiting.rule),
             };
             let recorded_spelling_was_wrong = spelling != waiting.term;
             if recorded_spelling_was_wrong {
@@ -896,6 +902,96 @@ mod tests {
         );
         ledger.flush();
         (ledger, root)
+    }
+
+    #[test]
+    fn learn_now_uses_the_safe_rule_instead_of_the_original_heard_form() {
+        let root = std::env::temp_dir().join(format!("see-learn-safe-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let vocabulary = root.join("vocabulary.md");
+        fs::write(&vocabulary, "").unwrap();
+        let words = crate::learn::Words::from_list(&["in", "corner", "was", "into", "school"]);
+        let mut events = vec![
+            Event::Dictated {
+                id: Id::test("1"),
+                at: String::new(),
+                text: "in corner was".into(),
+                audio: None,
+            },
+            Event::Corrected {
+                id: Id::test("1"),
+                at: String::new(),
+                text: "in Klarna was".into(),
+                source: Source::ReadBack,
+            },
+            Event::Dictated {
+                id: Id::test("2"),
+                at: String::new(),
+                text: "log into school".into(),
+                audio: None,
+            },
+            Event::Corrected {
+                id: Id::test("2"),
+                at: String::new(),
+                text: "log into skool".into(),
+                source: Source::ReadBack,
+            },
+        ];
+        for term in ["Klarna", "skool"] {
+            apply_edit(
+                &root,
+                &vocabulary,
+                &words,
+                &mut events,
+                &None,
+                crate::vocabulary::Edit::Learn {
+                    term: term.into(),
+                    edited: None,
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            fs::read_to_string(root.join("learned.md"))
+                .unwrap()
+                .lines()
+                .filter(|l| l.starts_with("- "))
+                .collect::<Vec<_>>(),
+            ["- Klarna", "- (into) school -> skool"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn promotion_waits_until_word_files_are_readable() {
+        let root = std::env::temp_dir().join(format!("see-promotion-read-{}", std::process::id()));
+        let vocabulary = root.join("vocabulary.md");
+        fs::create_dir_all(&vocabulary).unwrap();
+        let mut events = vec![
+            Event::Dictated {
+                id: Id::test("1"),
+                at: String::new(),
+                text: "zorviaa".into(),
+                audio: None,
+            },
+            Event::Corrected {
+                id: Id::test("1"),
+                at: String::new(),
+                text: "Zorvia".into(),
+                source: Source::Manual,
+            },
+        ];
+        assert!(read_known_terms(&vocabulary).is_err());
+        assert!(promote(
+            &root,
+            &vocabulary,
+            &crate::learn::Words::from_list(&[]),
+            &mut events
+        )
+        .is_empty());
+        assert_eq!(events.len(), 2);
+        assert!(!root.join("learned.md").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

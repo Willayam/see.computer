@@ -11,6 +11,74 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Guard {
+    Before(String),
+    After(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Heard {
+    pub words: String,
+    pub guard: Option<Guard>,
+}
+
+impl Heard {
+    pub fn parse(left: &str) -> Heard {
+        let valid = |s: &str| !s.is_empty() && !s.contains(['(', ')']) && s.trim() == s;
+        if let Some(rest) = left.strip_prefix('(') {
+            if let Some((before, words)) = rest.split_once(") ") {
+                if valid(before) && valid(words) {
+                    return Heard {
+                        words: words.into(),
+                        guard: Some(Guard::Before(before.into())),
+                    };
+                }
+            }
+        }
+        if let Some(rest) = left.strip_suffix(')') {
+            if let Some((words, after)) = rest.split_once(" (") {
+                if valid(words) && valid(after) {
+                    return Heard {
+                        words: words.into(),
+                        guard: Some(Guard::After(after.into())),
+                    };
+                }
+            }
+        }
+        Heard {
+            words: left.into(),
+            guard: None,
+        }
+    }
+
+    pub fn phrase(&self) -> String {
+        match &self.guard {
+            Some(Guard::Before(word)) => format!("{word} {}", self.words),
+            Some(Guard::After(word)) => format!("{} {word}", self.words),
+            None => self.words.clone(),
+        }
+    }
+
+    pub fn written(&self, found: &str, name: &str) -> String {
+        match &self.guard {
+            Some(Guard::Before(word)) => format!("{} {name}", &found[..word.len()]),
+            Some(Guard::After(word)) => format!("{name} {}", &found[found.len() - word.len()..]),
+            None => name.to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Display for Heard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.guard {
+            Some(Guard::Before(word)) => write!(f, "({word}) {}", self.words),
+            Some(Guard::After(word)) => write!(f, "{} ({word})", self.words),
+            None => f.write_str(&self.words),
+        }
+    }
+}
+
 /// One boosted term, and the phrase the model hears instead when the line is
 /// a `heard -> Term` rule.
 #[derive(Clone, Debug, PartialEq)]
@@ -763,6 +831,24 @@ fn read(path: &Path) -> io::Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heard_round_trips_and_expands_guards() {
+        for (file, phrase, written) in [
+            ("potato (mode)", "potato mode", "poteto mode"),
+            ("(into) school", "into school", "into poteto"),
+            ("larston", "larston", "poteto"),
+            ("whisper flow", "whisper flow", "poteto"),
+            ("potato mode", "potato mode", "poteto"),
+            ("(bad) (shape)", "(bad) (shape)", "poteto"),
+            ("potato (mode) extra", "potato (mode) extra", "poteto"),
+        ] {
+            let heard = Heard::parse(file);
+            assert_eq!(heard.to_string(), file);
+            assert_eq!(heard.phrase(), phrase);
+            assert_eq!(heard.written(phrase, "poteto"), written);
+        }
+    }
 
     const VOCABULARY: &str = "# see.computer vocabulary\n\
         #\n\

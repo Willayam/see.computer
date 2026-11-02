@@ -1,10 +1,8 @@
 //! What the user's own corrections teach: which spellings to boost, and which
 //! phrases the model keeps hearing in their place.
-//!
-//! Pure functions over the ledger's events, so learning is replayable and the
-//! same log always yields the same decisions.
 
 use crate::ledger::{Event, Id, Source};
+use crate::vocabulary::{Guard, Heard};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -149,7 +147,6 @@ pub fn learned_swaps(pasted: &str, edited: &str, words: &Words) -> Vec<Swap> {
         .into_iter()
         .flat_map(|swap| split_names_from_plain_words(swap, words))
         .filter(|swap| learnable(swap, words))
-        .filter_map(|swap| widen(swap, words))
         .collect()
 }
 
@@ -168,33 +165,38 @@ const FUNCTION_WORDS: &[&str] = &[
     "me", "us", "them", "just", "then", "than", "do", "did", "not", "no",
 ];
 
-fn widen(swap: Swap, words: &Words) -> Option<Swap> {
-    if !ordinary(&swap.heard, words) {
-        return Some(swap);
+fn rule_for(swap: &Swap, words: &Words) -> (Option<Heard>, bool) {
+    let ordinary = ordinary(&swap.heard, words);
+    let heard = swap.heard.to_lowercase();
+    if !ordinary
+        || (heard.split_whitespace().count() >= 2
+            && heard
+                .split_whitespace()
+                .any(|w| !FUNCTION_WORDS.contains(&w)))
+    {
+        return (
+            Some(Heard {
+                words: heard,
+                guard: None,
+            }),
+            ordinary,
+        );
     }
-    let context_word = |word: &Option<String>| {
-        word.clone()
+    let content = |word: &Option<String>| {
+        word.as_ref()
             .filter(|w| !FUNCTION_WORDS.contains(&w.to_lowercase().as_str()))
+            .map(|w| w.to_lowercase())
     };
-    let (heard, wrote) = match (
-        context_word(&swap.clause_after),
-        context_word(&swap.clause_before),
-    ) {
-        (Some(after), _) => (
-            format!("{} {}", swap.heard, after.to_lowercase()),
-            format!("{} {after}", swap.wrote),
-        ),
-        (None, Some(before)) => (
-            format!("{} {}", before.to_lowercase(), swap.heard),
-            format!("{before} {}", swap.wrote),
-        ),
-        (None, None) => return None,
-    };
-    Some(Swap {
-        heard,
-        wrote,
-        ..swap
-    })
+    let guard = content(&swap.clause_after)
+        .map(Guard::After)
+        .or_else(|| content(&swap.clause_before).map(Guard::Before));
+    (
+        guard.map(|guard| Heard {
+            words: heard,
+            guard: Some(guard),
+        }),
+        ordinary,
+    )
 }
 
 fn split_names_from_plain_words(swap: Swap, words: &Words) -> Vec<Swap> {
@@ -319,75 +321,192 @@ fn distance(a: &[char], b: &[char]) -> usize {
     previous[b.len()]
 }
 
-/// The words a model could plausibly write unprompted. macOS ships the list,
-/// so the app ships none. Loaded on first use, because it costs about ten
-/// megabytes and is only needed once the user has corrected something.
-pub struct Words(std::sync::OnceLock<HashSet<String>>);
+/// `NSSpellChecker` answers for the casing as written: "London" is known and
+/// "london" is not.
+pub struct Words(WordSource);
+
+enum WordSource {
+    Checker(std::sync::mpsc::Sender<Ask>),
+    #[cfg(test)]
+    List(HashSet<String>),
+}
+
+struct Ask {
+    word: String,
+    reply: std::sync::mpsc::Sender<bool>,
+    deadline: std::time::Instant,
+}
 
 impl Words {
-    pub fn system() -> Words {
-        Words(std::sync::OnceLock::new())
-    }
-
-    /// One list for the dictation path, so a dictation never waits on the
-    /// file: the context thread touches it while the user is still speaking.
     pub fn shared() -> &'static Words {
         static SHARED: std::sync::OnceLock<Words> = std::sync::OnceLock::new();
-        SHARED.get_or_init(Words::system)
+        SHARED.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<Ask>();
+            // NSSpellChecker is not safe to call concurrently: eight threads
+            // got 16 wrong answers in 4,000 on 2026-11-02.
+            crate::qos::spawn("see-words", crate::qos::Class::Upkeep, move || {
+                let languages = proven_languages();
+                let mut memo = HashMap::new();
+                while let Ok(ask) = rx.recv() {
+                    let answer = memoized_word(&mut memo, &ask.word, || {
+                        if languages.is_empty() || std::time::Instant::now() >= ask.deadline {
+                            return None;
+                        }
+                        let mut known = false;
+                        for language in &languages {
+                            known |= check_word(&ask.word, language)?;
+                        }
+                        (std::time::Instant::now() < ask.deadline).then_some(known)
+                    });
+                    let _ = ask.reply.send(answer);
+                }
+            });
+            Words(WordSource::Checker(tx))
+        })
     }
 
     #[cfg(test)]
     pub fn from_list(words: &[&str]) -> Words {
-        Words(std::sync::OnceLock::from(
-            words
-                .iter()
-                .map(|s| s.to_lowercase())
-                .collect::<HashSet<_>>(),
+        Words(WordSource::List(
+            words.iter().map(|s| (*s).to_owned()).collect(),
         ))
     }
 
-    fn set(&self) -> &HashSet<String> {
-        self.0.get_or_init(|| {
-            std::fs::read_to_string("/usr/share/dict/words")
-                .unwrap_or_default()
-                .lines()
-                .map(str::to_lowercase)
-                .collect()
-        })
+    pub fn knows(&self, word: &str) -> bool {
+        self.ask(word, std::time::Duration::from_secs(2))
     }
 
-    /// Inflections count: the list holds base forms only, so "sketched" would
-    /// otherwise look like a term the user taught.
-    pub fn knows(&self, word: &str) -> bool {
-        let set = self.set();
-        let lower = word.to_lowercase();
-        if set.contains(&lower) {
-            return true;
-        }
-        for suffix in ["'s", "ers", "ing", "ed", "es", "ly", "er", "s", "d"] {
-            if let Some(stem) = lower.strip_suffix(suffix) {
-                if set.contains(stem) {
-                    return true;
-                }
-                if let Some((last, prior)) = stem.chars().next_back().zip(stem.chars().rev().nth(1))
+    pub fn knows_quickly(&self, word: &str) -> bool {
+        self.ask(word, std::time::Duration::from_millis(50))
+    }
+
+    fn ask(&self, word: &str, limit: std::time::Duration) -> bool {
+        match &self.0 {
+            #[cfg(test)]
+            WordSource::List(set) => set.contains(word) || set.contains(&word.to_lowercase()),
+            WordSource::Checker(tx) => {
+                let (reply, rx) = std::sync::mpsc::channel();
+                if tx
+                    .send(Ask {
+                        word: word.into(),
+                        reply,
+                        deadline: std::time::Instant::now() + limit,
+                    })
+                    .is_err()
                 {
-                    if last == prior
-                        && !"aeiou".contains(last)
-                        && set.contains(&stem[..stem.len() - last.len_utf8()])
-                    {
-                        return true;
-                    }
-                }
-                if matches!(suffix, "ed" | "ing") && set.contains(&format!("{stem}e")) {
                     return true;
                 }
+                rx.recv_timeout(limit).unwrap_or(true)
             }
         }
-        false
     }
 }
 
+/// "Unknown" is asked twice before it sticks, because WebKit may use the same
+/// checker from the main thread for the Library's fix field.
+fn memoized_word(
+    memo: &mut HashMap<String, bool>,
+    word: &str,
+    mut check: impl FnMut() -> Option<bool>,
+) -> bool {
+    if let Some(known) = memo.get(word) {
+        return *known;
+    }
+    let Some(mut known) = check() else {
+        return true;
+    };
+    if !known {
+        let Some(second) = check() else {
+            return true;
+        };
+        known = second;
+    }
+    memo.insert(word.into(), known);
+    known
+}
+
+#[repr(C)]
+struct SpellRange {
+    location: usize,
+    length: usize,
+}
+unsafe impl objc2::Encode for SpellRange {
+    const ENCODING: objc2::Encoding =
+        objc2::Encoding::Struct("_NSRange", &[usize::ENCODING, usize::ENCODING]);
+}
+
+fn check_word(word: &str, language: &str) -> Option<bool> {
+    use objc2::{
+        msg_send,
+        runtime::{AnyClass, AnyObject},
+    };
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let class = AnyClass::get(c"NSSpellChecker")?;
+        let string = AnyClass::get(c"NSString")?;
+        let checker: *mut AnyObject = msg_send![class, sharedSpellChecker];
+        if checker.is_null() {
+            return None;
+        }
+        let word = std::ffi::CString::new(word).ok()?;
+        let language = std::ffi::CString::new(language).ok()?;
+        let word: *mut AnyObject = msg_send![string, stringWithUTF8String: word.as_ptr()];
+        let language: *mut AnyObject = msg_send![string, stringWithUTF8String: language.as_ptr()];
+        if word.is_null() || language.is_null() {
+            return None;
+        }
+        let count: *mut isize = std::ptr::null_mut();
+        let range: SpellRange = msg_send![checker, checkSpellingOfString: word,
+            startingAt: 0isize, language: language, wrap: false,
+            inSpellDocumentWithTag: 0isize, wordCount: count];
+        Some(range.length == 0)
+    })
+}
+
+/// Some languages `NSSpellChecker` lists pass nonsense as correctly spelled.
+fn proven_languages() -> Vec<String> {
+    use objc2::{
+        msg_send,
+        runtime::{AnyClass, AnyObject},
+    };
+    let mut languages = objc2::rc::autoreleasepool(|_| unsafe {
+        let mut languages = vec!["en".to_owned()];
+        if let Some(locale) = AnyClass::get(c"NSLocale") {
+            let preferred: *mut AnyObject = msg_send![locale, preferredLanguages];
+            if !preferred.is_null() {
+                let count: usize = msg_send![preferred, count];
+                for i in 0..count {
+                    let language: *mut AnyObject = msg_send![preferred, objectAtIndex: i];
+                    let utf8: *const std::ffi::c_char = msg_send![language, UTF8String];
+                    if !utf8.is_null() {
+                        let value = std::ffi::CStr::from_ptr(utf8).to_string_lossy();
+                        let base = value
+                            .split(['-', '_'])
+                            .next()
+                            .unwrap_or_default()
+                            .to_owned();
+                        if !languages.contains(&base) {
+                            languages.push(base);
+                        }
+                    }
+                }
+            }
+        }
+        languages
+    });
+    languages.retain(|language| {
+        check_word("zzqxvkj", language) == Some(false)
+            && (check_word("a", language) == Some(true) || check_word("i", language) == Some(true))
+    });
+    languages
+}
+
 pub fn learnable(swap: &Swap, words: &Words) -> bool {
+    if swap.wrote == swap.wrote.to_lowercase()
+        && swap.heard.starts_with(&swap.wrote)
+        && swap.heard != swap.wrote
+    {
+        return false;
+    }
     if swap.heard.to_lowercase() == swap.wrote.to_lowercase()
         && swap.heard.chars().any(char::is_uppercase)
         && !swap.wrote.chars().any(char::is_uppercase)
@@ -533,6 +652,7 @@ pub struct Promotion {
 pub struct Waiting {
     pub term: String,
     pub heard: Vec<String>,
+    pub rule: Option<String>,
     pub from: Vec<Id>,
 }
 
@@ -541,6 +661,8 @@ pub struct Waiting {
 struct Sighting {
     id: Id,
     heard: String,
+    rule: Option<Heard>,
+    ordinary: bool,
     source: Source,
 }
 
@@ -620,9 +742,12 @@ fn candidates(events: &[Event], words: &Words) -> Vec<(String, Vec<Sighting>)> {
             };
             let sightings = &mut terms[index].1;
             if !sightings.iter().any(|seen| seen.id == *id) {
+                let (rule, ordinary) = rule_for(&swap, words);
                 sightings.push(Sighting {
                     id: id.clone(),
-                    heard: swap.heard.to_lowercase(),
+                    heard: swap.heard,
+                    rule,
+                    ordinary,
                     source,
                 });
             }
@@ -643,17 +768,23 @@ pub fn promotions(events: &[Event], known: &[String], words: &Words) -> Vec<Prom
         if done.is_some_and(|done| done.forgotten) {
             continue;
         }
-        let mut heard_forms: Vec<&str> = Vec::new();
+        let mut forms = Vec::new();
         for sighting in &sightings {
-            if !heard_forms.contains(&sighting.heard.as_str()) {
-                heard_forms.push(&sighting.heard);
+            if let Some(rule) = &sighting.rule {
+                if !forms.contains(rule) {
+                    forms.push(rule.clone());
+                }
             }
         }
         let mut rules = Vec::new();
-        for heard in heard_forms {
-            let same: Vec<_> = sightings.iter().filter(|s| s.heard == heard).collect();
-            let learned = done.is_some_and(|done| done.rules.contains(heard));
-            let supported = if ordinary(heard, words) {
+        for rule in forms {
+            let same: Vec<_> = sightings
+                .iter()
+                .filter(|s| s.rule.as_ref() == Some(&rule))
+                .collect();
+            let heard = rule.to_string();
+            let learned = done.is_some_and(|done| done.rules.contains(&heard));
+            let supported = if same.iter().any(|s| s.ordinary) {
                 same.iter().map(|s| &s.id).collect::<HashSet<_>>().len() >= 3
             } else {
                 weight(same.iter().copied()) >= 2
@@ -661,7 +792,7 @@ pub fn promotions(events: &[Event], known: &[String], words: &Words) -> Vec<Prom
             if supported && !learned {
                 rules.push(Promotion {
                     term: term.clone(),
-                    heard: Some(heard.to_owned()),
+                    heard: Some(heard),
                     from: same.iter().map(|s| s.id.clone()).collect(),
                 });
             }
@@ -688,8 +819,11 @@ pub fn heard_forms(events: &[Event], words: &Words) -> Vec<(String, Vec<String>)
         .map(|(term, sightings)| {
             let mut heard: Vec<String> = Vec::new();
             for sighting in sightings {
-                if !heard.contains(&sighting.heard) {
-                    heard.push(sighting.heard);
+                if let Some(rule) = sighting.rule {
+                    let phrase = rule.phrase();
+                    if !heard.contains(&phrase) {
+                        heard.push(phrase);
+                    }
                 }
             }
             (term, heard)
@@ -708,6 +842,9 @@ pub fn waiting(events: &[Event], known: &[String], words: &Words) -> Vec<Waiting
         .map(|(term, sightings)| Waiting {
             term,
             heard: sightings.iter().map(|s| s.heard.clone()).collect(),
+            rule: sightings
+                .first()
+                .and_then(|s| s.rule.as_ref().map(ToString::to_string)),
             from: sightings.into_iter().map(|s| s.id).collect(),
         })
         .collect();
@@ -718,6 +855,264 @@ pub fn waiting(events: &[Event], known: &[String], words: &Words) -> Vec<Waiting
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn checker_failure_is_known_and_not_cached() {
+        let mut memo = HashMap::new();
+        assert!(memoized_word(&mut memo, "name", || None));
+        assert!(memo.is_empty());
+        let mut answers = [Some(false), None].into_iter();
+        assert!(memoized_word(&mut memo, "name", || answers.next().unwrap()));
+        assert!(memo.is_empty());
+        assert!(!memoized_word(&mut memo, "name", || Some(false)));
+        assert_eq!(memo.get("name"), Some(&false));
+    }
+
+    #[test]
+    #[ignore]
+    fn real_checker_serializes_concurrent_callers() {
+        let words = Words::shared();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        for (word, known) in [
+                            ("tugga", true),
+                            ("skool", false),
+                            ("london", false),
+                            ("London", true),
+                        ] {
+                            assert_eq!(words.knows(word), known, "{word}");
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn ordinary_phrases_and_guards_have_separate_evidence() {
+        let words = Words::from_list(&[
+            "cloud", "filler", "tokens", "potato", "mode", "project", "corner", "in", "was",
+        ]);
+        let mut events = vec![];
+        for (id, before, after) in [
+            ("1", "cloud filler tokens", "Cloudflare tokens"),
+            ("2", "cloud filler project", "Cloudflare project"),
+            ("3", "cloud filler", "Cloudflare"),
+        ] {
+            events.push(event(id, before));
+            events.push(correction(id, after, Source::ReadBack));
+        }
+        assert_eq!(
+            promotions(&events, &["Cloudflare".into()], &words),
+            [Promotion {
+                term: "Cloudflare".into(),
+                heard: Some("cloud filler".into()),
+                from: vec![Id::test("1"), Id::test("2"), Id::test("3")],
+            }]
+        );
+        let different_guards = vec![
+            event("4", "potato mode"),
+            correction("4", "poteto mode", Source::ReadBack),
+            event("5", "potato project"),
+            correction("5", "poteto project", Source::ReadBack),
+        ];
+        assert_eq!(
+            promotions(&different_guards, &[], &words),
+            [Promotion {
+                term: "poteto".into(),
+                heard: None,
+                from: vec![Id::test("4"), Id::test("5")],
+            }]
+        );
+        let no_guard = vec![
+            event("6", "in corner was"),
+            correction("6", "in Klarna was", Source::ReadBack),
+            event("7", "in corner was"),
+            correction("7", "in Klarna was", Source::ReadBack),
+            event("8", "in corner was"),
+            correction("8", "in Klarna was", Source::ReadBack),
+        ];
+        assert_eq!(
+            promotions(&no_guard, &[], &words),
+            [Promotion {
+                term: "Klarna".into(),
+                heard: None,
+                from: vec![Id::test("6"), Id::test("7"), Id::test("8")],
+            }]
+        );
+        assert!(promotions(&no_guard, &["Klarna".into()], &words).is_empty());
+    }
+
+    #[test]
+    fn a_log_of_fix_shapes_keeps_bare_names() {
+        let words = Words::from_list(&[
+            "some",
+            "here",
+            "corner",
+            "was",
+            "late",
+            "in",
+            "call",
+            "move",
+            "into",
+            "school",
+            "soon",
+            "ask",
+            "for",
+            "morgan",
+            "today",
+            "en",
+            "vuxna",
+            "resa",
+            "kan",
+            "ta",
+            "tugga",
+            "på",
+            "the",
+            "what's",
+            "it",
+            "called",
+            "lineal",
+            "linjal",
+            "out",
+            "som",
+            "åker",
+            "bunker",
+            "inte",
+            "full",
+            "tid",
+            "tillräckligt",
+            "bilen",
+            "idiotiskt",
+            "Dessutom",
+            "ficka",
+            "nu",
+            "to",
+            "harbored",
+            "days",
+            "from",
+            "with",
+            "catherine",
+            "those",
+            "cloud",
+            "filler",
+            "tokens",
+            "ready",
+            "circles",
+            "brush",
+        ]);
+        let pairs = [
+            ("some M C P here", "some MCP here"),
+            ("in corner was late", "in Klarna was late"),
+            ("call Selda", "call Zelda"),
+            ("move into school", "move into skool"),
+            ("ask for morgan today", "ask for Morgan today"),
+            ("en vuxna resa", "en vuxnen resa"),
+            ("kan ta på", "kan tugga på"),
+            ("the what's it called lineal out", "the linjal out"),
+            ("som bunker", "som åker"),
+            ("inte full tid", "inte tillräckligt"),
+            ("mövisen", "bilen"),
+            ("iotiskt nu", "idiotiskt nu"),
+            ("Tessutom nu", "Dessutom nu"),
+            ("Vicka nu", "ficka nu"),
+            ("to harbored in days", "to Harbored in days"),
+            ("from Kwill to harbored", "from Quill to Harbored"),
+            ("with Catherine Cit", "with Skatteverket"),
+            (
+                "those cloud filler tokens ready",
+                "those Cloudflare tokens ready",
+            ),
+            ("circles brush", "circles br"),
+        ];
+        let mut events = Vec::new();
+        for (index, (pasted, edited)) in pairs.iter().enumerate() {
+            let id = format!("{index:02}");
+            events.push(event(&id, pasted));
+            events.push(correction(&id, edited, Source::ReadBack));
+        }
+        let known = vec!["Cloudflare".to_owned()];
+        let mut queue: Vec<_> = waiting(&events, &known, &words)
+            .into_iter()
+            .map(|w| w.term)
+            .collect();
+        queue.sort();
+        assert_eq!(
+            queue,
+            [
+                "Klarna",
+                "MCP",
+                "Morgan",
+                "Quill",
+                "Skatteverket",
+                "Zelda",
+                "skool",
+                "vuxnen"
+            ]
+        );
+        assert_eq!(
+            promotions(&events, &known, &words),
+            [Promotion {
+                term: "Harbored".into(),
+                heard: None,
+                from: vec![Id::test("14"), Id::test("15")]
+            }]
+        );
+        let heard = heard_forms(&events, &words);
+        assert_eq!(
+            heard
+                .iter()
+                .find(|(term, _)| term == "Cloudflare")
+                .unwrap()
+                .1,
+            ["cloud filler"]
+        );
+        assert_eq!(
+            heard.iter().find(|(term, _)| term == "Klarna").unwrap().1,
+            Vec::<String>::new()
+        );
+        let queued = waiting(&events, &known, &words);
+        let rule_of = |term: &str| {
+            queued
+                .iter()
+                .find(|w| w.term == term)
+                .unwrap()
+                .rule
+                .as_deref()
+        };
+        assert_eq!(rule_of("skool"), Some("(into) school"));
+        assert_eq!(rule_of("Klarna"), None);
+    }
+
+    #[test]
+    #[ignore]
+    fn replay_real_ledger_with_installed_dictionaries() {
+        let root = dirs::home_dir()
+            .unwrap()
+            .join("Library/Application Support/see.computer/ledger");
+        let events = crate::ledger::read(&root);
+        let words = Words::shared();
+        let (vocabulary, learned) =
+            crate::vocabulary::Files::beside(&crate::boost::Lexicon::default_path())
+                .read()
+                .unwrap();
+        let known: Vec<_> = vocabulary
+            .lines()
+            .chain(learned.lines())
+            .filter_map(|line| match line {
+                crate::vocabulary::Line::Active(entry) => Some(entry.term),
+                _ => None,
+            })
+            .collect();
+        let queue: Vec<_> = waiting(&events, &known, words)
+            .into_iter()
+            .map(|w| w.term)
+            .collect();
+        println!("Queue: {queue:?}");
+        println!("Promotions: {:?}", promotions(&events, &known, words));
+    }
+
     fn event(id: &str, text: &str) -> Event {
         Event::Dictated {
             id: Id::test(id),
@@ -771,7 +1166,8 @@ mod tests {
     #[test]
     fn filter_and_inflections() {
         let words = Words::from_list(&[
-            "sketch", "plan", "class", "run", "too", "to", "deploy", "dev", "paris",
+            "sketch", "planned", "sketched", "classes", "running", "too", "to", "deploy", "dev",
+            "paris",
         ]);
         for word in ["planned", "sketched", "classes", "running"] {
             assert!(words.knows(word), "{word}");
@@ -885,8 +1281,8 @@ mod tests {
         assert_eq!(
             promotions(&events, &["poteto".into()], &words),
             vec![Promotion {
-                term: "poteto mode".into(),
-                heard: Some("potato mode".into()),
+                term: "poteto".into(),
+                heard: Some("potato (mode)".into()),
                 from: vec![Id::test("1"), Id::test("2"), Id::test("3")]
             }]
         );
@@ -906,7 +1302,7 @@ mod tests {
         }
         assert_eq!(
             promotions(&events, &[], &words)[0].heard.as_deref(),
-            Some("use potato")
+            Some("(use) potato")
         );
     }
 
@@ -919,26 +1315,24 @@ mod tests {
                 .iter()
                 .map(|s| (s.heard.as_str(), s.wrote.as_str()))
                 .collect::<Vec<_>>(),
-            [("potato mode", "poteto mode")]
+            [("potato", "poteto")]
         );
-        assert!(
-            learned_swaps("potato", "poteto", &words).is_empty(),
-            "an ordinary word with nothing around it is not learned"
+        assert_eq!(
+            rule_for(&learned[0], &words),
+            (Some(Heard::parse("potato (mode)")), true)
         );
-        assert!(
-            learned_swaps("so potato. Mode", "so poteto. Mode", &words)
-                .iter()
-                .all(|s| s.heard == "so potato"),
-            "the neighbour comes from the same clause"
+        let alone = learned_swaps("potato", "poteto", &words);
+        assert_eq!(alone[0].wrote, "poteto");
+        assert_eq!(rule_for(&alone[0], &words), (None, true));
+        let corner = learned_swaps(
+            "in corner was late",
+            "in Klarna was late",
+            &Words::from_list(&["in", "corner", "was", "late"]),
         );
-        assert!(
-            learned_swaps(
-                "in corner was late",
-                "in Klarna was late",
-                &Words::from_list(&["in", "corner", "was", "late"])
-            )
-            .is_empty(),
-            "a function word says nothing about which word was meant"
+        assert_eq!(corner[0].wrote, "Klarna");
+        assert_eq!(
+            rule_for(&corner[0], &Words::from_list(&["corner"])),
+            (None, true)
         );
     }
 
@@ -955,12 +1349,8 @@ mod tests {
             ("potato (mode)", "poteto (mode)"),
         ] {
             let learned = learned_swaps(pasted, edited, &words);
-            assert!(
-                learned
-                    .iter()
-                    .all(|s| s.heard.trim() != "potato" && !s.heard.contains("mode")),
-                "{pasted:?} learned {learned:?}"
-            );
+            assert_eq!(learned[0].wrote, "poteto");
+            assert_eq!(rule_for(&learned[0], &words), (None, true), "{pasted}");
         }
     }
 
@@ -1047,6 +1437,7 @@ mod tests {
             vec![Waiting {
                 term: "Supabase".into(),
                 heard: vec!["superbase".into()],
+                rule: Some("superbase".into()),
                 from: vec![Id::test("1")]
             }]
         );

@@ -735,6 +735,7 @@ mod dictionary_tests {
             waiting: vec![crate::learn::Waiting {
                 term: "Supabase".into(),
                 heard: vec!["superbase".into()],
+                rule: Some("superbase".into()),
                 from: vec![],
             }],
             ..Default::default()

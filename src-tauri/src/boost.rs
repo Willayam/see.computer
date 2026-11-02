@@ -199,7 +199,7 @@ pub struct Term {
 /// A phrase the model keeps hearing in place of a term, and the term.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rule {
-    pub heard: String,
+    pub heard: crate::vocabulary::Heard,
     pub term: String,
 }
 
@@ -313,7 +313,7 @@ impl Lexicon {
                 rule.term.clone_from(&term.text);
             }
         }
-        rules.sort_by_key(|r| std::cmp::Reverse(r.heard.len()));
+        rules.sort_by_key(|r| std::cmp::Reverse(r.heard.phrase().len()));
         if current {
             self.stamps = stamps;
         }
@@ -332,7 +332,8 @@ impl Lexicon {
         }
         let mut result = text.to_owned();
         for rule in &self.rules {
-            if rule.heard.is_empty() {
+            let phrase = rule.heard.phrase();
+            if phrase.is_empty() {
                 continue;
             }
             let mut next = String::with_capacity(result.len());
@@ -340,11 +341,11 @@ impl Lexicon {
             while offset < result.len() {
                 let candidate = result[offset..].char_indices().find_map(|(i, _)| {
                     let start = offset + i;
-                    let end = start.checked_add(rule.heard.len())?;
+                    let end = start.checked_add(phrase.len())?;
                     let found = result.get(start..end)?;
                     let before = result[..start].chars().next_back();
                     let after = result[end..].chars().next();
-                    (found.eq_ignore_ascii_case(&rule.heard)
+                    (found.eq_ignore_ascii_case(&phrase)
                         && before.is_none_or(|c| !c.is_alphanumeric())
                         && after.is_none_or(|c| !c.is_alphanumeric()))
                     .then_some((start, end))
@@ -353,7 +354,7 @@ impl Lexicon {
                     break;
                 };
                 next.push_str(&result[offset..start]);
-                next.push_str(&rule.term);
+                next.push_str(&rule.heard.written(&result[start..end], &rule.term));
                 offset = end;
             }
             next.push_str(&result[offset..]);
@@ -376,7 +377,7 @@ fn parse(text: &str) -> (Vec<Term>, Vec<Rule>) {
         };
         if let Some(heard) = entry.heard {
             rules.push(Rule {
-                heard,
+                heard: crate::vocabulary::Heard::parse(&heard),
                 term: entry.term.clone(),
             });
         }
@@ -567,6 +568,44 @@ mod tests {
             text: text.to_owned(),
             weight: 1.0,
         }
+    }
+
+    #[test]
+    fn guarded_rules_rewrite_only_beside_the_guard() {
+        let (_, rules) = parse("- potato (mode) -> poteto\n- (into) school -> skool\n- whisper flow -> Wispr Flow\n- old phrase -> new phrase");
+        let mut lexicon = Lexicon {
+            path: PathBuf::new(),
+            stamps: [None, None],
+            terms: vec![],
+            rules: vec![],
+        };
+        lexicon.rules = rules;
+        assert_eq!(
+            lexicon.rewrite("potato mode, potato, into school and school"),
+            "poteto mode, potato, into skool and school"
+        );
+        for text in [
+            "potato, mode",
+            "potato  mode",
+            "potato - mode",
+            "into, school",
+            "into  school",
+        ] {
+            assert_eq!(lexicon.rewrite(text), text);
+        }
+        assert_eq!(
+            lexicon.rewrite("Into school, then Potato Mode"),
+            "Into skool, then poteto Mode"
+        );
+        assert_eq!(
+            lexicon.rewrite("whisper flow and old phrase"),
+            "Wispr Flow and new phrase"
+        );
+        lexicon.rules = parse("- potato mode -> poteto mode").1;
+        assert_eq!(
+            lexicon.rewrite("potato mode and potato"),
+            "poteto mode and potato"
+        );
     }
 
     #[test]
@@ -784,7 +823,7 @@ mod tests {
         assert_eq!(
             rules,
             vec![Rule {
-                heard: "superbase".into(),
+                heard: crate::vocabulary::Heard::parse("superbase"),
                 term: "Supabase".into()
             }]
         );
@@ -823,7 +862,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("vocabulary.md"),
-            "- poteto\n- potato -> poteto\n- Tauri\n",
+            "- poteto\n- potato (mode) -> poteto\n- Tauri\n",
         )
         .unwrap();
         fs::write(root.join("learned.md"), "- Poteto\t2\n").unwrap();

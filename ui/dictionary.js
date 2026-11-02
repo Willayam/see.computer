@@ -26,7 +26,7 @@
     const q = L.query().trim().toLowerCase();
     if (!q) return true;
     return entry.term.toLowerCase().includes(q)
-      || (entry.rules || []).some((r) => r.heard.toLowerCase().includes(q))
+      || (entry.rules || []).some((r) => r.heard.replace(/[()]/g, "").toLowerCase().includes(q))
       || (entry.heard || "").toLowerCase().includes(q);
   }
 
@@ -140,7 +140,7 @@
   // The words around the first place the term or a heard form came up, so a
   // long dictation does not push the other lines off the page.
   function highlight(text, w) {
-    const forms = [w.term, ...w.rules.map((r) => r.heard)].filter(Boolean)
+    const forms = [w.term, ...w.rules.map((r) => r.heard.replace(/[()]/g, ""))].filter(Boolean)
       .map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
     const pattern = new RegExp(`(^|[^\\p{L}\\p{N}])(${forms.join("|")})(?=$|[^\\p{L}\\p{N}])`, "giu");
     const at = text.search(pattern);
@@ -229,7 +229,7 @@
   }
 
   function waitingDraft(w) {
-    return view.draftWaiting || { term: w.term, heard: w.heard || "" };
+    return view.draftWaiting || { term: w.term, heard: w.rule || "" };
   }
 
   function waitingPage(w) {
@@ -249,7 +249,7 @@
           <input id="dict-heard" class="dict-field" value="${esc(draft.heard)}" placeholder="optional" spellcheck="false" autocomplete="off" data-focus="waiting-heard" aria-describedby="dict-heard-help">
           <span class="dict-arrow">→ ${esc(draft.term)}</span>
         </div>
-        <p class="dict-help" id="dict-heard-help">When the model writes this, see.computer writes the word instead. Leave it empty to learn the spelling alone.</p>
+        <p class="dict-help" id="dict-heard-help">When the model writes this, see.computer writes the word instead. Leave it empty to learn the spelling alone.${draft.heard.includes("(") ? " Brackets mean only next to that word." : ""}${w.heard && !w.rule ? ` ${esc(quoted(w.heard))} is an everyday word, so it stays as it is unless you fill this in.` : ""}</p>
       </section>
       <p class="dict-help">Learning adds it to learned.md. Ignoring means see.computer won’t suggest it again.</p>
     </article>`;
@@ -357,7 +357,7 @@
         view.draftWaiting = { term: spelling.value, heard: heard.value };
         arrow.textContent = `→ ${spelling.value.trim() || waiting.term}`;
       };
-      for (const [input, recorded] of [[spelling, waiting.term], [heard, waiting.heard || ""]]) {
+      for (const [input, recorded] of [[spelling, waiting.term], [heard, waiting.rule || ""]]) {
         input.addEventListener("input", sync);
         input.addEventListener("keydown", (e) => {
           if (e.key === "Enter") { e.preventDefault(); input.blur(); }
@@ -411,7 +411,7 @@
       const draft = waitingDraft(item);
       const term = draft.term.trim() || item.term;
       const heard = draft.heard.trim();
-      const edited = term !== item.term || heard !== (item.heard || "") ? { term, heard: heard || null } : undefined;
+      const edited = term !== item.term || heard !== (item.rule || "") ? { term, heard: heard || null } : undefined;
       edit({ op: "learn", term: item.term, edited }, { kind: "word", key: keyOf(term) });
     }
     if (act === "ignore") edit({ op: "ignore", term: item.term }, neighbour());

@@ -216,33 +216,46 @@ before the ledger or a meeting, gets a dictation entry of its own first. Fix
 Last Dictation… in the menu opens the newest dictation this way.
 
 **The learner** (`learn.rs`) aligns each correction against what was pasted
-and keeps only swaps the model could not have written unprompted: a capital
-mid-sentence, camelCase, all caps, internal punctuation, letters mixed with
-digits, or a word the system word list does not know (inflections included,
-so "sketched" is known). Grammar fixes (to → too), lowered capitals and
-numbers never qualify. An offline study of this user's 13,700 Wispr Flow
-edits on 2026-08-27 found this test 91% precise once a term has two
-sightings and 37% at one; its scripts were not kept, so treat the figures as
-the reason for the two-sighting rule rather than as a reproduced result.
-Two sightings promote the term. A mishearing seen twice also promotes a
-rule, `heard -> Term`, which rewrites what the model heard. A rule is the
-only fix for a term the model is confident it heard as an ordinary word, and
-it applies to terms already in `vocabulary.md`. Because a rule rewrites every
-future occurrence, rules are learned as phrases sized to be safe. A fix
-that changes a name and plain words together is split, so "t three tree air"
--> "T3 triage" teaches "t three -> T3" and nothing about "triage"; a name of
-several words ("Wispr Flow") stays whole. A heard form made of ordinary
-words takes the unchanged word after it, or else before it, in the same
-clause: fixing "potato mode" teaches "potato mode -> poteto mode" and leaves
-a plain "potato" alone. Function words ("was", "in") do not count as that
-neighbour, and with no other neighbour nothing is learned. A dash, `&`,
-bracket or quote mark between the two words ends the clause too, so
-"potato - mode" and `"potato." Mode` have no neighbour there. Lone letters are
-spelled-out names ("t three", "m c p"), not ordinary words. Such a phrase
-still needs three separate dictations. A fix typed into the dialog counts as two
-sightings for terms and for rules on unknown words. Learned lines go to
-`learned.md` beside `vocabulary.md`, the pill says `Learned "Term"`, and a
-term the user forgets never comes back.
+and keeps names and spellings the model could not have written unprompted.
+It checks capitals, camelCase, all caps, internal punctuation and letters
+mixed with digits. It also asks the installed macOS dictionaries about the
+spelling as written. English and the preferred languages count only after
+they pass a common-word and nonsense-word check. This replaced the old
+English word list and suffix guesses because they treated ordinary Swedish
+words as names. One thread owns the checker. Failed or slow checks answer
+known, so they cannot create an unguarded rewrite.
+
+Grammar fixes, lowered capitals, numbers and half-typed prefixes such as
+"brush" to "br" stay out. A fix that changes a name and plain words together
+is split, so "t three tree air" to "T3 triage" teaches only "t three -> T3".
+A name of several words such as "Wispr Flow" stays whole.
+
+Two sightings in separate dictations promote the bare name. An offline study
+of this user's 13,700 Wispr Flow edits on 2026-08-27 found the shape test 91%
+precise at two sightings and 37% at one. Its scripts were not kept, so treat
+that as the reason for the rule and not as a reproduced result. A fix typed into
+the Fix dialog counts as two sightings. A term already in `vocabulary.md`
+can still earn rules. The right side of a rule is always the name. An
+unknown heard form needs weight two on that form to earn a rule. Spelled-out
+letters such as "t three" count as unknown.
+
+An ordinary heard form needs three separate dictations on the same rule.
+A phrase of two or more known words with a content word, such as "cloud
+filler", is its own guard. A single ordinary word needs a content neighbour
+in the same clause, after it if possible, otherwise before it. The neighbour
+goes in brackets on the left. "potato (mode) -> poteto" rewrites "potato
+mode" to "poteto mode" and boosts only "poteto". "(into) school -> skool"
+leaves "school" alone elsewhere. Only a single space joins a guard to its
+heard form. Punctuation breaks the match. An old phrase rule such as
+"potato mode -> poteto mode" keeps its literal meaning.
+
+With only function words beside an ordinary word, no rule is learned.
+"in corner was" fixed to "in Klarna was" can teach Klarna, but never rewrites
+corner automatically. Seen once shows the original heard form and prefills
+only a safe rule. Learn now with an empty heard field learns the name alone.
+Learned lines go to `learned.md` beside `vocabulary.md`. Supported promotions
+also run when the ledger starts, once both word files can be read. A term
+the user forgets never comes back.
 
 **Rules measured.** Eleven rules learned at two sightings from one synthetic
 voice's corrections ("superbase -> Supabase", "versal -> Vercel", "work os ->
@@ -341,6 +354,14 @@ Library load.
 
 ## What is verified
 
+- The learner, replayed on 2026-11-02 over the real ledger with the installed
+  dictionaries. The queue held 9 names and no phrase with a neighbour word
+  stuck to it. On the personal corpus the release build matched main line for
+  line, 199 errors and 8/12 terms. Adding the waiting names to a scratch
+  vocabulary cut that to 198 errors on both builds. On the jargon corpus both
+  builds gave 172 errors, with no context and with this document as screen
+  text. A name that is also an everyday word stayed lowercase in three `say`
+  sentences that use the everyday word.
 - The shadow, run on 2026-11-02 with release builds of main and this branch
   against 230 scratch text files in iCloud Documents. The timer runs from the
   Library window opening on the Dictionary to its rows showing. With every

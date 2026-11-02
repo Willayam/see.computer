@@ -86,7 +86,7 @@ pub fn near_misses(
 fn near_miss<'a>(word: &str, names: &[&'a str], words: &crate::learn::Words) -> Option<&'a str> {
     let mut chars = word.chars();
     let capitalized = chars.next().is_some_and(char::is_uppercase) && chars.all(char::is_lowercase);
-    if !capitalized || word.chars().count() < 5 || words.knows(word) {
+    if !capitalized || word.chars().count() < 5 || words.knows_quickly(word) {
         return None;
     }
     let lower = word.to_lowercase();

@@ -224,6 +224,7 @@ struct Recent {
 struct Waiting {
     term: String,
     heard: Option<String>,
+    rule: Option<String>,
 }
 
 /// One row per term, whichever file and casing it came from. Active lines
@@ -309,7 +310,15 @@ fn snapshot(
         .map(|line| line.text.to_lowercase())
         .collect();
     for word in &mut words {
-        let mut wrong: Vec<String> = word.rules.iter().map(|r| r.heard.to_lowercase()).collect();
+        let mut wrong: Vec<String> = word
+            .rules
+            .iter()
+            .map(|r| {
+                crate::vocabulary::Heard::parse(&r.heard)
+                    .phrase()
+                    .to_lowercase()
+            })
+            .collect();
         for (term, heard) in &learning.heard {
             if same(term, &word.term) {
                 wrong.extend(heard.iter().map(|h| h.to_lowercase()));
@@ -356,6 +365,7 @@ fn snapshot(
         .map(|w| Waiting {
             term: w.term.clone(),
             heard: w.heard.first().cloned(),
+            rule: w.rule.clone(),
         })
         .collect();
     Snapshot {
@@ -496,6 +506,16 @@ mod tests {
     }
 
     #[test]
+    fn guarded_tallies_use_the_phrase_and_keep_the_editable_form() {
+        let snap = snapshot_of(
+            "- potato (mode) -> poteto",
+            &["potato mode, potato, potato, mode"],
+        );
+        assert_eq!(snap.words[0].misheard, 1);
+        assert_eq!(snap.words[0].rules[0].heard, "potato (mode)");
+    }
+
+    #[test]
     fn one_row_per_term_with_its_rules_and_history() {
         let vocabulary = Document::parse(
             "# vocabulary\n- poteto\n- potato -> poteto\n- pnpm\t3\n\n# - EAS\n# - pnpm\n",
@@ -507,11 +527,13 @@ mod tests {
                 crate::learn::Waiting {
                     term: "WorkOS".into(),
                     heard: vec!["work os".into()],
+                    rule: Some("work os".into()),
                     from: Vec::new(),
                 },
                 crate::learn::Waiting {
                     term: "pnpm".into(),
                     heard: vec!["p npm".into()],
+                    rule: Some("p npm".into()),
                     from: Vec::new(),
                 },
             ],
@@ -575,7 +597,8 @@ mod tests {
             snapshot.waiting,
             [Waiting {
                 term: "WorkOS".into(),
-                heard: Some("work os".into())
+                heard: Some("work os".into()),
+                rule: Some("work os".into())
             }],
             "a waiting word already in the list is not offered again"
         );
