@@ -28,6 +28,7 @@ mod recorder;
 mod rivals;
 mod session;
 mod setup;
+mod shadow;
 mod sharing;
 mod target;
 mod text;

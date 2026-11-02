@@ -304,28 +304,58 @@ reloads, so a stale Library cannot overwrite a sync from another Mac. Writes
 go through the ledger thread, which already appends to `learned.md`, so the
 learner and the Library never write it at once. Deleting or renaming a
 learned term records it as forgotten, so the learner does not bring the old
-spelling back. The section polls a cheap stamp of both files and the
-learner's queue, reloads on the Library's own change event, and holds a
-reload while the user is mid-edit.
+spelling back. The section polls a stamp of both files, the learner's queue, and every
+dictation and meeting source every 1.5 seconds. It holds a reload while the
+user is mid-edit.
 
 Spellings that differ only in case are one term. Renaming a term rewrites
 its lines in both files instead of adding a second entry, and when
 `learned.md` holds a new casing of a `vocabulary.md` term, the decoder uses
 the learned spelling and points the term's rules at it (`Lexicon::refresh`).
 
-**Opening the Library.** The Dictionary loads on its own, without waiting
-for the Library's dictations, takes and meetings, and both panes say they
-are loading. It opens on the newest fix waiting for review, or else on the
-word that came up most recently, and says where fixes appear when none are
-waiting. Before reading, the Library asks iCloud for every evicted file it
-needs in one batch through `NSFileManager`, waits up to 3 s, and shows what
-is still missing as "Downloading from iCloud". A watcher reloads the Library
-as the files arrive, and loads made while it runs do not wait again. Asking
-in one batch brought 30 files back in 2.5 s, where reading them took about
-0.8 s each.
+**Opening the Library.** The Dictionary reads only dictations, meetings and
+its two word files. It never reads takes. Opening it starts one Dictionary
+load and no Library load. It opens on the newest fix waiting for review, or
+else on the word that came up most recently. Leaving the Dictionary loads
+the Library if it has not loaded yet. Both show their loading state while
+they work.
+
+Documents stays the source of truth for every file. iCloud carries those
+files between Macs. Media stays there too, so macOS can evict recordings
+when the disk fills. Application Support holds a disposable read copy of
+each text file in its shadow folder. Each copy follows the source's absolute
+path and keeps its size and modified time. Matching stamps let the app read
+the copy without opening an evicted source. Local reads update the copy.
+Edits still read and write the real files.
+
+A load asks iCloud for evicted sources with no matching copy and returns
+without waiting. It uses an older copy while a changed source downloads.
+With no copy, the Library shows "Downloading from iCloud" and the Dictionary
+says its counts are incomplete. A dictation that finds its word files evicted
+with no copy runs without them, asks iCloud for them, and picks them up on the
+next dictation. A watcher reloads the Library as files
+arrive. The Dictionary's stamp poll sees those arrivals too. An unchanged
+stamp reuses the last snapshot, so its counts do not need to be computed
+again. Copies of deleted sources and stray temp files are removed after a
+Library load.
 
 ## What is verified
 
+- The shadow, run on 2026-11-02 with release builds of main and this branch
+  against 230 scratch text files in iCloud Documents. The timer runs from the
+  Library window opening on the Dictionary to its rows showing. With every
+  file local, the median was 269 ms on main and 154 ms here, 7 alternating
+  runs each. Of the 154 ms, 131 ms is the webview starting before any
+  JavaScript runs. With every file evicted, the median was 9.9 s on main, 8
+  runs from 3.8 to 23.8 s, and 279 ms here, 7 runs from 129 to 729 ms. Other
+  builds kept the machine busy, so both sides were alternated. With every file
+  evicted and no copies, rows show in a median 299 ms, 3 runs, with 14 of 112
+  rows at first and the rest as iCloud delivers them.
+- A dictation with its word files evicted and no copies, run through `eval` on
+  the personal corpus with `SEE_COMPUTER_VOCABULARY` on a scratch iCloud file.
+  Without the download request the run lost the word list, 204 errors and 3/12
+  terms, and the files stayed evicted. With it the run scored 199 errors and
+  8/12 terms, line for line the same as main, and the files came back.
 - Follow-up Rust suite: 242 passed and one ignored. Clippy passed with
   warnings denied. Tests cover one-letter rejection before paste and ledger
   writes, conflict copies in recents and the Library, fixes to those copies,
@@ -455,7 +485,8 @@ Follow-up still open:
   such as `dictionary` or `edit:dictation:2026-10-15@<ms>`, so a check can
   drive it without clicking the menu bar), `SEE_COMPUTER_DOCUMENTS_DIR` (moves
   the see.computer folder, meetings and takes included, for a check that must
-  not touch the real one), and
+  not touch the real one), `SEE_COMPUTER_SHADOW_DIR` (moves the read copies
+  out of Application Support), and
   `SEE_COMPUTER_READBACK_LOG` (one line per watch with the app and outcome,
   never the text), and `SEE_COMPUTER_PASTE=hold`, which holds the words
   instead of pasting. Use it with the screen locked: the lock screen reports
@@ -470,7 +501,10 @@ Follow-up still open:
 
 Everything stays on the Mac. The ledger, its audio and the corpus live in
 Application Support, not in Documents, which may sync to iCloud.
-`learned.md` sits beside `vocabulary.md` and syncs with it. Read-back reads
+`learned.md` sits beside `vocabulary.md` and syncs with it. Application
+Support also holds the shadow folder, a copy of the dictation and meeting text
+in Documents, so that text stays on this Mac's disk after iCloud evicts the
+source. Deleting a source removes its copy on the next Library load. Read-back reads
 only the field captured when the paste was decided, or, in an Electron app
 that answered nothing then, the field focused a quarter second later. It
 reads for at most 90 seconds and stores only the region of the user's own

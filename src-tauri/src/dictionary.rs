@@ -7,11 +7,12 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::Mutex;
 
 use crate::history::History;
 use crate::ledger::{Learning, Ledger};
 use crate::library::Spoken;
+use crate::shadow::Text;
 use crate::vocabulary::{same, Document, Edit, Files, Line};
 
 /// How many transcript lines a term's detail lists.
@@ -22,6 +23,7 @@ pub struct Dictionary {
     history: History,
     /// Fixed at launch, the moment the ledger fixes the one it writes.
     vocabulary: PathBuf,
+    memo: Mutex<Option<Snapshot>>,
 }
 
 impl Dictionary {
@@ -30,6 +32,7 @@ impl Dictionary {
             ledger,
             history,
             vocabulary: crate::boost::Lexicon::default_path(),
+            memo: Mutex::new(None),
         }
     }
 
@@ -41,40 +44,71 @@ impl Dictionary {
     /// they run makes the next poll differ instead of hiding in this one.
     fn snapshot(&self) -> Result<Snapshot, String> {
         let files = self.files();
-        let stamp = self.stamp(&files);
         let root = self.history.root();
-        crate::library::fetch(&root, std::time::Duration::from_secs(3));
-        let (vocabulary, learned) = files
-            .read()
-            .map_err(|error| format!("Unable to read your dictionary: {error}."))?;
-        let learning = self.ledger.learning();
-        let corpus = Corpus::new(crate::library::spoken(&root));
-        let mut snapshot = snapshot(&vocabulary, &learned, &learning, &corpus);
-        snapshot.stamp = stamp;
-        snapshot.in_icloud = crate::library::in_icloud(&root);
-        Ok(snapshot)
+        let mut sources = crate::library::spoken_sources(&root);
+        sources.extend([files.vocabulary.clone(), files.learned.clone()]);
+        crate::library::request(&sources);
+        let stamp = stamp(&sources, &self.ledger.learning());
+        memoized(&self.memo, stamp, || {
+            let vocabulary = display(&files.vocabulary)?;
+            let learned = display(&files.learned)?;
+            let learning = self.ledger.learning();
+            let corpus = Corpus::new(crate::library::spoken(&root));
+            let mut snapshot = snapshot(&vocabulary, &learned, &learning, &corpus);
+            snapshot.in_icloud = crate::library::in_icloud(&sources);
+            Ok(snapshot)
+        })
     }
 
-    /// Changes whenever the files or the learner's queue do. New dictations
-    /// and meetings reach the Library through its own `library-changed`.
-    fn stamp(&self, files: &Files) -> String {
-        let mut hasher = DefaultHasher::new();
-        file_stamp(&files.vocabulary).hash(&mut hasher);
-        file_stamp(&files.learned).hash(&mut hasher);
-        let learning = self.ledger.learning();
-        learning.learned.hash(&mut hasher);
-        for waiting in &learning.waiting {
-            waiting.term.hash(&mut hasher);
-        }
-        learning.heard.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+    fn sources(&self) -> Vec<PathBuf> {
+        let files = self.files();
+        let mut sources = crate::library::spoken_sources(&self.history.root());
+        sources.extend([files.vocabulary, files.learned]);
+        sources
     }
 }
 
-fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|meta| Some((meta.modified().ok()?, meta.len())))
+fn display(path: &Path) -> Result<Document, String> {
+    match crate::shadow::read(path) {
+        Text::Current(text) | Text::Stale(text) => Ok(Document::parse(&text)),
+        Text::Waiting => Ok(Document::default()),
+        Text::Missing if path.exists() => Err(format!(
+            "Unable to read your dictionary: {}.",
+            path.display()
+        )),
+        Text::Missing => Ok(Document::default()),
+    }
+}
+
+fn memoized(
+    memo: &Mutex<Option<Snapshot>>,
+    stamp: String,
+    build: impl FnOnce() -> Result<Snapshot, String>,
+) -> Result<Snapshot, String> {
+    let mut memo = memo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(done) = memo.as_ref().filter(|done| done.stamp == stamp) {
+        return Ok(done.clone());
+    }
+    let mut fresh = build()?;
+    fresh.stamp = stamp;
+    *memo = Some(fresh.clone());
+    Ok(fresh)
+}
+
+fn stamp(sources: &[PathBuf], learning: &Learning) -> String {
+    let mut hasher = DefaultHasher::new();
+    for path in sources {
+        path.hash(&mut hasher);
+        crate::shadow::stamp(path).hash(&mut hasher);
+    }
+    learning.learned.hash(&mut hasher);
+    for waiting in &learning.waiting {
+        waiting.term.hash(&mut hasher);
+    }
+    learning.heard.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// Every dictation and meeting line, newest first, joined into one haystack
@@ -143,7 +177,7 @@ impl Forms {
     }
 }
 
-#[derive(Debug, Default, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     stamp: String,
@@ -155,7 +189,7 @@ pub struct Snapshot {
     waiting: Vec<Waiting>,
 }
 
-#[derive(Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Word {
     term: String,
@@ -169,14 +203,14 @@ struct Word {
     recent: Vec<Recent>,
 }
 
-#[derive(Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 struct Rule {
     heard: String,
     learned: bool,
 }
 
 /// A transcript line the term came out in, as the Library can open it.
-#[derive(Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Recent {
     item: String,
@@ -186,7 +220,7 @@ struct Recent {
     misheard: bool,
 }
 
-#[derive(Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 struct Waiting {
     term: String,
     heard: Option<String>,
@@ -348,7 +382,7 @@ pub async fn dictionary_load(state: tauri::State<'_, Dictionary>) -> Result<Snap
 
 #[tauri::command]
 pub async fn dictionary_stamp(state: tauri::State<'_, Dictionary>) -> Result<String, String> {
-    Ok(state.stamp(&state.files()))
+    Ok(stamp(&state.sources(), &state.ledger.learning()))
 }
 
 #[tauri::command]
@@ -404,6 +438,61 @@ mod tests {
             &Learning::default(),
             &corpus(history),
         )
+    }
+
+    #[test]
+    fn unchanged_snapshot_reuses_its_counts() {
+        let memo = Mutex::new(None);
+        let first = memoized(&memo, "same".into(), || {
+            Ok(snapshot_of("- Tauri\n", &["Tauri builds"]))
+        })
+        .unwrap();
+        let second = memoized(&memo, "same".into(), || {
+            panic!("unchanged snapshot recomputed")
+        })
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(second.words[0].right, 1);
+        let changed = memoized(&memo, "changed".into(), || {
+            Ok(snapshot_of("- Tauri\n", &["Tauri Tauri"]))
+        })
+        .unwrap();
+        assert_eq!(changed.words[0].right, 2);
+    }
+
+    #[test]
+    fn a_word_file_that_cannot_be_read_is_an_error() {
+        let root = std::env::temp_dir().join(format!("dictionary-word-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("vocabulary.md")).unwrap();
+        assert!(display(&root.join("vocabulary.md")).is_err());
+        assert_eq!(
+            display(&root.join("learned.md")).unwrap(),
+            Document::default(),
+            "a file that is not there yet is an empty list"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stamp_tracks_day_files() {
+        let root = std::env::temp_dir().join(format!("dictionary-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("2026-10-07.md");
+        std::fs::write(&path, "First").unwrap();
+        let sources = vec![path.clone()];
+        let learning = Learning::default();
+        let before = stamp(&sources, &learning);
+        assert_eq!(before, stamp(&sources, &learning));
+        std::fs::write(&path, "Second version").unwrap();
+        let changed = stamp(&sources, &learning);
+        assert_ne!(before, changed);
+        crate::shadow::read(&path);
+        assert_eq!(
+            changed,
+            stamp(&sources, &learning),
+            "writing the copy does not make the next poll reload"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

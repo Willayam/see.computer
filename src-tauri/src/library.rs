@@ -1,4 +1,5 @@
-use std::path::Path;
+use crate::shadow::{self, evicted, Text};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use chrono::{Local, NaiveDateTime, TimeZone};
@@ -171,8 +172,10 @@ fn set_active(app: &AppHandle, active: bool) {
 #[tauri::command]
 pub async fn library_items(history: State<'_, History>) -> Result<Vec<Item>, String> {
     let root = history.root();
-    fetch(&root, std::time::Duration::from_secs(3));
-    Ok(items(&root))
+    request(&read_by_items(&root, &crate::paths::documents()));
+    let result = items(&root);
+    shadow::prune();
+    Ok(result)
 }
 
 #[tauri::command]
@@ -196,18 +199,6 @@ pub async fn library_download(paths: Vec<String>) {
         }
         changed();
     });
-}
-
-/// When the disk fills, macOS moves files in an iCloud Documents folder to
-/// the cloud and leaves a placeholder. Reading one waits for its download,
-/// 1.2 to 1.4 s each, and the downloads run one after another, so a Library
-/// that read every file was blank for minutes. Asking for all of them at
-/// once brought 30 back in 2.5 s on 2026-10-16.
-const SF_DATALESS: u32 = 0x4000_0000;
-
-pub(crate) fn evicted(path: &Path) -> bool {
-    use std::os::darwin::fs::MetadataExt;
-    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.st_flags() & SF_DATALESS != 0)
 }
 
 /// The files `items` reads, as opposed to the media it only links to.
@@ -237,57 +228,60 @@ fn read_by_items(history_root: &Path, documents: &Path) -> Vec<std::path::PathBu
     files
 }
 
-/// How many files the Library reads are still in iCloud.
-pub(crate) fn in_icloud(history_root: &Path) -> usize {
-    read_by_items(history_root, &crate::paths::documents())
-        .iter()
-        .filter(|path| evicted(path))
-        .count()
+pub(crate) fn in_icloud(sources: &[PathBuf]) -> usize {
+    sources.iter().filter(|path| shadow::behind(path)).count()
 }
 
 static FETCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PENDING: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
-/// Asks iCloud for every evicted file the Library reads and waits up to
-/// `wait` for them. Any still in the cloud show as downloading, and the
-/// Library reloads once they arrive. While that watch runs, a load does not
-/// wait again, so a stalled download costs one wait, not one per load.
-pub(crate) fn fetch(history_root: &Path, wait: std::time::Duration) {
+pub(crate) fn request(sources: &[PathBuf]) {
     use std::sync::atomic::Ordering;
-    if FETCHING.load(Ordering::SeqCst) {
-        return;
-    }
-    let documents = crate::paths::documents();
-    let pending = |files: &[std::path::PathBuf]| -> Vec<std::path::PathBuf> {
-        files.iter().filter(|path| evicted(path)).cloned().collect()
-    };
-    let missing = pending(&read_by_items(history_root, &documents));
+    let missing: Vec<_> = sources
+        .iter()
+        .filter(|path| shadow::behind(path))
+        .cloned()
+        .collect();
     if missing.is_empty() {
         return;
     }
     download(&missing);
-    let deadline = std::time::Instant::now() + wait;
-    let mut left = missing;
-    while !left.is_empty() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        left = pending(&left);
-    }
-    if left.is_empty() || FETCHING.swap(true, Ordering::SeqCst) {
+    let mut pending = PENDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    pending.extend(missing);
+    pending.sort();
+    pending.dedup();
+    if FETCHING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         return;
     }
-    std::thread::spawn(move || {
+    std::thread::spawn(|| {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
         let mut reported = std::time::Instant::now();
-        let mut before = left.len();
-        while !left.is_empty() && std::time::Instant::now() < deadline {
+        let mut arrived = false;
+        loop {
             std::thread::sleep(std::time::Duration::from_millis(500));
-            left = pending(&left);
-            if left.len() < before && (left.is_empty() || reported.elapsed().as_secs() >= 5) {
+            let mut pending = PENDING
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let before = pending.len();
+            pending.retain(|path| shadow::behind(path));
+            arrived |= pending.len() < before;
+            let done = pending.is_empty() || std::time::Instant::now() >= deadline;
+            if arrived && (done || reported.elapsed().as_secs() >= 5) {
                 changed();
                 reported = std::time::Instant::now();
-                before = left.len();
+                arrived = false;
+            }
+            if done {
+                pending.clear();
+                FETCHING.store(false, Ordering::SeqCst);
+                break;
             }
         }
-        FETCHING.store(false, Ordering::SeqCst);
     });
 }
 
@@ -477,9 +471,27 @@ pub struct Spoken {
 
 /// Every dictation and meeting line, newest first.
 pub fn spoken(history_root: &Path) -> Vec<Spoken> {
-    let mut out: Vec<Spoken> = items(history_root)
+    spoken_in(history_root, &crate::paths::documents())
+}
+
+fn spoken_in(history_root: &Path, documents: &Path) -> Vec<Spoken> {
+    let mut out: Vec<Spoken> = spoken_sources_in(history_root, documents)
         .into_iter()
-        .filter(|item| matches!(item.kind, "dictation" | "meeting"))
+        .filter_map(|path| {
+            if path
+                .file_name()
+                .is_some_and(|name| name == folder::MANIFEST)
+            {
+                meeting(path.parent()?)
+            } else if path
+                .file_name()
+                .is_some_and(|name| name == folder::MARKDOWN)
+            {
+                None
+            } else {
+                day(&path)
+            }
+        })
         .flat_map(|item| {
             let base = if item.kind == "meeting" { item.at } else { 0 };
             item.lines.into_iter().map(move |line| Spoken {
@@ -492,6 +504,41 @@ pub fn spoken(history_root: &Path) -> Vec<Spoken> {
         .collect();
     out.sort_by_key(|line| std::cmp::Reverse(line.at_ms));
     out
+}
+
+pub fn spoken_sources(history_root: &Path) -> Vec<PathBuf> {
+    spoken_sources_in(history_root, &crate::paths::documents())
+}
+
+fn spoken_sources_in(history_root: &Path, documents: &Path) -> Vec<PathBuf> {
+    let mut sources: Vec<_> = std::fs::read_dir(history_root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "md")
+                && path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .and_then(crate::history::day_file_date)
+                    .is_some()
+        })
+        .collect();
+    for entry in std::fs::read_dir(documents).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir()
+            && path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("meeting-"))
+        {
+            sources.push(path.join(folder::MANIFEST));
+            sources.push(path.join(folder::MARKDOWN));
+        }
+    }
+    sources.sort();
+    sources.dedup();
+    sources
 }
 
 fn path_string(path: &Path) -> String {
@@ -512,7 +559,8 @@ fn day(path: &Path) -> Option<Item> {
     let date = crate::history::day_file_date(file)?
         .format("%Y-%m-%d")
         .to_string();
-    if evicted(path) {
+    let content = shadow::read(path);
+    if matches!(content, Text::Waiting) {
         return Some(in_cloud(
             format!("dictation:{file}"),
             "dictation",
@@ -521,7 +569,7 @@ fn day(path: &Path) -> Option<Item> {
             Some(path_string(path)),
         ));
     }
-    let content = std::fs::read_to_string(path).ok()?;
+    let content = content.text()?;
     let mut lines = Vec::new();
     let mut time = None;
     let mut body = String::new();
@@ -646,7 +694,9 @@ fn fixed_meeting(markdown: &str, start_ms: i64, original: &str, edited: &str) ->
 
 fn meeting(path: &Path) -> Option<Item> {
     let name = path.file_name()?.to_str()?;
-    if evicted(&path.join(folder::MANIFEST)) || evicted(&path.join(folder::MARKDOWN)) {
+    let manifest = shadow::read(&path.join(folder::MANIFEST));
+    let text = shadow::read(&path.join(folder::MARKDOWN));
+    if matches!(manifest, Text::Waiting) || matches!(text, Text::Waiting) {
         let started =
             NaiveDateTime::parse_from_str(name.strip_prefix("meeting-")?, "%Y-%m-%d-%H-%M-%S")
                 .ok()?;
@@ -662,10 +712,10 @@ fn meeting(path: &Path) -> Option<Item> {
             None,
         ));
     }
-    let manifest = folder::read(path)?;
+    let manifest: folder::Manifest = serde_json::from_str(&manifest.text()?).ok()?;
     let markdown = path.join(folder::MARKDOWN);
     let present = markdown.is_file();
-    let paste = std::fs::read_to_string(&markdown).unwrap_or_default();
+    let paste = text.text().unwrap_or_default();
     let media = [(folder::YOU, "you"), (folder::THEM, "them")]
         .into_iter()
         .filter_map(|(name, speaker)| {
@@ -693,7 +743,7 @@ fn meeting(path: &Path) -> Option<Item> {
         error: manifest.error.clone(),
         at: manifest.started_ms,
         duration_ms: manifest.duration_ms(),
-        title: folder::title(path, &manifest),
+        title: folder::title_from_text(&paste, &manifest),
         source: manifest.app,
         lines: meeting_lines(&paste),
         media,
@@ -710,7 +760,8 @@ fn take(path: &Path) -> Option<Item> {
     let markdown = [path.join("take.md"), path.join("clip.md")]
         .into_iter()
         .find(|file| file.is_file());
-    if evicted(&path.join("transcript.json")) {
+    let transcript = shadow::read(&path.join("transcript.json"));
+    if matches!(transcript, Text::Waiting) {
         let name = path.file_name()?.to_str()?;
         let at = name
             .get(..10)
@@ -719,9 +770,9 @@ fn take(path: &Path) -> Option<Item> {
         let markdown = markdown.as_ref().map(|file| path_string(file));
         return Some(in_cloud(format!("take:{name}"), "take", at, path, markdown));
     }
-    let transcript = std::fs::read(path.join("transcript.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    let transcript = transcript
+        .text()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .unwrap_or_default();
     if markdown.is_none() && transcript.is_null() {
         return None;
@@ -834,10 +885,9 @@ fn take(path: &Path) -> Option<Item> {
     }
     media.sort_by_key(|entry| entry.at_ms);
     let markdown_path = markdown.as_ref().map(|path| path_string(path));
-    let share = (!evicted(&path.join("share.json")))
-        .then(|| std::fs::read(path.join("share.json")).ok())
-        .flatten()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    let share = shadow::read(&path.join("share.json"))
+        .text()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|value| {
             value
                 .get("url")
@@ -975,6 +1025,40 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn spoken_sources_ignore_takes() {
+        let root = temp_dir();
+        let day = root.join("2026-10-07.md");
+        std::fs::write(&day, "## 09:00:00\n\nSpoken.\n").unwrap();
+        let take = root.join("2026-10-07-10-00-00");
+        std::fs::create_dir_all(&take).unwrap();
+        std::fs::write(take.join("transcript.json"), "invalid json").unwrap();
+        let meeting = folder::create(
+            &root,
+            Some("Zoom"),
+            local_ms("2026-10-07", "10:00:00").unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            meeting.join(folder::MARKDOWN),
+            "[00:05] You: Meeting words.\n",
+        )
+        .unwrap();
+        let sources = spoken_sources_in(&root, &root);
+        assert_eq!(sources.len(), 3);
+        assert!(sources.contains(&day));
+        assert!(sources.contains(&meeting.join(folder::MANIFEST)));
+        assert!(sources.contains(&meeting.join(folder::MARKDOWN)));
+        let lines = spoken_in(&root, &root);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "Meeting words.");
+        assert_eq!(lines[1].text, "Spoken.");
+        assert!(!crate::paths::shadow()
+            .join(take.strip_prefix("/").unwrap())
+            .exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

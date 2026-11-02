@@ -37,10 +37,17 @@ impl Manifest {
 }
 
 pub fn title(folder: &Path, manifest: &Manifest) -> String {
+    if manifest.app.is_some() {
+        return title_from_text("", manifest);
+    }
+    let text = fs::read_to_string(folder.join(MARKDOWN)).unwrap_or_default();
+    title_from_text(&text, manifest)
+}
+
+pub fn title_from_text(text: &str, manifest: &Manifest) -> String {
     if let Some(app) = &manifest.app {
         return format!("{app} meeting");
     }
-    let text = fs::read_to_string(folder.join(MARKDOWN)).unwrap_or_default();
     let Some(line) = text.lines().find_map(|line| {
         line.split_once(" Them: ")
             .map(|(_, text)| text.trim())
