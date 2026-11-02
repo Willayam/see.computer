@@ -224,8 +224,8 @@ edits on 2026-08-27 found this test 91% precise once a term has two
 sightings and 37% at one; its scripts were not kept, so treat the figures as
 unreproduced. Words now land on the first fix anyway, because deleting a
 wrong row is one click and a boosted word rarely hurts: replaying the real
-log on 2026-11-02 added 14 words, and the 78-clip corpus went from 219
-errors to 216 with no clip worse.
+log on 2026-11-02 added 13 words, and the 78-clip corpus went from 219
+errors to 217 with no clip worse.
 The first fix adds the word to `learned.md`, unless either word file
 already has the term or the user forgot it. A replacement needs weight two
 for that exact heard form across distinct dictations. Read-back counts one;
@@ -446,7 +446,17 @@ Ranked by expected gain per unit of work. Built items are in this branch.
 | 8 | Background miner | nightly job over ledger, history, Daybook, git repos, Wispr's dictionary; optional Haiku pass to judge candidates via the Claude CLI | none | only candidate strings and short contexts leave the machine, and only with Haiku on | finds candidate terms before the user corrects anything | later |
 | 9 | Per-app term sets | ledger's app per dictation | none | local | fewer collateral pushes by boosting only what that app needs | later, after 6 |
 | 10 | Confidence highlighting | token log-probs from the decoder | small | none | points the user at the words to check | later |
-| 11 | LLM rewrite on the paste path | network call per dictation | 0.5 to 2 s | every dictation leaves the machine | unclear, and it rewrites what was said | not planned |
+| 11 | LLM cleanup on the paste path | on-device model per dictation | about 700 ms median for Apple's model, measured under heavy load | local | Apple's on-device model reached 13/14 terms against 9/14 for replacements, but wrote 13 wrong terms against 1. Small Qwen models changed almost nothing. See below | not planned until a model beats replacements |
+
+The 2026-11-02 cleanup test ran Apple's on-device model and two small Qwen
+models over the 78-clip corpus with replacements off, keeping only changes
+that land a dictionary word. Replacements scored 219 errors, 9/14 terms and 1
+wrong term. Apple scored 221 errors, 13/14 and 13 wrong terms, and offering it
+only sound-alike words scored 223, 11/14 and 4. Qwen 3.5 2B scored 219, 8/14
+and 0, but on 411 Wispr samples it wrote the dictionary word in 8 of 111 cases
+where Wispr's cleanup had. Apple wrote "Claude" for "cloud" in 1 of 14 such
+cases, so none of them yet chooses by context the way Wispr's fine-tuned
+model does.
 
 Follow-up still open:
 
