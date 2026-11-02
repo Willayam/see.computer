@@ -63,6 +63,8 @@ pub enum Event {
     Forgotten {
         at: String,
         term: String,
+        #[serde(default)]
+        heard: Option<String>,
     },
 }
 
@@ -102,9 +104,6 @@ pub struct Ledger {
 #[derive(Clone, Default)]
 pub struct Learning {
     pub learned: Vec<String>,
-    pub waiting: Vec<crate::learn::Waiting>,
-    /// What the model wrote in place of each term the user corrected.
-    pub heard: Vec<(String, Vec<String>)>,
 }
 
 impl Ledger {
@@ -244,6 +243,7 @@ impl Ledger {
                                     let event = Event::Forgotten {
                                         at: Local::now().to_rfc3339(),
                                         term: spelling,
+                                        heard: None,
                                     };
                                     if append(&root, &event).is_ok() {
                                         events.push(event);
@@ -572,7 +572,7 @@ fn prune(root: &Path, keep: usize, slack: usize, corrected: &HashSet<Id>) {
     }
 }
 
-const HEADER: &str = "# see.computer learned words\n#\n# Spellings you corrected in your own dictations, learned after two sightings\n# (or one fix in the Fix dialog). These are boosted like vocabulary.md, and a\n# line \"heard -> Word\" also rewrites what the model heard. Delete a line to\n# stop it; it will not be learned again.\n";
+const HEADER: &str = "# see.computer learned words\n#\n# The first fix adds a word. Two fixes of the same heard form add a\n# replacement, or one manual fix. Everyday single words are never replaced.\n# Words are boosted like vocabulary.md. A line \"heard -> Word\" also rewrites what the model heard. Delete a line to\n# stop it; it will not be learned again.\n";
 
 fn save_promotion(
     root: &Path,
@@ -646,13 +646,14 @@ fn fix_notice(
         _ => None,
     })?;
     let known = known_terms(vocabulary);
-    let waiting = crate::learn::waiting(events, &known, words);
     // A word this fix taught comes first: that is the news.
     crate::learn::learned_swaps(pasted, edited, words)
         .into_iter()
         .filter_map(|swap| {
             let learned = learned.contains(&swap.wrote);
-            let open = waiting.iter().any(|w| w.term == swap.wrote) || known.contains(&swap.wrote);
+            let open = known
+                .iter()
+                .any(|e| crate::vocabulary::same(&e.term, &swap.wrote));
             (learned || open).then_some(crate::pill::Fix {
                 heard: swap.heard,
                 wrote: swap.wrote,
@@ -664,7 +665,7 @@ fn fix_notice(
 
 /// Every spelling either file holds, so a casing the user already has is
 /// known even where the decoder prefers the other one.
-fn known_terms(vocabulary: &Path) -> Vec<String> {
+fn known_terms(vocabulary: &Path) -> Vec<crate::vocabulary::Entry> {
     let (vocabulary, learned) = crate::vocabulary::Files::beside(vocabulary)
         .read()
         .unwrap_or_default();
@@ -672,7 +673,7 @@ fn known_terms(vocabulary: &Path) -> Vec<String> {
         .lines()
         .chain(learned.lines())
         .filter_map(|line| match line {
-            crate::vocabulary::Line::Active(entry) => Some(entry.term),
+            crate::vocabulary::Line::Active(entry) => Some(entry),
             _ => None,
         })
         .collect()
@@ -693,37 +694,22 @@ fn announce(pill: &Option<mpsc::Sender<PillEvent>>, names: &[String]) {
 fn update_learning(
     snapshot: &Arc<Mutex<Learning>>,
     events: &[Event],
-    vocabulary: &Path,
-    words: &crate::learn::Words,
+    _vocabulary: &Path,
+    _words: &crate::learn::Words,
 ) {
-    let known = known_terms(vocabulary);
-    // The latest decision about a spelling stands: a term renamed away and
-    // back is learned again.
-    let mut forgotten = HashSet::new();
-    for event in events {
-        match event {
-            Event::Forgotten { term, .. } => {
-                forgotten.insert(term.as_str());
-            }
-            Event::Learned { term, .. } => {
-                forgotten.remove(term.as_str());
-            }
-            _ => {}
-        }
-    }
     let mut learning = Learning::default();
     for event in events.iter().rev() {
-        match event {
-            Event::Learned { term, .. }
-                if !forgotten.contains(term.as_str()) && !learning.learned.contains(term) =>
+        if let Event::Learned { term, heard, .. } = event {
+            if !crate::learn::forgotten(events, term, heard.as_deref())
+                && !learning
+                    .learned
+                    .iter()
+                    .any(|t| crate::vocabulary::same(t, term))
             {
-                learning.learned.push(term.clone())
+                learning.learned.push(term.clone());
             }
-            _ => {}
         }
     }
-    learning.waiting = crate::learn::waiting(events, &known, words);
-    learning.heard = crate::learn::heard_forms(events, words);
     *snapshot
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = learning;
@@ -789,85 +775,38 @@ fn remove_term(path: &Path, term: &str) -> std::io::Result<Vec<String>> {
     Ok(spellings)
 }
 
-/// Learning a waiting word and ignoring one change only the log; every other
-/// edit changes the files first and then records what the learner must know.
 fn apply_edit(
     root: &Path,
     vocabulary: &Path,
-    words: &crate::learn::Words,
+    _words: &crate::learn::Words,
     events: &mut Vec<Event>,
-    pill: &Option<mpsc::Sender<PillEvent>>,
+    _pill: &Option<mpsc::Sender<PillEvent>>,
     edit: crate::vocabulary::Edit,
 ) -> Result<(), String> {
-    use crate::vocabulary::{Edit, Files, Note};
-    const GONE: &str = "That word is no longer waiting, so the list has been reloaded.";
+    use crate::vocabulary::{Files, Note};
     let now = || Local::now().to_rfc3339();
     let record = |events: &mut Vec<Event>, event: Event| {
         append(root, &event).map_err(|error| format!("Unable to save: {error}."))?;
         events.push(event);
         Ok::<(), String>(())
     };
-    match edit {
-        Edit::Learn { term, edited } => {
-            let known = known_terms(vocabulary);
-            let waiting = crate::learn::waiting(events, &known, words)
-                .into_iter()
-                .find(|waiting| waiting.term == term)
-                .ok_or(GONE)?;
-            let (spelling, heard) = match edited {
-                Some(c) => (c.term, c.heard),
-                None => (waiting.term.clone(), waiting.heard.into_iter().next()),
-            };
-            let recorded_spelling_was_wrong = spelling != waiting.term;
-            if recorded_spelling_was_wrong {
-                if known.iter().any(|k| k.eq_ignore_ascii_case(&spelling)) {
-                    return Err(format!(
-                        "\u{201c}{spelling}\u{201d} is already in your dictionary. Open it there to add a heard form."
-                    ));
-                }
-                record(
-                    events,
-                    Event::Forgotten {
-                        at: now(),
-                        term: waiting.term,
-                    },
-                )?;
-            }
-            let promotion = crate::learn::Promotion {
-                term: spelling,
-                heard,
-                from: waiting.from,
-            };
-            announce(pill, std::slice::from_ref(&promotion.term));
-            save_promotion(root, vocabulary, events, promotion);
-            Ok(())
-        }
-        Edit::Ignore { term } => {
-            let known = known_terms(vocabulary);
-            if !crate::learn::waiting(events, &known, words)
-                .iter()
-                .any(|waiting| waiting.term == term)
-            {
-                return Err(GONE.to_owned());
-            }
-            record(events, Event::Forgotten { at: now(), term })
-        }
-        edit => {
-            for note in Files::beside(vocabulary).edit(&edit)? {
-                let event = match note {
-                    Note::Forgot(term) => Event::Forgotten { at: now(), term },
-                    Note::Learned(term) => Event::Learned {
-                        at: now(),
-                        term,
-                        heard: None,
-                        from: Vec::new(),
-                    },
-                };
-                record(events, event)?;
-            }
-            Ok(())
-        }
+    for note in Files::beside(vocabulary).edit(&edit)? {
+        let event = match note {
+            Note::Forgot(term) => Event::Forgotten {
+                at: now(),
+                term,
+                heard: None,
+            },
+            Note::Learned(term) => Event::Learned {
+                at: now(),
+                term,
+                heard: None,
+                from: Vec::new(),
+            },
+        };
+        record(events, event)?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1086,38 +1025,6 @@ mod tests {
             .lines()
             .all(|l| l.starts_with('#')));
         assert!(ledger.learning().learned.is_empty());
-    }
-
-    #[test]
-    fn a_waiting_word_learns_as_the_user_corrected_it() {
-        let (ledger, root) = fixture(500);
-        let id = ledger.mint();
-        ledger.dictated(
-            &id,
-            "open t three tree air",
-            crate::mic::Audio16k::silence(0.01),
-        );
-        ledger.corrected(&id, "open T3 triage", Source::ReadBack);
-        ledger.flush();
-        let waiting = ledger.learning().waiting;
-        assert_eq!(waiting.len(), 1, "{waiting:?}");
-        let edit = crate::vocabulary::Edit::Learn {
-            term: waiting[0].term.clone(),
-            edited: Some(crate::vocabulary::Correction {
-                term: "T3 Triage".into(),
-                heard: Some("t three triage".into()),
-            }),
-        };
-        ledger.edit(edit).recv().unwrap().unwrap();
-        let learned = fs::read_to_string(root.join("learned.md")).unwrap();
-        assert!(
-            learned.contains("- t three triage -> T3 Triage\n"),
-            "{learned}"
-        );
-        assert!(
-            ledger.learning().waiting.is_empty(),
-            "the recorded spelling is not offered again"
-        );
     }
 
     #[test]

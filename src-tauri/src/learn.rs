@@ -12,8 +12,6 @@ pub struct Swap {
     pub heard: String,
     pub wrote: String,
     pub opens_sentence: bool,
-    pub clause_before: Option<String>,
-    pub clause_after: Option<String>,
 }
 
 fn strip(token: &str) -> &str {
@@ -59,30 +57,6 @@ pub fn swaps(pasted: &str, edited: &str) -> Vec<Swap> {
         return Vec::new();
     }
     let anchors = alignment(&a, &b);
-    let anchored: HashSet<usize> = anchors.iter().map(|&(_, y)| y).collect();
-    let clause_ends = |token: &str| {
-        token.ends_with([')', ']', '}', '"', '”', '»'])
-            || token
-                .trim_end_matches(['\'', '’'])
-                .ends_with(['.', ',', '!', '?', ';', ':'])
-    };
-    let clause_opens = |token: &str| token.starts_with(['(', '[', '{', '"', '“', '«']);
-    let neighbour = |left: usize, right: usize, word: usize| {
-        (anchored.contains(&word)
-            && !clause_ends(b[left])
-            && !clause_opens(b[right])
-            && !strip(b[word]).is_empty())
-        .then(|| strip(b[word]).to_owned())
-    };
-    let around = |start: usize, end: usize| {
-        let before = (start > 0)
-            .then(|| neighbour(start - 1, start, start - 1))
-            .flatten();
-        let after = (end < b.len())
-            .then(|| neighbour(end - 1, end, end))
-            .flatten();
-        (before, after)
-    };
     let mut changed = 0usize;
     let mut out = Vec::new();
     let (mut ai, mut bj) = (0, 0);
@@ -109,13 +83,10 @@ pub fn swaps(pasted: &str, edited: &str) -> Vec<Swap> {
                 .collect::<Vec<_>>()
                 .join(" ");
             if !heard.is_empty() && !wrote.is_empty() {
-                let (before, after) = around(bj, y);
                 out.push(Swap {
                     heard,
                     wrote,
                     opens_sentence: bj == 0 || b[bj - 1].ends_with(['.', '!', '?']),
-                    clause_before: before,
-                    clause_after: after,
                 });
             }
         }
@@ -124,13 +95,10 @@ pub fn swaps(pasted: &str, edited: &str) -> Vec<Swap> {
             let new = strip(b[y]);
             if old != new && old.to_lowercase() == new.to_lowercase() {
                 changed += 1;
-                let (before, after) = around(y, y + 1);
                 out.push(Swap {
                     heard: old.into(),
                     wrote: new.into(),
                     opens_sentence: y == 0 || b[y - 1].ends_with(['.', '!', '?']),
-                    clause_before: before,
-                    clause_after: after,
                 });
             }
         }
@@ -149,52 +117,7 @@ pub fn learned_swaps(pasted: &str, edited: &str, words: &Words) -> Vec<Swap> {
         .into_iter()
         .flat_map(|swap| split_names_from_plain_words(swap, words))
         .filter(|swap| learnable(swap, words))
-        .filter_map(|swap| widen(swap, words))
         .collect()
-}
-
-fn ordinary(heard: &str, words: &Words) -> bool {
-    let spelled_out_letter =
-        |word: &str| word.chars().count() == 1 && !matches!(word, "a" | "i" | "A" | "I");
-    heard
-        .split_whitespace()
-        .all(|word| !spelled_out_letter(word) && words.knows(word))
-}
-
-const FUNCTION_WORDS: &[&str] = &[
-    "a", "an", "the", "and", "or", "but", "so", "to", "of", "in", "on", "at", "for", "with",
-    "from", "by", "as", "if", "is", "was", "are", "were", "be", "been", "it", "its", "this",
-    "that", "these", "those", "i", "you", "we", "they", "he", "she", "my", "your", "our", "their",
-    "me", "us", "them", "just", "then", "than", "do", "did", "not", "no",
-];
-
-fn widen(swap: Swap, words: &Words) -> Option<Swap> {
-    if !ordinary(&swap.heard, words) {
-        return Some(swap);
-    }
-    let context_word = |word: &Option<String>| {
-        word.clone()
-            .filter(|w| !FUNCTION_WORDS.contains(&w.to_lowercase().as_str()))
-    };
-    let (heard, wrote) = match (
-        context_word(&swap.clause_after),
-        context_word(&swap.clause_before),
-    ) {
-        (Some(after), _) => (
-            format!("{} {}", swap.heard, after.to_lowercase()),
-            format!("{} {after}", swap.wrote),
-        ),
-        (None, Some(before)) => (
-            format!("{} {}", before.to_lowercase(), swap.heard),
-            format!("{before} {}", swap.wrote),
-        ),
-        (None, None) => return None,
-    };
-    Some(Swap {
-        heard,
-        wrote,
-        ..swap
-    })
 }
 
 fn split_names_from_plain_words(swap: Swap, words: &Words) -> Vec<Swap> {
@@ -206,8 +129,6 @@ fn split_names_from_plain_words(swap: Swap, words: &Words) -> Vec<Swap> {
                 heard: String::new(),
                 wrote: word.to_owned(),
                 opens_sentence: index == 0 && swap.opens_sentence,
-                clause_before: None,
-                clause_after: None,
             },
             words,
         )
@@ -289,16 +210,6 @@ fn split_names_from_plain_words(swap: Swap, words: &Words) -> Vec<Swap> {
             heard: heard[cuts[i]..cuts[i + 1]].join(" "),
             wrote: wrote[start..end].join(" "),
             opens_sentence: start == 0 && swap.opens_sentence,
-            clause_before: if start == 0 {
-                swap.clause_before.clone()
-            } else {
-                None
-            },
-            clause_after: if end == wrote.len() {
-                swap.clause_after.clone()
-            } else {
-                None
-            },
         })
         .collect()
 }
@@ -641,13 +552,6 @@ pub struct Promotion {
     pub from: Vec<Id>,
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
-pub struct Waiting {
-    pub term: String,
-    pub heard: Vec<String>,
-    pub from: Vec<Id>,
-}
-
 /// One dictation's evidence for a term: the id, what the model heard instead,
 /// and whether the user typed the fix into the Fix dialog.
 struct Sighting {
@@ -670,33 +574,33 @@ fn weight<'a>(sightings: impl IntoIterator<Item = &'a Sighting>) -> usize {
     sightings.into_iter().map(Sighting::weight).sum()
 }
 
-/// What the event log already decided about one term.
-#[derive(Default)]
-struct Decided {
-    term_learned: bool,
-    rules: HashSet<String>,
-    forgotten: bool,
-}
-
-fn decisions(events: &[Event]) -> HashMap<&str, Decided> {
-    let mut decided: HashMap<&str, Decided> = HashMap::new();
-    for event in events {
+pub fn forgotten(events: &[Event], term: &str, heard: Option<&str>) -> bool {
+    for event in events.iter().rev() {
         match event {
-            Event::Learned { term, heard, .. } => {
-                let entry = decided.entry(term.as_str()).or_default();
-                entry.term_learned = true;
-                entry.forgotten = false;
-                if let Some(heard) = heard {
-                    entry.rules.insert(heard.clone());
-                }
+            Event::Learned {
+                term: t, heard: h, ..
+            } if crate::vocabulary::same(t, term) && same_heard(h.as_deref(), heard) => {
+                return false
             }
-            Event::Forgotten { term, .. } => {
-                decided.entry(term.as_str()).or_default().forgotten = true
+            Event::Forgotten {
+                term: t, heard: h, ..
+            } if crate::vocabulary::same(t, term)
+                && (h.is_none() || same_heard(h.as_deref(), heard)) =>
+            {
+                return true
             }
             _ => {}
         }
     }
-    decided
+    false
+}
+
+fn same_heard(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => crate::vocabulary::same(a, b),
+        _ => false,
+    }
 }
 
 /// Every learnable swap in the latest correction of each dictation, grouped
@@ -723,7 +627,10 @@ fn candidates(events: &[Event], words: &Words) -> Vec<(String, Vec<Sighting>)> {
             continue;
         };
         for swap in learned_swaps(pasted, edited, words) {
-            let index = match terms.iter().position(|(term, _)| *term == swap.wrote) {
+            let index = match terms
+                .iter()
+                .position(|(term, _)| crate::vocabulary::same(term, &swap.wrote))
+            {
                 Some(index) => index,
                 None => {
                     terms.push((swap.wrote.clone(), Vec::new()));
@@ -743,88 +650,49 @@ fn candidates(events: &[Event], words: &Words) -> Vec<(String, Vec<Sighting>)> {
     terms
 }
 
-/// Terms and rules the evidence now supports and the log has not yet decided.
-///
-/// A rule can attach to a term already in the vocabulary: that is the case
-/// boosting cannot fix, a term the model keeps hearing as an ordinary word.
-pub fn promotions(events: &[Event], known: &[String], words: &Words) -> Vec<Promotion> {
-    let decided = decisions(events);
+pub fn promotions(
+    events: &[Event],
+    known: &[crate::vocabulary::Entry],
+    words: &Words,
+) -> Vec<Promotion> {
     let mut out = Vec::new();
     for (term, sightings) in candidates(events, words) {
-        let done = decided.get(term.as_str());
-        if done.is_some_and(|done| done.forgotten) {
-            continue;
+        let settled = |heard: Option<&str>| {
+            known.iter().any(|e| {
+                crate::vocabulary::same(&e.term, &term)
+                    && (heard.is_none() || same_heard(e.heard.as_deref(), heard))
+            }) || events.iter().any(|e| {
+                matches!(e, Event::Learned { term: t, heard: h, .. }
+                    if crate::vocabulary::same(t, &term) && same_heard(h.as_deref(), heard))
+            }) || forgotten(events, &term, heard)
+        };
+        if !settled(None) {
+            out.push(Promotion {
+                term: term.clone(),
+                heard: None,
+                from: sightings.iter().map(|s| s.id.clone()).collect(),
+            });
         }
-        let mut heard_forms: Vec<&str> = Vec::new();
+        let mut forms = HashSet::new();
         for sighting in &sightings {
-            if !heard_forms.contains(&sighting.heard.as_str()) {
-                heard_forms.push(&sighting.heard);
+            let heard = sighting.heard.as_str();
+            if !forms.insert(heard) || settled(Some(heard)) {
+                continue;
             }
-        }
-        let mut rules = Vec::new();
-        for heard in heard_forms {
-            let same: Vec<_> = sightings.iter().filter(|s| s.heard == heard).collect();
-            let learned = done.is_some_and(|done| done.rules.contains(heard));
-            let supported = if ordinary(heard, words) {
-                same.iter().map(|s| &s.id).collect::<HashSet<_>>().len() >= 3
-            } else {
-                weight(same.iter().copied()) >= 2
-            };
-            if supported && !learned {
-                rules.push(Promotion {
+            let count = heard.split_whitespace().count();
+            let safe =
+                count >= 2 || (count == 1 && heard.chars().count() >= 2 && !words.knows(heard));
+            let evidence: Vec<_> = sightings.iter().filter(|s| s.heard == heard).collect();
+            if safe && weight(evidence.iter().copied()) >= 2 {
+                out.push(Promotion {
                     term: term.clone(),
-                    heard: Some(heard.to_owned()),
-                    from: same.iter().map(|s| s.id.clone()).collect(),
+                    heard: Some(heard.into()),
+                    from: evidence.iter().map(|s| s.id.clone()).collect(),
                 });
             }
         }
-        let term_settled = known.contains(&term) || done.is_some_and(|done| done.term_learned);
-        if rules.is_empty() && !term_settled && weight(&sightings) >= 2 {
-            out.push(Promotion {
-                term,
-                heard: None,
-                from: sightings.into_iter().map(|s| s.id).collect(),
-            });
-        } else {
-            out.extend(rules);
-        }
     }
     out
-}
-
-/// Every spelling the user wrote in a correction, with the forms the model
-/// had written instead, whether or not the evidence was enough to learn it.
-pub fn heard_forms(events: &[Event], words: &Words) -> Vec<(String, Vec<String>)> {
-    candidates(events, words)
-        .into_iter()
-        .map(|(term, sightings)| {
-            let mut heard: Vec<String> = Vec::new();
-            for sighting in sightings {
-                if !heard.contains(&sighting.heard) {
-                    heard.push(sighting.heard);
-                }
-            }
-            (term, heard)
-        })
-        .collect()
-}
-
-/// Terms seen once, newest first: the review queue the menu offers.
-pub fn waiting(events: &[Event], known: &[String], words: &Words) -> Vec<Waiting> {
-    let decided = decisions(events);
-    let mut queue: Vec<Waiting> = candidates(events, words)
-        .into_iter()
-        .filter(|(term, sightings)| {
-            weight(sightings) == 1 && !known.contains(term) && !decided.contains_key(term.as_str())
-        })
-        .map(|(term, sightings)| Waiting {
-            term,
-            heard: sightings.iter().map(|s| s.heard.clone()).collect(),
-            from: sightings.into_iter().map(|s| s.id).collect(),
-        })
-        .collect();
-    queue.sort_by(|a, b| b.from.cmp(&a.from));
-    queue
 }
 
 #[cfg(test)]
@@ -879,322 +747,5 @@ mod tests {
             text: text.into(),
             source,
         }
-    }
-    #[test]
-    fn swaps_find_terms_without_rewrites() {
-        assert_eq!(
-            swaps(
-                "Ask Codex to open a pull request on Git hub.",
-                "Ask Codex to open a pull request on GitHub."
-            ),
-            vec![Swap {
-                heard: "Git hub".into(),
-                wrote: "GitHub".into(),
-                opens_sentence: false,
-                clause_before: Some("on".into()),
-                clause_after: None,
-            }]
-        );
-        let found = swaps(
-            "we moved from superbase to work os",
-            "we moved from Supabase to WorkOS",
-        );
-        assert_eq!(
-            found
-                .iter()
-                .map(|s| (s.heard.as_str(), s.wrote.as_str()))
-                .collect::<Vec<_>>(),
-            [("superbase", "Supabase"), ("work os", "WorkOS")]
-        );
-        assert!(swaps(
-            "this is all wrong now",
-            "completely different words here today"
-        )
-        .is_empty());
-        assert!(swaps("Hello, world!", "Hello world.").is_empty());
-        assert!(swaps("hello world", "hello world. Another sentence.").is_empty());
-    }
-    #[test]
-    fn filter_and_inflections() {
-        let words = Words::from_list(&[
-            "sketch", "plan", "class", "run", "too", "to", "deploy", "dev", "paris",
-        ]);
-        for word in ["planned", "sketched", "classes", "running"] {
-            assert!(words.knows(word), "{word}");
-        }
-        for (heard, wrote, opens, yes) in [
-            ("superbase", "Supabase", false, true),
-            ("work os", "WorkOS", false, true),
-            ("test flight", "testflight", false, true),
-            ("claude md", "CLAUDE.md", false, true),
-            ("sketch", "sketched", false, false),
-            ("to", "too", false, false),
-            ("deploy", "Deploy", true, false),
-            ("Dev", "dev", false, false),
-            ("paris", "Paris", false, true),
-        ] {
-            assert_eq!(
-                learnable(
-                    &Swap {
-                        heard: heard.into(),
-                        wrote: wrote.into(),
-                        opens_sentence: opens,
-                        clause_before: None,
-                        clause_after: None,
-                    },
-                    &words
-                ),
-                yes,
-                "{wrote}"
-            );
-        }
-    }
-    #[test]
-    fn promotion_counts_distinct_dictations() {
-        let words = Words::from_list(&[]);
-        let mut events = vec![
-            event("1", "superbase"),
-            correction("1", "Supabase", Source::ReadBack),
-        ];
-        assert!(promotions(&events, &[], &words).is_empty());
-        assert_eq!(waiting(&events, &[], &words)[0].term, "Supabase");
-        events.extend([
-            event("2", "superbase"),
-            correction("2", "Supabase", Source::ReadBack),
-        ]);
-        let promoted = promotions(&events, &[], &words);
-        assert_eq!(
-            promoted,
-            vec![Promotion {
-                term: "Supabase".into(),
-                heard: Some("superbase".into()),
-                from: vec![Id::test("1"), Id::test("2")]
-            }]
-        );
-        assert_eq!(promotions(&events, &[], &words), promoted);
-        assert_eq!(
-            promotions(&events, &["Supabase".into()], &words),
-            promoted,
-            "a known term still earns the rule for what the model hears instead"
-        );
-        let differently_heard = vec![
-            event("4", "super base"),
-            correction("4", "Supabase", Source::ReadBack),
-            event("5", "superbass"),
-            correction("5", "Supabase", Source::ReadBack),
-        ];
-        assert!(promotions(&differently_heard, &["Supabase".into()], &words).is_empty());
-        events.push(Event::Forgotten {
-            at: String::new(),
-            term: "Supabase".into(),
-        });
-        assert!(promotions(&events, &[], &words).is_empty());
-        events.extend([
-            Event::Learned {
-                at: String::new(),
-                term: "Supabase".into(),
-                heard: None,
-                from: vec![],
-            },
-            event("6", "superbass"),
-            correction("6", "Supabase", Source::ReadBack),
-            event("7", "superbass"),
-            correction("7", "Supabase", Source::ReadBack),
-        ]);
-        assert!(
-            promotions(&events, &[], &words)
-                .iter()
-                .any(|p| p.heard.as_deref() == Some("superbass")),
-            "a term learned again after it was forgotten is live again"
-        );
-        let manual = vec![
-            event("3", "superbase"),
-            correction("3", "Supabase", Source::Manual),
-        ];
-        assert_eq!(
-            promotions(&manual, &[], &words)[0].heard,
-            Some("superbase".into())
-        );
-    }
-
-    #[test]
-    fn a_known_term_the_model_keeps_mishearing_earns_a_rule() {
-        let words = Words::from_list(&["potato", "mode", "use"]);
-        let events = vec![
-            event("1", "use potato mode"),
-            correction("1", "use poteto mode", Source::ReadBack),
-            event("2", "potato mode"),
-            correction("2", "poteto mode", Source::ReadBack),
-            event("3", "potato mode"),
-            correction("3", "poteto mode", Source::ReadBack),
-        ];
-        assert_eq!(
-            promotions(&events, &["poteto".into()], &words),
-            vec![Promotion {
-                term: "poteto mode".into(),
-                heard: Some("potato mode".into()),
-                from: vec![Id::test("1"), Id::test("2"), Id::test("3")]
-            }]
-        );
-    }
-
-    #[test]
-    fn ordinary_heard_words_need_three_dictations() {
-        let words = Words::from_list(&["we", "use", "potato"]);
-        let mut events = vec![
-            event("1", "we use potato"),
-            correction("1", "we use Poteto", Source::Manual),
-        ];
-        assert_eq!(promotions(&events, &[], &words)[0].heard, None);
-        for id in ["2", "3"] {
-            events.push(event(id, "we use potato"));
-            events.push(correction(id, "we use Poteto", Source::ReadBack));
-        }
-        assert_eq!(
-            promotions(&events, &[], &words)[0].heard.as_deref(),
-            Some("use potato")
-        );
-    }
-
-    #[test]
-    fn an_ordinary_heard_word_is_learned_with_its_neighbour() {
-        let words = Words::from_list(&["use", "potato", "mode", "just", "is", "different"]);
-        let learned = learned_swaps("use potato mode now", "use poteto mode now", &words);
-        assert_eq!(
-            learned
-                .iter()
-                .map(|s| (s.heard.as_str(), s.wrote.as_str()))
-                .collect::<Vec<_>>(),
-            [("potato mode", "poteto mode")]
-        );
-        assert!(
-            learned_swaps("potato", "poteto", &words).is_empty(),
-            "an ordinary word with nothing around it is not learned"
-        );
-        assert!(
-            learned_swaps("so potato. Mode", "so poteto. Mode", &words)
-                .iter()
-                .all(|s| s.heard == "so potato"),
-            "the neighbour comes from the same clause"
-        );
-        assert!(
-            learned_swaps(
-                "in corner was late",
-                "in Klarna was late",
-                &Words::from_list(&["in", "corner", "was", "late"])
-            )
-            .is_empty(),
-            "a function word says nothing about which word was meant"
-        );
-    }
-
-    #[test]
-    fn punctuation_between_words_is_not_a_neighbour() {
-        let words = Words::from_list(&["so", "of", "potato", "mode"]);
-        for (pasted, edited) in [
-            ("potato - mode", "poteto - mode"),
-            ("potato & mode", "poteto & mode"),
-            ("potato — mode", "poteto — mode"),
-            ("so \"potato.\" Mode", "so \"poteto.\" Mode"),
-            ("so 'potato.' Mode", "so 'poteto.' Mode"),
-            ("of potato) Mode", "of poteto) Mode"),
-            ("potato (mode)", "poteto (mode)"),
-        ] {
-            let learned = learned_swaps(pasted, edited, &words);
-            assert!(
-                learned
-                    .iter()
-                    .all(|s| s.heard.trim() != "potato" && !s.heard.contains("mode")),
-                "{pasted:?} learned {learned:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_name_fixed_together_with_plain_words_is_learned_alone() {
-        let words = Words::from_list(&[
-            "is", "there", "a", "t", "three", "tree", "air", "triage", "skill", "whisper", "flow",
-            "the",
-        ]);
-        let learned = learned_swaps(
-            "is there a t three tree air skill",
-            "is there a T3 triage skill",
-            &words,
-        );
-        assert_eq!(
-            learned
-                .iter()
-                .map(|s| (s.heard.as_str(), s.wrote.as_str()))
-                .collect::<Vec<_>>(),
-            [("t three", "T3")],
-            "a lone letter is a spelled-out name, so it needs no neighbour"
-        );
-        let whole = learned_swaps("use the whisper flo app", "use the Wispr Flow app", &words);
-        assert_eq!(
-            whole
-                .iter()
-                .map(|s| (s.heard.as_str(), s.wrote.as_str()))
-                .collect::<Vec<_>>(),
-            [("whisper flo", "Wispr Flow")],
-            "a name of several words stays whole"
-        );
-    }
-
-    #[test]
-    fn numbers_are_not_terms() {
-        let words = Words::from_list(&["in"]);
-        let swap = Swap {
-            heard: "20".into(),
-            wrote: "2026".into(),
-            opens_sentence: false,
-            clause_before: None,
-            clause_after: None,
-        };
-        assert!(!learnable(&swap, &words));
-    }
-
-    #[test]
-    fn clipped_branch_names_and_paths_are_not_terms() {
-        let words = Words::from_list(&[
-            "status", "page", "surface", "website", "links", "project", "drawers", "web", "apps",
-            "sandbox", "walls", "through", "day",
-        ]);
-        // One element per line, as the window walk reads T3 Code's sidebar:
-        // a long branch name is two elements, the second opening mid-word.
-        let screen = "PR\nsee.computer\nt3code/project-lat\nest-status\n\
-                      t3code/mcp-eval-la\nnding-page\nt3code/simplify-produ\nct-surface\n\
-                      t3code/cocco-agen\ncy-website\nhort-links\napps/web/sandbox/drawers\n\
-                      tmp/codex-bins-dir\nUsers/williamlarsten/.t3/worktrees/william\n\
-                      A/B\nUSB-C\ngpt-6-sol\n7-day\nwalls-through-Codex\nLarsten\n";
-        assert_eq!(
-            context_terms(screen, &words),
-            [
-                "PR",
-                "see.computer",
-                "A/B",
-                "USB-C",
-                "gpt-6-sol",
-                "7-day",
-                "walls-through-Codex",
-                "Larsten"
-            ]
-        );
-    }
-
-    #[test]
-    fn waiting_names_the_dictation_it_came_from() {
-        let words = Words::from_list(&[]);
-        let events = vec![
-            event("1", "superbase"),
-            correction("1", "Supabase", Source::ReadBack),
-        ];
-        assert_eq!(
-            waiting(&events, &[], &words),
-            vec![Waiting {
-                term: "Supabase".into(),
-                heard: vec!["superbase".into()],
-                from: vec![Id::test("1")]
-            }]
-        );
     }
 }

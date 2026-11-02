@@ -81,7 +81,6 @@ fn stamp(sources: &[PathBuf]) -> String {
 pub struct Snapshot {
     stamp: String,
     words: Vec<Word>,
-    waiting: Vec<Waiting>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
@@ -99,12 +98,6 @@ struct Word {
 struct Rule {
     heard: String,
     learned: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
-struct Waiting {
-    term: String,
-    heard: Option<String>,
 }
 
 /// One row per term, whichever file and casing it came from. Active lines
@@ -177,23 +170,9 @@ fn snapshot(vocabulary: &Document, learned: &Document, learning: &Learning) -> S
         }
     }
     words.sort_by_cached_key(|w| w.term.to_lowercase());
-    let waiting = learning
-        .waiting
-        .iter()
-        .filter(|w| {
-            !words
-                .iter()
-                .any(|word| !word.parked && same(&word.term, &w.term))
-        })
-        .map(|w| Waiting {
-            term: w.term.clone(),
-            heard: w.heard.first().cloned(),
-        })
-        .collect();
     Snapshot {
         stamp: String::new(),
         words,
-        waiting,
     }
 }
 

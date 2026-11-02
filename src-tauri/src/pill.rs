@@ -171,7 +171,11 @@ impl Wire {
     fn fixed(fix: &Fix) -> Wire {
         Wire::Fixed {
             text: format!("{} → {}", fix.heard, fix.wrote),
-            note: if fix.learned { "Learned" } else { "Seen once" },
+            note: if fix.learned {
+                "Learned"
+            } else {
+                "In your dictionary"
+            },
         }
     }
 }

@@ -48,13 +48,6 @@ const PANES: [(&str, &str, &str); 4] = [
 ];
 
 const RECENT_IDS: [&str; 5] = ["recent-0", "recent-1", "recent-2", "recent-3", "recent-4"];
-const WAIT_IDS: [&str; 5] = [
-    "dictionary-wait-0",
-    "dictionary-wait-1",
-    "dictionary-wait-2",
-    "dictionary-wait-3",
-    "dictionary-wait-4",
-];
 const LEARNED_IDS: [&str; 8] = [
     "dictionary-learned-0",
     "dictionary-learned-1",
@@ -84,7 +77,6 @@ struct Panel {
     status: Arc<Mutex<EngineStatus>>,
     settings_expanded: Arc<Mutex<bool>>,
     payloads: Arc<Mutex<Vec<Payload>>>,
-    waiting: Arc<Mutex<Vec<String>>>,
     learned: Arc<Mutex<Vec<String>>>,
     /// The recents as last read. They live in ~/Documents, which iCloud
     /// evicts under disk pressure, and one evicted day file held the main
@@ -134,7 +126,6 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
         status,
         settings_expanded: Arc::new(Mutex::new(false)),
         payloads: Arc::new(Mutex::new(Vec::new())),
-        waiting: Arc::new(Mutex::new(Vec::new())),
         learned: Arc::new(Mutex::new(Vec::new())),
         recents: Arc::new(Mutex::new(Vec::new())),
         reread,
@@ -382,27 +373,12 @@ impl Panel {
 
     fn dictionary_rows(&self) -> Vec<Row> {
         let fixable = last_dictation(&self.history).is_some();
-        let (rows, waiting, learned) = dictionary_rows(&self.ledger.learning(), fixable);
-        *self.waiting.lock().unwrap_or_else(PoisonError::into_inner) = waiting;
+        let (rows, learned) = dictionary_rows(&self.ledger.learning(), fixable);
         *self.learned.lock().unwrap_or_else(PoisonError::into_inner) = learned;
         rows
     }
 
     fn pick(&self, id: &str) -> Option<Vec<Row>> {
-        if let Some(index) = WAIT_IDS.iter().position(|row| *row == id) {
-            if let Some(term) = self
-                .waiting
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(index)
-                .cloned()
-            {
-                let _ = self
-                    .ledger
-                    .edit(crate::vocabulary::Edit::Learn { term, edited: None });
-            }
-            return None;
-        }
         if let Some(index) = LEARNED_IDS.iter().position(|row| *row == id) {
             if let Some(term) = self
                 .learned
@@ -596,7 +572,7 @@ fn last_dictation(history: &History) -> Option<String> {
     ))
 }
 
-fn dictionary_rows(learning: &Learning, fixable: bool) -> (Vec<Row>, Vec<String>, Vec<String>) {
+fn dictionary_rows(learning: &Learning, fixable: bool) -> (Vec<Row>, Vec<String>) {
     let count = learning.learned.len();
     let summary = match count {
         0 => "Learns from words you fix".to_owned(),
@@ -618,28 +594,6 @@ fn dictionary_rows(learning: &Learning, fixable: bool) -> (Vec<Row>, Vec<String>
             Some("character.book.closed"),
         ),
     ];
-    let waiting: Vec<_> = learning
-        .waiting
-        .iter()
-        .take(WAIT_IDS.len())
-        .map(|entry| entry.term.clone())
-        .collect();
-    if !waiting.is_empty() {
-        rows.push(Row::Separator);
-        rows.push(Row::Hint("Seen once. Click to learn now".to_owned()));
-        for (index, entry) in learning.waiting.iter().take(WAIT_IDS.len()).enumerate() {
-            let heard = entry
-                .heard
-                .first()
-                .map_or(String::new(), |heard| format!("  · heard \"{heard}\""));
-            rows.push(item(
-                WAIT_IDS[index],
-                &format!("{}{heard}", entry.term),
-                false,
-                None,
-            ));
-        }
-    }
     let learned: Vec<_> = learning
         .learned
         .iter()
@@ -656,7 +610,7 @@ fn dictionary_rows(learning: &Learning, fixable: bool) -> (Vec<Row>, Vec<String>
             rows.push(item("dictionary-edit", "All Learned Words…", false, None));
         }
     }
-    (rows, waiting, learned)
+    (rows, learned)
 }
 
 fn submenu(id: &'static str, label: &str) -> Row {
@@ -695,27 +649,26 @@ mod dictionary_tests {
 
     #[test]
     fn empty_learning() {
-        let (rows, waiting, learned) = dictionary_rows(&Learning::default(), false);
+        let (rows, learned) = dictionary_rows(&Learning::default(), false);
         assert_eq!(rows[0], Row::Hint("Learns from words you fix".into()));
         assert_eq!(
             rows[1],
             item("", "Fix Last Dictation…", false, Some("pencil"))
         );
-        assert!(waiting.is_empty() && learned.is_empty());
+        assert!(learned.is_empty());
     }
 
     #[test]
     fn learned_rows_are_checked_and_limited() {
         let mut learning = Learning {
-            learned: vec!["Tauri".into()],
-            ..Default::default()
+            learned: vec!["Zentrix".into()],
         };
-        let (rows, _, payloads) = dictionary_rows(&learning, true);
+        let (rows, payloads) = dictionary_rows(&learning, true);
         assert_eq!(rows[0], Row::Hint("Learned 1 word from your fixes".into()));
-        assert!(rows.contains(&item(LEARNED_IDS[0], "Tauri", true, None)));
-        assert_eq!(payloads, ["Tauri"]);
+        assert!(rows.contains(&item(LEARNED_IDS[0], "Zentrix", true, None)));
+        assert_eq!(payloads, ["Zentrix"]);
         learning.learned = (0..12).map(|n| format!("Term {n}")).collect();
-        let (rows, _, payloads) = dictionary_rows(&learning, true);
+        let (rows, payloads) = dictionary_rows(&learning, true);
         assert_eq!(payloads.len(), 8);
         assert_eq!(
             rows.last(),
@@ -727,25 +680,5 @@ mod dictionary_tests {
                 .count(),
             8
         );
-    }
-
-    #[test]
-    fn waiting_row_shows_heard_form() {
-        let learning = Learning {
-            waiting: vec![crate::learn::Waiting {
-                term: "Supabase".into(),
-                heard: vec!["superbase".into()],
-                from: vec![],
-            }],
-            ..Default::default()
-        };
-        let (rows, waiting, _) = dictionary_rows(&learning, true);
-        assert!(rows.contains(&item(
-            WAIT_IDS[0],
-            "Supabase  · heard \"superbase\"",
-            false,
-            None
-        )));
-        assert_eq!(waiting, ["Supabase"]);
     }
 }
