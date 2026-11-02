@@ -196,15 +196,14 @@ at that edge. With `SEE_COMPUTER_READBACK_LOG` set, a watch that gives up
 logs why: `lost no-anchor`, `lost unlike`, `lost too-long`, or the
 Accessibility error.
 
-**Seeing a fix.** When read-back records a correction with a spelling the
-learner can use, the pill shows a card such as `Larston → Larsten · Seen
-once`, or `Learned` when this fix taught the word. Review opens the word in
-the Dictionary, where Learn now and Ignore sit at the top of the list. The
-card waits until no dictation is on screen and closes after six seconds
-unless the pointer rests on it. It is a nonactivating panel, so it never
-takes focus from the app being typed into. A correction that teaches
-nothing, such as a grammar fix, still goes to the ledger and the eval corpus
-but shows no card.
+**Seeing a fix.** When read-back records a correction that teaches a word
+or replacement, the pill shows a card such as `zentrixx → Zentrix · Learned`.
+A fix to a term already in either word file shows "In your dictionary".
+Review opens the first row for that term in the Dictionary, with a plain
+word row first. The card waits until no dictation is on screen and closes
+after six seconds unless the pointer rests on it. It never takes focus
+from the app being typed into. Grammar fixes still go to the ledger and
+eval corpus but show no card.
 
 **Fixing a line in the Library** is the explicit path for text that was
 already sent or an app that exposes nothing. Every dictation and finished
@@ -224,25 +223,23 @@ numbers never qualify. An offline study of this user's 13,700 Wispr Flow
 edits on 2026-08-27 found this test 91% precise once a term has two
 sightings and 37% at one; its scripts were not kept, so treat the figures as
 the reason for the two-sighting rule rather than as a reproduced result.
-Two sightings promote the term. A mishearing seen twice also promotes a
-rule, `heard -> Term`, which rewrites what the model heard. A rule is the
-only fix for a term the model is confident it heard as an ordinary word, and
-it applies to terms already in `vocabulary.md`. Because a rule rewrites every
-future occurrence, rules are learned as phrases sized to be safe. A fix
-that changes a name and plain words together is split, so "t three tree air"
--> "T3 triage" teaches "t three -> T3" and nothing about "triage"; a name of
-several words ("Wispr Flow") stays whole. A heard form made of ordinary
-words takes the unchanged word after it, or else before it, in the same
-clause: fixing "potato mode" teaches "potato mode -> poteto mode" and leaves
-a plain "potato" alone. Function words ("was", "in") do not count as that
-neighbour, and with no other neighbour nothing is learned. A dash, `&`,
-bracket or quote mark between the two words ends the clause too, so
-"potato - mode" and `"potato." Mode` have no neighbour there. Lone letters are
-spelled-out names ("t three", "m c p"), not ordinary words. Such a phrase
-still needs three separate dictations. A fix typed into the dialog counts as two
-sightings for terms and for rules on unknown words. Learned lines go to
-`learned.md` beside `vocabulary.md`, the pill says `Learned "Term"`, and a
-term the user forgets never comes back.
+The first fix adds the word to `learned.md`, unless either word file
+already has the term or the user forgot it. A replacement needs weight two
+for that exact heard form across distinct dictations. Read-back counts one;
+a manual fix counts two. Both rows can be added by one manual fix.
+
+A replacement may have several words, or one unknown word of at least two
+letters. A single everyday word and a bare letter never become automatic
+replacements. The system spelling checker checks English and the user's
+preferred languages on one owner thread. Context checks wait at most 50 ms;
+learning checks wait at most two seconds. Failure treats a word as known.
+
+A fix that changes a name and plain words together is split before learning,
+so a term never includes its plain neighbour. Hand-written replacements are
+not duplicated. Deleting a word blocks the word and every replacement for it.
+Deleting a replacement blocks only that pair. Adding a row back by hand in
+the Dictionary clears its block. A line removed directly from `learned.md`
+still stays gone because its learned event remains in the log.
 
 **Rules measured.** Eleven rules learned at two sightings from one synthetic
 voice's corrections ("superbase -> Supabase", "versal -> Vercel", "work os ->
@@ -278,47 +275,34 @@ offline simulation exactly.
 
 Margin 3 stays the default: with the merge it has the fewest errors.
 
-**The menu.** Dictionary shows up to eight learned words (click to forget),
-terms seen once (click to learn now), Fix Last Dictation…, and Edit
-Dictionary….
+**The menu.** Dictionary shows up to eight learned words that can be
+clicked to forget, Fix Last Dictation…, and Edit Dictionary….
 
-**The Dictionary in the Library.** Edit Dictionary… opens the Library window
-on its Dictionary destination, beside All, Dictations, Takes and Meetings
-(`ui/dictionary.js`, `dictionary.rs`). It lists every term in `vocabulary.md`
-and `learned.md` as one row, with the words seen once above them and the
-parked ones (`# - Term` lines) below. For each term it shows how often the
-exact spelling appears in saved dictations and meetings and how often a
-misheard form does: another casing that is not just a sentence opening, a
-rule's heard form, or a form the user corrected. It also lists the newest
-lines the term came up in, each of which opens in the Library, where it can
-be fixed. From there the user adds, renames, deletes, parks and turns terms
-back on, edits a term's heard forms, sets its boost (the tab-separated
-weight), and learns or ignores a word seen once.
+**The Dictionary in the Library.** Edit Dictionary… opens a flat list of
+active lines from `vocabulary.md` and `learned.md`. A row is a word or a
+`heard → Word` replacement. Rows sort by word, then heard form, ignoring
+case. The same pair in both files is one learned row, using the spelling
+from `learned.md`. A sparkle marks rows learned from fixes. Search matches
+either field. Commented lines, including `# - Zentrix`, stay untouched and
+never appear in the list.
 
-The files stay the source of truth. `vocabulary.rs` reads each file as its
-own lines, and an edit re-reads the bytes, changes only the lines that hold
-the term it names, and writes the result through a temp file. If a file
-changed between that read and the write, the edit is applied again to the new
-bytes. An edit to a term that is no longer there is refused and the section
-reloads, so a stale Library cannot overwrite a sync from another Mac. Writes
-go through the ledger thread, which already appends to `learned.md`, so the
-learner and the Library never write it at once. Deleting or renaming a
-learned term records it as forgotten, so the learner does not bring the old
-spelling back. The section polls a stamp of both files, the learner's queue, and every
-dictation and meeting source every 1.5 seconds. It holds a reload while the
-user is mid-edit.
+New and existing rows use one form. Word is required and Replaces is
+optional. Existing rows save on blur or Enter; Escape reverts the draft.
+New rows save on submit. Clearing or filling Replaces changes the row's
+form. Delete removes that pair from both files without confirmation.
+Reveal opens the word file in Finder.
 
-Spellings that differ only in case are one term. Renaming a term rewrites
-its lines in both files instead of adding a second entry, and when
-`learned.md` holds a new casing of a `vocabulary.md` term, the decoder uses
-the learned spelling and points the term's rules at it (`Lexicon::refresh`).
+The files stay the source of truth. Edits re-read their bytes, change only
+the matching active lines, and keep line position and tab weights. A stale
+edit or a change that duplicates another row is refused. Writes go through
+the ledger thread so the learner and page cannot write at once. Changes
+record forgetting for the old pair unless only letter case changed. The
+page polls only the two file stamps every 1.5 seconds and holds reloads
+while a draft or edit is pending. No file migration is needed.
 
-**Opening the Library.** The Dictionary reads only dictations, meetings and
-its two word files. It never reads takes. Opening it starts one Dictionary
-load and no Library load. It opens on the newest fix waiting for review, or
-else on the word that came up most recently. Leaving the Dictionary loads
-the Library if it has not loaded yet. Both show their loading state while
-they work.
+**Opening the Library.** The Dictionary reads only its two word files.
+Opening it starts no Library transcript load. It selects the first row
+alphabetically. Leaving the Dictionary loads the Library if needed.
 
 Documents stays the source of truth for every file. iCloud carries those
 files between Macs. Media stays there too, so macOS can evict recordings
@@ -330,13 +314,12 @@ Edits still read and write the real files.
 
 A load asks iCloud for evicted sources with no matching copy and returns
 without waiting. It uses an older copy while a changed source downloads.
-With no copy, the Library shows "Downloading from iCloud" and the Dictionary
-says its counts are incomplete. A dictation that finds its word files evicted
+With no copy, the Library shows "Downloading from iCloud". The Dictionary
+shows rows from the word files it can read and reloads as their stamps change. A dictation that finds its word files evicted
 with no copy runs without them, asks iCloud for them, and picks them up on the
 next dictation. A watcher reloads the Library as files
 arrive. The Dictionary's stamp poll sees those arrivals too. An unchanged
-stamp reuses the last snapshot, so its counts do not need to be computed
-again. Copies of deleted sources and stray temp files are removed after a
+stamp avoids a page reload. Copies of deleted sources and stray temp files are removed after a
 Library load.
 
 ## What is verified
@@ -421,7 +404,8 @@ Library load.
 - On 2026-10-16, after the fixes: 238 tests pass and clippy passes with
   warnings denied. New tests cover a paste that ends its field, with each
   trailing form an editor reported, and the cards a read-back fix sends:
-  seen once, then learned, and none for a grammar fix.
+  the former first-sighting card, then learned, and none for a grammar fix.
+  The current learner teaches the word on the first fix.
 - Read-back live on 2026-10-16, in a scratch Electron 44.4.5 app (the
   version T3 Code ships) with a TipTap editor like T3 Code's composer. A
   dictation was replayed from one of the user's "Larston" recordings and
@@ -430,8 +414,7 @@ Library load.
   seconds after the paste, with no edit made. After it the log read
   `corrected`, and the ledger held "I sent the file to Larsten yesterday."
   seven seconds after the paste. In the same run the card showed, a real
-  click on Review opened the Library on Larsten under Seen once, and Learn
-  now wrote `- larston -> Larsten` to `learned.md` and said so in a toast.
+  click on Review opened the Library on Larsten under the former review queue, and its learn button wrote `- larston -> Larsten` to `learned.md` and said so in a toast.
 - T3 Code itself was only read, never typed into. Its composer is a TipTap
   editor whose value is its text plus a trailing space, the case the fix
   handles, and the element read-back holds stayed valid while the user typed.
@@ -447,13 +430,13 @@ Ranked by expected gain per unit of work. Built items are in this branch.
 | # | idea | needs | latency | privacy | expected gain | status |
 |---|---|---|---|---|---|---|
 | 1 | Correction read-back after paste | AX polling, Electron switch | none on the paste path | reads only the field it pasted into; edited text kept locally | the main input to every other item | built; verified in an Electron TipTap editor |
-| 2 | Learner with review queue and rules | ledger events | none | local | rules: held-out term recall 15/58 → 26/58 | built |
+| 2 | Learner with first-fix words and safe replacements | ledger events | none | local | rules: held-out term recall 15/58 → 26/58 | built |
 | 3 | Personal eval corpus and regression score | ledger audio + corrections | none | audio stays local | turns "feels worse" into a number per change | built (`corpus.tsv`, `see-computer eval`) |
 | 4 | Dual decode, keep only boosted hunks that land a term | second greedy pass over the same encoder output | +10.7 ms median per clip | none | errors 187 → 182 at margin 3; margin 4 no longer ends up worse than boost-off (188 vs 190 errors) | built |
 | 5 | Fixing lines in the Library, and the Dictionary menu | the Library window, native panel rows | none | none | covers apps read-back cannot see | built |
 | 6 | Screen-context terms per dictation | AX text of the focused window read while the user speaks, filtered by the learner's shape test, boosted at low weight for that utterance only | none if read during recording | on-screen text held in memory, never written | names and identifiers visible on screen; also the only lever for "scale" vs "skill" | built |
 | 7 | Daybook feed | read `daybook.db` read-only, last two hours of non-private descriptions | none | already local; skip private rows | project and client names, about 6 minutes stale | built |
-| 8 | Background miner | nightly job over ledger, history, Daybook, git repos, Wispr's dictionary; optional Haiku pass to judge candidates via the Claude CLI | none | only candidate strings and short contexts leave the machine, and only with Haiku on | fills the review queue before the user corrects anything | later |
+| 8 | Background miner | nightly job over ledger, history, Daybook, git repos, Wispr's dictionary; optional Haiku pass to judge candidates via the Claude CLI | none | only candidate strings and short contexts leave the machine, and only with Haiku on | finds candidate terms before the user corrects anything | later |
 | 9 | Per-app term sets | ledger's app per dictation | none | local | fewer collateral pushes by boosting only what that app needs | later, after 6 |
 | 10 | Confidence highlighting | token log-probs from the decoder | small | none | points the user at the words to check | later |
 | 11 | LLM rewrite on the paste path | network call per dictation | 0.5 to 2 s | every dictation leaves the machine | unclear, and it rewrites what was said | not planned |
@@ -461,8 +444,7 @@ Ranked by expected gain per unit of work. Built items are in this branch.
 Follow-up still open:
 
 - Read-back against live text fields remains unverified.
-- A fix to a word already in `vocabulary.md` gets a card but no Seen once
-  entry, because the queue lists only new words.
+- Visual verification of the flat Dictionary page remains open.
 
 ## Measuring
 
