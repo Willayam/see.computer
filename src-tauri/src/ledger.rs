@@ -129,7 +129,7 @@ impl Ledger {
         crate::qos::spawn("see-ledger", crate::qos::Class::Upkeep, move || {
             let _ = fs::create_dir_all(root.join("audio"));
             let mut events = read(&root);
-            let words = crate::learn::Words::system();
+            let words = crate::learn::Words::shared();
             let mut corrected = BTreeMap::new();
             for event in &events {
                 if let Event::Corrected { id, text, .. } = event {

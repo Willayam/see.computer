@@ -322,69 +322,181 @@ fn distance(a: &[char], b: &[char]) -> usize {
 /// The words a model could plausibly write unprompted. macOS ships the list,
 /// so the app ships none. Loaded on first use, because it costs about ten
 /// megabytes and is only needed once the user has corrected something.
-pub struct Words(std::sync::OnceLock<HashSet<String>>);
+pub struct Words(WordSource);
+
+enum WordSource {
+    Checker(std::sync::mpsc::Sender<Ask>),
+    #[cfg(test)]
+    List(HashSet<String>),
+}
+
+struct Ask {
+    word: String,
+    reply: std::sync::mpsc::Sender<bool>,
+    deadline: std::time::Instant,
+}
 
 impl Words {
-    pub fn system() -> Words {
-        Words(std::sync::OnceLock::new())
-    }
-
-    /// One list for the dictation path, so a dictation never waits on the
-    /// file: the context thread touches it while the user is still speaking.
     pub fn shared() -> &'static Words {
         static SHARED: std::sync::OnceLock<Words> = std::sync::OnceLock::new();
-        SHARED.get_or_init(Words::system)
+        SHARED.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<Ask>();
+            // NSSpellChecker is not safe to call concurrently: eight threads
+            // got 16 wrong answers in 4,000 on 2026-11-02.
+            crate::qos::spawn("see-words", crate::qos::Class::Upkeep, move || {
+                let languages = proven_languages();
+                let mut memo = HashMap::new();
+                while let Ok(ask) = rx.recv() {
+                    let answer = memoized_word(&mut memo, &ask.word, || {
+                        if languages.is_empty() || std::time::Instant::now() >= ask.deadline {
+                            return None;
+                        }
+                        let mut known = false;
+                        for language in &languages {
+                            known |= check_word(&ask.word, language)?;
+                        }
+                        (std::time::Instant::now() < ask.deadline).then_some(known)
+                    });
+                    let _ = ask.reply.send(answer);
+                }
+            });
+            Words(WordSource::Checker(tx))
+        })
     }
 
     #[cfg(test)]
     pub fn from_list(words: &[&str]) -> Words {
-        Words(std::sync::OnceLock::from(
-            words
-                .iter()
-                .map(|s| s.to_lowercase())
-                .collect::<HashSet<_>>(),
+        Words(WordSource::List(
+            words.iter().map(|s| (*s).to_owned()).collect(),
         ))
     }
 
-    fn set(&self) -> &HashSet<String> {
-        self.0.get_or_init(|| {
-            std::fs::read_to_string("/usr/share/dict/words")
-                .unwrap_or_default()
-                .lines()
-                .map(str::to_lowercase)
-                .collect()
-        })
+    pub fn knows(&self, word: &str) -> bool {
+        self.ask(word, std::time::Duration::from_secs(2))
     }
 
-    /// Inflections count: the list holds base forms only, so "sketched" would
-    /// otherwise look like a term the user taught.
-    pub fn knows(&self, word: &str) -> bool {
-        let set = self.set();
-        let lower = word.to_lowercase();
-        if set.contains(&lower) {
-            return true;
-        }
-        for suffix in ["'s", "ers", "ing", "ed", "es", "ly", "er", "s", "d"] {
-            if let Some(stem) = lower.strip_suffix(suffix) {
-                if set.contains(stem) {
-                    return true;
-                }
-                if let Some((last, prior)) = stem.chars().next_back().zip(stem.chars().rev().nth(1))
+    pub fn knows_quickly(&self, word: &str) -> bool {
+        self.ask(word, std::time::Duration::from_millis(50))
+    }
+
+    fn ask(&self, word: &str, limit: std::time::Duration) -> bool {
+        match &self.0 {
+            #[cfg(test)]
+            WordSource::List(set) => set.contains(word) || set.contains(&word.to_lowercase()),
+            WordSource::Checker(tx) => {
+                let (reply, rx) = std::sync::mpsc::channel();
+                if tx
+                    .send(Ask {
+                        word: word.into(),
+                        reply,
+                        deadline: std::time::Instant::now() + limit,
+                    })
+                    .is_err()
                 {
-                    if last == prior
-                        && !"aeiou".contains(last)
-                        && set.contains(&stem[..stem.len() - last.len_utf8()])
-                    {
-                        return true;
-                    }
-                }
-                if matches!(suffix, "ed" | "ing") && set.contains(&format!("{stem}e")) {
                     return true;
+                }
+                rx.recv_timeout(limit).unwrap_or(true)
+            }
+        }
+    }
+}
+
+/// "Unknown" is asked twice before it sticks, because WebKit may use the same
+/// checker from the main thread for the Library's fix field.
+fn memoized_word(
+    memo: &mut HashMap<String, bool>,
+    word: &str,
+    mut check: impl FnMut() -> Option<bool>,
+) -> bool {
+    if let Some(known) = memo.get(word) {
+        return *known;
+    }
+    let Some(mut known) = check() else {
+        return true;
+    };
+    if !known {
+        let Some(second) = check() else {
+            return true;
+        };
+        known = second;
+    }
+    memo.insert(word.into(), known);
+    known
+}
+
+#[repr(C)]
+struct SpellRange {
+    location: usize,
+    length: usize,
+}
+unsafe impl objc2::Encode for SpellRange {
+    const ENCODING: objc2::Encoding =
+        objc2::Encoding::Struct("_NSRange", &[usize::ENCODING, usize::ENCODING]);
+}
+
+fn check_word(word: &str, language: &str) -> Option<bool> {
+    use objc2::{
+        msg_send,
+        runtime::{AnyClass, AnyObject},
+    };
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let class = AnyClass::get(c"NSSpellChecker")?;
+        let string = AnyClass::get(c"NSString")?;
+        let checker: *mut AnyObject = msg_send![class, sharedSpellChecker];
+        if checker.is_null() {
+            return None;
+        }
+        let word = std::ffi::CString::new(word).ok()?;
+        let language = std::ffi::CString::new(language).ok()?;
+        let word: *mut AnyObject = msg_send![string, stringWithUTF8String: word.as_ptr()];
+        let language: *mut AnyObject = msg_send![string, stringWithUTF8String: language.as_ptr()];
+        if word.is_null() || language.is_null() {
+            return None;
+        }
+        let count: *mut isize = std::ptr::null_mut();
+        let range: SpellRange = msg_send![checker, checkSpellingOfString: word,
+            startingAt: 0isize, language: language, wrap: false,
+            inSpellDocumentWithTag: 0isize, wordCount: count];
+        Some(range.length == 0)
+    })
+}
+
+/// Some languages `NSSpellChecker` lists pass nonsense as correctly spelled.
+fn proven_languages() -> Vec<String> {
+    use objc2::{
+        msg_send,
+        runtime::{AnyClass, AnyObject},
+    };
+    let mut languages = objc2::rc::autoreleasepool(|_| unsafe {
+        let mut languages = vec!["en".to_owned()];
+        if let Some(locale) = AnyClass::get(c"NSLocale") {
+            let preferred: *mut AnyObject = msg_send![locale, preferredLanguages];
+            if !preferred.is_null() {
+                let count: usize = msg_send![preferred, count];
+                for i in 0..count {
+                    let language: *mut AnyObject = msg_send![preferred, objectAtIndex: i];
+                    let utf8: *const std::ffi::c_char = msg_send![language, UTF8String];
+                    if !utf8.is_null() {
+                        let value = std::ffi::CStr::from_ptr(utf8).to_string_lossy();
+                        let base = value
+                            .split(['-', '_'])
+                            .next()
+                            .unwrap_or_default()
+                            .to_owned();
+                        if !languages.contains(&base) {
+                            languages.push(base);
+                        }
+                    }
                 }
             }
         }
-        false
-    }
+        languages
+    });
+    languages.retain(|language| {
+        check_word("zzqxvkj", language) == Some(false)
+            && (check_word("a", language) == Some(true) || check_word("i", language) == Some(true))
+    });
+    languages
 }
 
 pub fn learnable(swap: &Swap, words: &Words) -> bool {
@@ -496,7 +608,7 @@ fn names_something(token: &str, opens: bool, words: &Words) -> bool {
         // opens mid-word: "est-status", "nding-page". A name opens with a
         // word, a capital or a digit.
         let opens_like_a_word = token.split('-').next().is_some_and(|part| {
-            words.knows(part)
+            words.knows_quickly(part)
                 || part
                     .chars()
                     .next()
@@ -505,7 +617,7 @@ fn names_something(token: &str, opens: bool, words: &Words) -> bool {
         return opens_like_a_word
             && token
                 .split('-')
-                .any(|part| !part.is_empty() && !words.knows(part));
+                .any(|part| !part.is_empty() && !words.knows_quickly(part));
     }
     let upper = token.chars().filter(|c| c.is_uppercase()).count();
     let lower = token.chars().filter(|c| c.is_lowercase()).count();
@@ -517,9 +629,9 @@ fn names_something(token: &str, opens: bool, words: &Words) -> bool {
         return false;
     }
     if lower == 0 {
-        return !words.knows(token);
+        return !words.knows_quickly(token);
     }
-    !opens && !words.knows(token)
+    !opens && !words.knows_quickly(token)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -718,6 +830,40 @@ pub fn waiting(events: &[Event], known: &[String], words: &Words) -> Vec<Waiting
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn checker_failure_is_known_and_not_cached() {
+        let mut memo = HashMap::new();
+        assert!(memoized_word(&mut memo, "name", || None));
+        assert!(memo.is_empty());
+        let mut answers = [Some(false), None].into_iter();
+        assert!(memoized_word(&mut memo, "name", || answers.next().unwrap()));
+        assert!(memo.is_empty());
+        assert!(!memoized_word(&mut memo, "name", || Some(false)));
+        assert_eq!(memo.get("name"), Some(&false));
+    }
+
+    #[test]
+    #[ignore]
+    fn real_checker_serializes_concurrent_callers() {
+        let words = Words::shared();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        for (word, known) in [
+                            ("tugga", true),
+                            ("skool", false),
+                            ("london", false),
+                            ("London", true),
+                        ] {
+                            assert_eq!(words.knows(word), known, "{word}");
+                        }
+                    }
+                });
+            }
+        });
+    }
+
     fn event(id: &str, text: &str) -> Event {
         Event::Dictated {
             id: Id::test(id),
