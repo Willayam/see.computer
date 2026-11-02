@@ -620,7 +620,12 @@ fn promote(
     words: &crate::learn::Words,
     events: &mut Vec<Event>,
 ) -> Vec<String> {
-    let promotions = crate::learn::promotions(events, &known_terms(vocabulary), words);
+    // A word file iCloud cannot hand over reads as nothing known, which would
+    // learn the user's own words again. The log keeps the evidence for the next fix.
+    let Ok(known) = known_terms(vocabulary) else {
+        return Vec::new();
+    };
+    let promotions = crate::learn::promotions(events, &known, words);
     let mut names: Vec<_> = promotions.iter().map(|p| p.term.clone()).collect();
     names.dedup();
     for promotion in promotions {
@@ -644,7 +649,7 @@ fn fix_notice(
         Event::Dictated { id: seen, text, .. } if seen == id => Some(text.as_str()),
         _ => None,
     })?;
-    let known = known_terms(vocabulary);
+    let known = known_terms(vocabulary).ok()?;
     // A word this fix taught comes first: that is the news.
     crate::learn::learned_swaps(pasted, edited, words)
         .into_iter()
@@ -664,18 +669,16 @@ fn fix_notice(
 
 /// Every spelling either file holds, so a casing the user already has is
 /// known even where the decoder prefers the other one.
-fn known_terms(vocabulary: &Path) -> Vec<crate::vocabulary::Entry> {
-    let (vocabulary, learned) = crate::vocabulary::Files::beside(vocabulary)
-        .read()
-        .unwrap_or_default();
-    vocabulary
+fn known_terms(vocabulary: &Path) -> std::io::Result<Vec<crate::vocabulary::Entry>> {
+    let (vocabulary, learned) = crate::vocabulary::Files::beside(vocabulary).read()?;
+    Ok(vocabulary
         .lines()
         .chain(learned.lines())
         .filter_map(|line| match line {
             crate::vocabulary::Line::Active(entry) => Some(entry),
             _ => None,
         })
-        .collect()
+        .collect())
 }
 
 fn announce(pill: &Option<mpsc::Sender<PillEvent>>, names: &[String]) {

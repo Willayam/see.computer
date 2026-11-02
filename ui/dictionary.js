@@ -41,8 +41,14 @@
       el.addEventListener("click", () => choose(keyOf(row)));
       list.appendChild(el);
     }
-    if (!visible().length) list.innerHTML = '<div class="empty">No words here yet.</div>';
-    L.count("");
+    const q = L.query().trim();
+    if (!visible().length) {
+      list.innerHTML = q
+        ? `<div class="empty">No words match “${esc(q)}”. Press ⌘N to add it.</div>`
+        : '<div class="empty">No words yet. Add the names and terms dictation gets wrong.</div>';
+    }
+    const total = view.snap.rows.length;
+    L.count(`${total.toLocaleString()} ${total === 1 ? "entry" : "entries"}`);
     list.scrollTop = scroll;
   }
 
@@ -56,8 +62,26 @@
     $("#detail").scrollTop = 0;
   }
 
+  // Tabbing from one field to the other saves and redraws the page, so the
+  // focus and caret are carried across and the redraw's own blur saves nothing.
+  let redrawing = false;
   function renderDetail() {
     const detail = $("#detail");
+    const active = document.activeElement;
+    const focus = active && detail.contains(active) && active.id
+      ? { id: active.id, start: active.selectionStart, end: active.selectionEnd }
+      : null;
+    redrawing = true;
+    drawDetail(detail);
+    redrawing = false;
+    if (focus) {
+      const node = detail.querySelector(`#${focus.id}`);
+      node?.focus();
+      node?.setSelectionRange(focus.start, focus.end);
+    }
+  }
+
+  function drawDetail(detail) {
     if (!view.snap) {
       detail.innerHTML = `<div class="blank">${esc(view.message || "Loading your words…")}</div>`;
       return;
@@ -90,7 +114,7 @@
     const form = $("form", detail);
     let saving = false;
     function save() {
-      if (saving || !form.reportValidity()) return;
+      if (redrawing || saving || !form.reportValidity()) return;
       const next = { term: word.value.trim(), heard: heard.value.trim() || null };
       if (!next.term) return;
       if (!fresh && next.term === row.term && next.heard === row.heard) { view.draft = null; return; }

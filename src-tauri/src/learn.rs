@@ -664,7 +664,8 @@ pub fn promotions(
                     && (heard.is_none() || same_heard(e.heard.as_deref(), heard))
             }) || events.iter().any(|e| {
                 matches!(e, Event::Learned { term: t, heard: h, .. }
-                    if crate::vocabulary::same(t, &term) && same_heard(h.as_deref(), heard))
+                    if crate::vocabulary::same(t, &term)
+                        && (heard.is_none() || same_heard(h.as_deref(), heard)))
             }) || forgotten(events, &term, heard)
         };
         if !settled(None) {
