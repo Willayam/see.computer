@@ -150,8 +150,11 @@ fn split_names_from_plain_words(swap: Swap, words: &Words) -> Vec<Swap> {
             }),
         }
     }
-    if runs.len() < 2 || heard.len() < runs.len() {
+    if runs.len() < 2 {
         return vec![swap];
+    }
+    if heard.len() < runs.len() {
+        return Vec::new();
     }
     let spoken = |words: &[&str]| -> Vec<char> {
         const DIGITS: [&str; 10] = [
@@ -230,9 +233,7 @@ fn distance(a: &[char], b: &[char]) -> usize {
     previous[b.len()]
 }
 
-/// The words a model could plausibly write unprompted. macOS ships the list,
-/// so the app ships none. Loaded on first use, because it costs about ten
-/// megabytes and is only needed once the user has corrected something.
+/// A single owner thread keeps NSSpellChecker calls serial.
 pub struct Words(WordSource);
 
 enum WordSource {
@@ -698,6 +699,33 @@ pub fn promotions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixes(heard: &str, source: Source, count: usize) -> Vec<Event> {
+        (0..count)
+            .flat_map(|n| {
+                [
+                    Event::Dictated {
+                        id: Id::test(&n.to_string()),
+                        at: String::new(),
+                        text: heard.into(),
+                        audio: None,
+                    },
+                    Event::Corrected {
+                        id: Id::test(&n.to_string()),
+                        at: String::new(),
+                        text: "Zentrix".into(),
+                        source,
+                    },
+                ]
+            })
+            .collect()
+    }
+    fn rows(events: &[Event], known: &[crate::vocabulary::Entry]) -> Vec<(String, Option<String>)> {
+        promotions(events, known, &Words::from_list(&["river"]))
+            .into_iter()
+            .map(|p| (p.term, p.heard))
+            .collect()
+    }
+
     #[test]
     fn checker_failure_is_known_and_not_cached() {
         let mut memo = HashMap::new();
@@ -732,20 +760,196 @@ mod tests {
         });
     }
 
-    fn event(id: &str, text: &str) -> Event {
-        Event::Dictated {
-            id: Id::test(id),
-            at: String::new(),
-            text: text.into(),
-            audio: None,
+    #[test]
+    fn first_fix_only_boosts_and_second_fix_can_replace() {
+        assert_eq!(
+            rows(&fixes("zentrixx", Source::ReadBack, 1), &[]),
+            [("Zentrix".into(), None)]
+        );
+        assert_eq!(
+            rows(&fixes("zentrixx", Source::ReadBack, 2), &[]),
+            [
+                ("Zentrix".into(), None),
+                ("Zentrix".into(), Some("zentrixx".into()))
+            ]
+        );
+        assert_eq!(
+            rows(&fixes("zen tricks", Source::ReadBack, 2), &[]),
+            [
+                ("Zentrix".into(), None),
+                ("Zentrix".into(), Some("zen tricks".into()))
+            ]
+        );
+        assert_eq!(
+            rows(&fixes("zentrixx", Source::Manual, 1), &[]),
+            [
+                ("Zentrix".into(), None),
+                ("Zentrix".into(), Some("zentrixx".into()))
+            ]
+        );
+    }
+    #[test]
+    fn everyday_words_and_letters_never_become_replacements() {
+        for heard in ["river", "z"] {
+            assert_eq!(
+                rows(&fixes(heard, Source::ReadBack, 8), &[]),
+                [("Zentrix".into(), None)]
+            );
         }
     }
-    fn correction(id: &str, text: &str, source: Source) -> Event {
-        Event::Corrected {
-            id: Id::test(id),
+    #[test]
+    fn repeated_edits_of_one_dictation_count_once() {
+        let mut events = fixes("zentrixx", Source::ReadBack, 1);
+        events.push(events[1].clone());
+        assert_eq!(rows(&events, &[]), [("Zentrix".into(), None)]);
+    }
+    #[test]
+    fn neighbours_are_split_out_of_terms() {
+        let words = Words::from_list(&["we", "use", "triage"]);
+        assert_eq!(
+            learned_swaps("we use zen tricks treeage", "we use Zentrix triage", &words),
+            [Swap {
+                heard: "zen tricks".into(),
+                wrote: "Zentrix".into(),
+                opens_sentence: false
+            }]
+        );
+        assert!(learned_swaps("zentrixx", "Zentrix triage", &words).is_empty());
+    }
+    #[test]
+    fn handwritten_replacements_are_not_duplicated() {
+        let known = [crate::vocabulary::Entry {
+            term: "ZENTRIX".into(),
+            heard: Some("ZENTRIXX".into()),
+            weight: 1.0,
+        }];
+        assert!(rows(&fixes("zentrixx", Source::Manual, 1), &known).is_empty());
+    }
+    #[test]
+    fn forgetting_is_case_insensitive_and_pair_specific() {
+        let mut events = fixes("zentrixx", Source::Manual, 1);
+        events.push(Event::Forgotten {
             at: String::new(),
-            text: text.into(),
-            source,
-        }
+            term: "ZENTRIX".into(),
+            heard: Some("ZENTRIXX".into()),
+        });
+        assert_eq!(rows(&events, &[]), [("Zentrix".into(), None)]);
+        events.push(
+            serde_json::from_str(r#"{"event":"forgotten","at":"","term":"zentrix"}"#).unwrap(),
+        );
+        assert!(rows(&events, &[]).is_empty());
+        events.push(Event::Learned {
+            at: String::new(),
+            term: "Zentrix".into(),
+            heard: Some("zentrixx".into()),
+            from: vec![],
+        });
+        assert!(!forgotten(&events, "ZENTRIX", Some("zentrixx")));
+        assert!(forgotten(&events, "Zentrix", None));
+        assert!(forgotten(&events, "Zentrix", Some("zen tricks")));
+    }
+    #[test]
+    fn swaps_find_terms_without_rewrites() {
+        assert_eq!(
+            swaps(
+                "Ask Zentrix to open a pull request on quor vo.",
+                "Ask Zentrix to open a pull request on Quorvo."
+            ),
+            vec![Swap {
+                heard: "quor vo".into(),
+                wrote: "Quorvo".into(),
+                opens_sentence: false,
+            }]
+        );
+        let found = swaps(
+            "we moved from zentrixx to quor vo",
+            "we moved from Zentrix to Quorvo",
+        );
+        assert_eq!(
+            found
+                .iter()
+                .map(|s| (s.heard.as_str(), s.wrote.as_str()))
+                .collect::<Vec<_>>(),
+            [("zentrixx", "Zentrix"), ("quor vo", "Quorvo")]
+        );
+        assert!(swaps(
+            "this is all wrong now",
+            "completely different words here today"
+        )
+        .is_empty());
+        assert!(swaps("Hello, world!", "Hello world.").is_empty());
+        assert!(swaps("hello world", "hello world. Another sentence.").is_empty());
+    }
+    #[test]
+    fn a_name_fixed_together_with_plain_words_is_learned_alone() {
+        let words = Words::from_list(&[
+            "is", "there", "a", "t", "three", "tree", "air", "triage", "skill", "whisper", "flow",
+            "the",
+        ]);
+        let learned = learned_swaps(
+            "is there a t three tree air skill",
+            "is there a T3 triage skill",
+            &words,
+        );
+        assert_eq!(
+            learned
+                .iter()
+                .map(|s| (s.heard.as_str(), s.wrote.as_str()))
+                .collect::<Vec<_>>(),
+            [("t three", "T3")],
+            "a lone letter is a spelled-out name, so it needs no neighbour"
+        );
+        let whole = learned_swaps(
+            "use the vel tricks flo app",
+            "use the Veltrix Flow app",
+            &words,
+        );
+        assert_eq!(
+            whole
+                .iter()
+                .map(|s| (s.heard.as_str(), s.wrote.as_str()))
+                .collect::<Vec<_>>(),
+            [("vel tricks flo", "Veltrix Flow")],
+            "a name of several words stays whole"
+        );
+    }
+
+    #[test]
+    fn numbers_are_not_terms() {
+        let words = Words::from_list(&["in"]);
+        let swap = Swap {
+            heard: "20".into(),
+            wrote: "2026".into(),
+            opens_sentence: false,
+        };
+        assert!(!learnable(&swap, &words));
+    }
+
+    #[test]
+    fn clipped_branch_names_and_paths_are_not_terms() {
+        let words = Words::from_list(&[
+            "status", "page", "surface", "website", "links", "project", "drawers", "web", "apps",
+            "sandbox", "walls", "through", "day",
+        ]);
+        // One element per line, as the window walk reads T3 Code's sidebar:
+        // a long branch name is two elements, the second opening mid-word.
+        let screen = "PR\nzentrix.example\nt3code/project-lat\nest-status\n\
+                      t3code/mcp-eval-la\nnding-page\nt3code/simplify-produ\nct-surface\n\
+                      t3code/quorvo-agen\ncy-website\nhort-links\napps/web/sandbox/drawers\n\
+                      tmp/codex-bins-dir\nUsers/invented/.t3/worktrees/william\n\
+                      A/B\nUSB-C\ngpt-6-sol\n7-day\nwalls-through-Zentrix\nZentrix\n";
+        assert_eq!(
+            context_terms(screen, &words),
+            [
+                "PR",
+                "zentrix.example",
+                "A/B",
+                "USB-C",
+                "gpt-6-sol",
+                "7-day",
+                "walls-through-Zentrix",
+                "Zentrix"
+            ]
+        );
     }
 }

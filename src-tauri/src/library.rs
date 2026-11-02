@@ -228,10 +228,6 @@ fn read_by_items(history_root: &Path, documents: &Path) -> Vec<std::path::PathBu
     files
 }
 
-pub(crate) fn in_icloud(sources: &[PathBuf]) -> usize {
-    sources.iter().filter(|path| shadow::behind(path)).count()
-}
-
 static FETCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static PENDING: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 

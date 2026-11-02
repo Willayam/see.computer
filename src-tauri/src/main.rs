@@ -121,7 +121,7 @@ fn main() {
     let setup_history = history;
     let setup_ledger = ledger;
     let setup_status = status;
-    let dictionary = dictionary::Dictionary::new(setup_ledger.clone(), setup_history.clone());
+    let dictionary = dictionary::Dictionary::new(setup_ledger.clone());
     let setup_meetings = meetings.clone();
     let app = tauri::Builder::default()
         .manage(dictionary)

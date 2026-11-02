@@ -135,7 +135,7 @@ impl Ledger {
                     corrected.insert(id.clone(), text.clone());
                 }
             }
-            update_learning(&snapshot, &events, &vocabulary, &words);
+            update_learning(&snapshot, &events);
             let _ = write_corpus(&root, &corrected);
             prune(&root, keep_audio, 50, &corrected.keys().cloned().collect());
             let _ = compact(&root, &mut events, 500, 50);
@@ -172,12 +172,12 @@ impl Ledger {
                             };
                             events.push(event);
                             if let Some((id, text, read_back)) = read_back {
-                                let names = promote(&root, &vocabulary, &words, &mut events);
+                                let names = promote(&root, &vocabulary, words, &mut events);
                                 // A fix made in another app gets the card, which says
                                 // what was seen and opens it; one made here gets a flash.
                                 let fix = read_back
                                     .then(|| {
-                                        fix_notice(&events, &id, &text, &vocabulary, &words, &names)
+                                        fix_notice(&events, &id, &text, &vocabulary, words, &names)
                                     })
                                     .flatten();
                                 match (fix, &pill) {
@@ -195,7 +195,7 @@ impl Ledger {
                                     _ => announce(&pill, &names),
                                 }
                             }
-                            update_learning(&snapshot, &events, &vocabulary, &words);
+                            update_learning(&snapshot, &events);
                         }
                     }
                     Command::Fixed(fixed) => {
@@ -231,9 +231,9 @@ impl Ledger {
                                 let _ = write_corpus(&root, &corrected);
                             }
                             events.push(event);
-                            let names = promote(&root, &vocabulary, &words, &mut events);
+                            let names = promote(&root, &vocabulary, words, &mut events);
                             announce(&pill, &names);
-                            update_learning(&snapshot, &events, &vocabulary, &words);
+                            update_learning(&snapshot, &events);
                         }
                     }
                     Command::Forget(term) => {
@@ -249,15 +249,14 @@ impl Ledger {
                                         events.push(event);
                                     }
                                 }
-                                update_learning(&snapshot, &events, &vocabulary, &words);
+                                update_learning(&snapshot, &events);
                             }
                             Err(error) => eprintln!("could not forget {term}: {error}"),
                         }
                     }
                     Command::Edit(edit, reply) => {
-                        let result =
-                            apply_edit(&root, &vocabulary, &words, &mut events, &pill, edit);
-                        update_learning(&snapshot, &events, &vocabulary, &words);
+                        let result = apply_edit(&root, &vocabulary, &mut events, edit);
+                        update_learning(&snapshot, &events);
                         let _ = reply.send(result);
                     }
                     #[cfg(test)]
@@ -691,12 +690,7 @@ fn announce(pill: &Option<mpsc::Sender<PillEvent>>, names: &[String]) {
     }
 }
 
-fn update_learning(
-    snapshot: &Arc<Mutex<Learning>>,
-    events: &[Event],
-    _vocabulary: &Path,
-    _words: &crate::learn::Words,
-) {
+fn update_learning(snapshot: &Arc<Mutex<Learning>>, events: &[Event]) {
     let mut learning = Learning::default();
     for event in events.iter().rev() {
         if let Event::Learned { term, heard, .. } = event {
@@ -778,9 +772,7 @@ fn remove_term(path: &Path, term: &str) -> std::io::Result<Vec<String>> {
 fn apply_edit(
     root: &Path,
     vocabulary: &Path,
-    _words: &crate::learn::Words,
     events: &mut Vec<Event>,
-    _pill: &Option<mpsc::Sender<PillEvent>>,
     edit: crate::vocabulary::Edit,
 ) -> Result<(), String> {
     use crate::vocabulary::{Files, Note};
@@ -792,17 +784,22 @@ fn apply_edit(
     };
     for note in Files::beside(vocabulary).edit(&edit)? {
         let event = match note {
-            Note::Forgot(term) => Event::Forgotten {
+            Note::Forgot(term, heard) => Event::Forgotten {
                 at: now(),
                 term,
-                heard: None,
+                heard,
             },
-            Note::Learned(term) => Event::Learned {
-                at: now(),
-                term,
-                heard: None,
-                from: Vec::new(),
-            },
+            Note::Added(term, heard) => {
+                if !crate::learn::forgotten(events, &term, heard.as_deref()) {
+                    continue;
+                }
+                Event::Learned {
+                    at: now(),
+                    term,
+                    heard,
+                    from: Vec::new(),
+                }
+            }
         };
         record(events, event)?;
     }
@@ -843,7 +840,7 @@ mod tests {
         let id = ledger.mint();
         ledger.dictated(
             &id,
-            "Tauri",
+            "Quorvo",
             crate::mic::Audio16k::from_samples(vec![0.1; 320]),
         );
         let observation = crate::target::Observation {
@@ -854,12 +851,12 @@ mod tests {
             element: None,
         };
         ledger.landed(&id, &observation, crate::paste::Landing::Pasted);
-        ledger.corrected(&id, "Tauri!", Source::ReadBack);
+        ledger.corrected(&id, "Quorvo!", Source::ReadBack);
         ledger.flush();
         let events = read(&root);
         assert_eq!(events.len(), 3);
         assert!(
-            matches!(&events[0], Event::Dictated { id: actual, text, audio: Some(path), .. } if actual == &id && text == "Tauri" && path == &format!("audio/{}.wav", id.0))
+            matches!(&events[0], Event::Dictated { id: actual, text, audio: Some(path), .. } if actual == &id && text == "Quorvo" && path == &format!("audio/{}.wav", id.0))
         );
         assert_eq!(
             crate::mic::Audio16k::from_wav(&root.join(format!("audio/{}.wav", id.0)))
@@ -872,7 +869,7 @@ mod tests {
             matches!(&events[1], Event::Landed { app, bundle, focus, landing, .. } if app == "Notes" && bundle == "com.apple.Notes" && focus == "editable" && landing == "pasted")
         );
         assert!(
-            matches!(&events[2], Event::Corrected { text, source: Source::ReadBack, .. } if text == "Tauri!")
+            matches!(&events[2], Event::Corrected { text, source: Source::ReadBack, .. } if text == "Quorvo!")
         );
     }
 
@@ -904,13 +901,13 @@ mod tests {
 
     #[test]
     fn literal_json_is_stable() {
-        let line = r#"{"event":"corrected","id":"20261014-231502-123","at":"2026-10-14T23:15:02+02:00","text":"Tauri","source":"read-back"}"#;
+        let line = r#"{"event":"corrected","id":"20261014-231502-123","at":"2026-10-14T23:15:02+02:00","text":"Quorvo","source":"read-back"}"#;
         assert_eq!(
             serde_json::from_str::<Event>(line).unwrap(),
             Event::Corrected {
                 id: Id("20261014-231502-123".into()),
                 at: "2026-10-14T23:15:02+02:00".into(),
-                text: "Tauri".into(),
+                text: "Quorvo".into(),
                 source: Source::ReadBack,
             }
         );
@@ -998,8 +995,8 @@ mod tests {
         let (ledger, root) = fixture(500);
         for _ in 0..2 {
             let id = ledger.mint();
-            ledger.dictated(&id, "superbase", crate::mic::Audio16k::silence(0.01));
-            ledger.corrected(&id, "Supabase", Source::ReadBack);
+            ledger.dictated(&id, "zentrixx", crate::mic::Audio16k::silence(0.01));
+            ledger.corrected(&id, "Zentrix", Source::ReadBack);
         }
         ledger.flush();
         assert_eq!(
@@ -1007,7 +1004,7 @@ mod tests {
                 .iter()
                 .filter(|e| matches!(e, Event::Learned { .. }))
                 .count(),
-            1
+            2
         );
         let lines = fs::read_to_string(root.join("learned.md")).unwrap();
         assert_eq!(
@@ -1015,10 +1012,10 @@ mod tests {
                 .lines()
                 .filter(|l| !l.starts_with('#'))
                 .collect::<Vec<_>>(),
-            ["- superbase -> Supabase"]
+            ["- Zentrix", "- zentrixx -> Zentrix"]
         );
-        assert_eq!(ledger.learning().learned, ["Supabase"]);
-        ledger.forget("Supabase");
+        assert_eq!(ledger.learning().learned, ["Zentrix"]);
+        ledger.forget("Zentrix");
         ledger.flush();
         assert!(fs::read_to_string(root.join("learned.md"))
             .unwrap()
@@ -1031,14 +1028,14 @@ mod tests {
     fn a_line_fixed_in_the_library_teaches_like_the_fix_dialog() {
         let (ledger, root) = fixture(500);
         let id = ledger.mint();
-        ledger.dictated(&id, "we use superbase", crate::mic::Audio16k::silence(0.01));
+        ledger.dictated(&id, "we use zentrixx", crate::mic::Audio16k::silence(0.01));
         ledger.flush();
         let at_ms = Local::now().timestamp_millis();
-        ledger.fixed(at_ms, "we use superbase", "we use Supabase");
+        ledger.fixed(at_ms, "we use zentrixx", "we use Zentrix");
         ledger.fixed(
             at_ms - 86_400_000,
-            "ship with fastlain",
-            "ship with Fastlane",
+            "ship with veltrixx",
+            "ship with Veltrix",
         );
         ledger.flush();
         let events = read(&root);
@@ -1050,27 +1047,27 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|e| matches!(e, Event::Dictated { audio: None, text, .. } if text == "ship with fastlain"))
+                .filter(|e| matches!(e, Event::Dictated { audio: None, text, .. } if text == "ship with veltrixx"))
                 .count(),
             1,
             "a line it never saw gets an entry of its own"
         );
         let learned = fs::read_to_string(root.join("learned.md")).unwrap();
-        assert!(learned.contains("- superbase -> Supabase\n"), "{learned}");
-        assert!(learned.contains("- fastlain -> Fastlane\n"), "{learned}");
+        assert!(learned.contains("- zentrixx -> Zentrix\n"), "{learned}");
+        assert!(learned.contains("- veltrixx -> Veltrix\n"), "{learned}");
     }
 
     #[test]
     fn promotion_appends_after_unterminated_line() {
         let (ledger, root) = fixture(500);
-        fs::write(root.join("learned.md"), "- Tauri").unwrap();
+        fs::write(root.join("learned.md"), "- Quorvo").unwrap();
         let id = ledger.mint();
-        ledger.dictated(&id, "superbase", crate::mic::Audio16k::silence(0.01));
-        ledger.corrected(&id, "Supabase", Source::Manual);
+        ledger.dictated(&id, "zentrixx", crate::mic::Audio16k::silence(0.01));
+        ledger.corrected(&id, "Zentrix", Source::Manual);
         ledger.flush();
         assert_eq!(
             fs::read_to_string(root.join("learned.md")).unwrap(),
-            "- Tauri\n- superbase -> Supabase\n"
+            "- Quorvo\n- Zentrix\n- zentrixx -> Zentrix\n"
         );
     }
 
@@ -1117,11 +1114,11 @@ mod tests {
         );
         for (said, fixed) in [
             (
-                "I sent the file to Larston yesterday.",
-                "I sent the file to Larsten yesterday.",
+                "I sent the file to zentrixx yesterday.",
+                "I sent the file to Zentrix yesterday.",
             ),
             ("I want to go home.", "I want too go home."),
-            ("Ask Larston about it.", "Ask Larsten about it."),
+            ("Ask zentrixx about it.", "Ask Zentrix about it."),
         ] {
             let id = ledger.mint();
             ledger.dictated(
@@ -1141,8 +1138,124 @@ mod tests {
             .collect();
         assert_eq!(
             shown,
-            vec!["Larston -> Larsten false", "Larston -> Larsten true"]
+            vec!["zentrixx -> Zentrix true", "zentrixx -> Zentrix true"]
         );
         let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn deletion_blocks_later_fixes_and_hand_addition_clears_only_its_pair() {
+        use crate::vocabulary::Edit;
+        let root = std::env::temp_dir().join(format!(
+            "flat-forget-{}",
+            Local::now().timestamp_nanos_opt().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let vocabulary = root.join("vocabulary.md");
+        let words = crate::learn::Words::from_list(&[]);
+        let mut events = Vec::new();
+        let fix = |events: &mut Vec<Event>, id: &str| {
+            events.push(Event::Dictated {
+                id: Id::test(id),
+                at: String::new(),
+                text: "zentrixx".into(),
+                audio: None,
+            });
+            events.push(Event::Corrected {
+                id: Id::test(id),
+                at: String::new(),
+                text: "Zentrix".into(),
+                source: Source::Manual,
+            });
+        };
+        fix(&mut events, "1");
+        promote(&root, &vocabulary, &words, &mut events);
+        apply_edit(
+            &root,
+            &vocabulary,
+            &mut events,
+            Edit::Delete {
+                term: "Zentrix".into(),
+                heard: Some("zentrixx".into()),
+            },
+        )
+        .unwrap();
+        fix(&mut events, "2");
+        assert!(promote(&root, &vocabulary, &words, &mut events).is_empty());
+        assert_eq!(
+            fs::read_to_string(root.join("learned.md"))
+                .unwrap()
+                .lines()
+                .filter(|l| l.starts_with("- "))
+                .collect::<Vec<_>>(),
+            ["- Zentrix"]
+        );
+        apply_edit(
+            &root,
+            &vocabulary,
+            &mut events,
+            Edit::Add {
+                text: "zentrixx -> Zentrix".into(),
+            },
+        )
+        .unwrap();
+        assert!(!crate::learn::forgotten(
+            &events,
+            "Zentrix",
+            Some("zentrixx")
+        ));
+        apply_edit(
+            &root,
+            &vocabulary,
+            &mut events,
+            Edit::Delete {
+                term: "Zentrix".into(),
+                heard: None,
+            },
+        )
+        .unwrap();
+        fix(&mut events, "3");
+        assert!(promote(&root, &vocabulary, &words, &mut events).is_empty());
+        assert!(crate::learn::forgotten(
+            &events,
+            "Zentrix",
+            Some("zen tricks")
+        ));
+        apply_edit(
+            &root,
+            &vocabulary,
+            &mut events,
+            Edit::Add {
+                text: "Zentrix".into(),
+            },
+        )
+        .unwrap();
+        assert!(!crate::learn::forgotten(&events, "Zentrix", None));
+        assert!(crate::learn::forgotten(
+            &events,
+            "Zentrix",
+            Some("zen tricks")
+        ));
+        apply_edit(
+            &root,
+            &vocabulary,
+            &mut events,
+            Edit::Change {
+                term: "Zentrix".into(),
+                heard: Some("zentrixx".into()),
+                to: "zen tricks -> Zentrix".into(),
+            },
+        )
+        .unwrap();
+        assert!(!crate::learn::forgotten(
+            &events,
+            "Zentrix",
+            Some("zen tricks")
+        ));
+        assert!(crate::learn::forgotten(
+            &events,
+            "Zentrix",
+            Some("zentrixx")
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 }

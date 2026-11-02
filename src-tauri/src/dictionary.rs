@@ -1,16 +1,11 @@
-//! The Library's Dictionary section: every term in `vocabulary.md` and
-//! `learned.md` as one row, how each has come out in saved dictations and
-//! meetings, and the edits the files allow. The files stay the source of
-//! truth; the section reads them fresh on every change and writes through the
-//! ledger thread.
+//! The Dictionary reads active pairs from its two word files and sends edits
+//! through the ledger thread so learning and page edits share one writer.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use crate::history::History;
-use crate::ledger::{Learning, Ledger};
-
+use crate::ledger::Ledger;
 use crate::shadow::Text;
 use crate::vocabulary::{same, Document, Edit, Files, Line};
 
@@ -22,10 +17,9 @@ pub struct Dictionary {
 }
 
 impl Dictionary {
-    pub fn new(ledger: Ledger, _history: History) -> Dictionary {
+    pub fn new(ledger: Ledger) -> Dictionary {
         Dictionary {
             ledger,
-
             vocabulary: crate::boost::Lexicon::default_path(),
         }
     }
@@ -40,11 +34,7 @@ impl Dictionary {
         let files = self.files();
         let sources = self.sources();
         crate::library::request(&sources);
-        let mut snapshot = snapshot(
-            &display(&files.vocabulary)?,
-            &display(&files.learned)?,
-            &self.ledger.learning(),
-        );
+        let mut snapshot = snapshot(&display(&files.vocabulary)?, &display(&files.learned)?);
         snapshot.stamp = stamp(&sources);
         Ok(snapshot)
     }
@@ -77,102 +67,55 @@ fn stamp(sources: &[PathBuf]) -> String {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     stamp: String,
-    words: Vec<Word>,
+    rows: Vec<Row>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Word {
+struct Row {
     term: String,
-    parked: bool,
-    vocabulary: bool,
-    learned: bool,
-    weight: f32,
-    rules: Vec<Rule>,
-}
-
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
-struct Rule {
-    heard: String,
+    heard: Option<String>,
     learned: bool,
 }
 
-/// One row per term, whichever file and casing it came from. Active lines
-/// win over parked ones, and a casing in `learned.md` wins over the one in
-/// `vocabulary.md`, the same way the decoder reads them.
-fn snapshot(vocabulary: &Document, learned: &Document, learning: &Learning) -> Snapshot {
-    let mut words: Vec<Word> = Vec::new();
-    let blank = |term: String, weight: f32| Word {
-        term,
-        parked: false,
-        vocabulary: false,
-        learned: false,
-        weight,
-        rules: Vec::new(),
-    };
+fn snapshot(vocabulary: &Document, learned: &Document) -> Snapshot {
+    let mut rows: Vec<Row> = Vec::new();
     for (in_learned, document) in [(false, vocabulary), (true, learned)] {
         for line in document.lines() {
             let Line::Active(entry) = line else { continue };
-            let index = match words.iter().position(|w| same(&w.term, &entry.term)) {
-                Some(index) => index,
-                None => {
-                    words.push(blank(entry.term.clone(), entry.weight));
-                    words.len() - 1
+            let found = rows.iter_mut().find(|row| {
+                same(&row.term, &entry.term)
+                    && match (&row.heard, &entry.heard) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => same(a, b),
+                        _ => false,
+                    }
+            });
+            if let Some(row) = found {
+                if in_learned {
+                    row.term = entry.term;
+                    row.heard = entry.heard;
+                    row.learned = true;
                 }
-            };
-            let word = &mut words[index];
-            word.term = entry.term;
-            word.weight = word.weight.max(entry.weight);
-            if in_learned {
-                word.learned = true;
             } else {
-                word.vocabulary = true;
-            }
-            if let Some(heard) = entry.heard {
-                if !word
-                    .rules
-                    .iter()
-                    .any(|r| r.heard.eq_ignore_ascii_case(&heard))
-                {
-                    word.rules.push(Rule {
-                        heard,
-                        learned: in_learned,
-                    });
-                }
+                rows.push(Row {
+                    term: entry.term,
+                    heard: entry.heard,
+                    learned: in_learned,
+                });
             }
         }
     }
-    for line in vocabulary.lines() {
-        let Line::Parked(entry) = line else { continue };
-        match words.iter_mut().find(|w| same(&w.term, &entry.term)) {
-            Some(word) if word.parked => {
-                if let Some(heard) = entry.heard {
-                    word.rules.push(Rule {
-                        heard,
-                        learned: false,
-                    });
-                }
-            }
-            Some(_) => {}
-            None => {
-                let mut word = blank(entry.term, entry.weight);
-                word.parked = true;
-                word.vocabulary = true;
-                word.rules.extend(entry.heard.map(|heard| Rule {
-                    heard,
-                    learned: false,
-                }));
-                words.push(word);
-            }
-        }
-    }
-    words.sort_by_cached_key(|w| w.term.to_lowercase());
+    rows.sort_by_cached_key(|r| {
+        (
+            r.term.to_lowercase(),
+            r.heard.as_ref().map(|h| h.to_lowercase()),
+        )
+    });
     Snapshot {
         stamp: String::new(),
-        words,
+        rows,
     }
 }
 
@@ -210,4 +153,36 @@ pub async fn dictionary_reveal(state: tauri::State<'_, Dictionary>) -> Result<()
     open.spawn()
         .map(drop)
         .map_err(|error| format!("Unable to open Finder: {error}."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn snapshot_is_flat_sorted_and_learned_spelling_wins() {
+        let snap = snapshot(
+            &Document::parse("# - Veltrix\n- Zentrix\n- zentrixx -> Zentrix\n- Quorvo\n"),
+            &Document::parse("- ZENTRIXX -> ZENTRIX\n"),
+        );
+        assert_eq!(
+            snap.rows,
+            [
+                Row {
+                    term: "Quorvo".into(),
+                    heard: None,
+                    learned: false
+                },
+                Row {
+                    term: "Zentrix".into(),
+                    heard: None,
+                    learned: false
+                },
+                Row {
+                    term: "ZENTRIX".into(),
+                    heard: Some("ZENTRIXX".into()),
+                    learned: true
+                },
+            ]
+        );
+    }
 }
