@@ -460,87 +460,6 @@ pub async fn library_fix(
     }
 }
 
-/// One spoken line from a dictation or a meeting, for the Dictionary's
-/// counts. Takes are left out: their words are in the day files already.
-pub struct Spoken {
-    pub item: String,
-    pub start_ms: i64,
-    pub at_ms: i64,
-    pub text: String,
-}
-
-/// Every dictation and meeting line, newest first.
-pub fn spoken(history_root: &Path) -> Vec<Spoken> {
-    spoken_in(history_root, &crate::paths::documents())
-}
-
-fn spoken_in(history_root: &Path, documents: &Path) -> Vec<Spoken> {
-    let mut out: Vec<Spoken> = spoken_sources_in(history_root, documents)
-        .into_iter()
-        .filter_map(|path| {
-            if path
-                .file_name()
-                .is_some_and(|name| name == folder::MANIFEST)
-            {
-                meeting(path.parent()?)
-            } else if path
-                .file_name()
-                .is_some_and(|name| name == folder::MARKDOWN)
-            {
-                None
-            } else {
-                day(&path)
-            }
-        })
-        .flat_map(|item| {
-            let base = if item.kind == "meeting" { item.at } else { 0 };
-            item.lines.into_iter().map(move |line| Spoken {
-                item: item.id.clone(),
-                start_ms: line.start_ms,
-                at_ms: base + line.start_ms,
-                text: line.text,
-            })
-        })
-        .collect();
-    out.sort_by_key(|line| std::cmp::Reverse(line.at_ms));
-    out
-}
-
-pub fn spoken_sources(history_root: &Path) -> Vec<PathBuf> {
-    spoken_sources_in(history_root, &crate::paths::documents())
-}
-
-fn spoken_sources_in(history_root: &Path, documents: &Path) -> Vec<PathBuf> {
-    let mut sources: Vec<_> = std::fs::read_dir(history_root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension().is_some_and(|ext| ext == "md")
-                && path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .and_then(crate::history::day_file_date)
-                    .is_some()
-        })
-        .collect();
-    for entry in std::fs::read_dir(documents).into_iter().flatten().flatten() {
-        let path = entry.path();
-        if path.is_dir()
-            && path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with("meeting-"))
-        {
-            sources.push(path.join(folder::MANIFEST));
-            sources.push(path.join(folder::MARKDOWN));
-        }
-    }
-    sources.sort();
-    sources.dedup();
-    sources
-}
-
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -1025,40 +944,6 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
-    }
-
-    #[test]
-    fn spoken_sources_ignore_takes() {
-        let root = temp_dir();
-        let day = root.join("2026-10-07.md");
-        std::fs::write(&day, "## 09:00:00\n\nSpoken.\n").unwrap();
-        let take = root.join("2026-10-07-10-00-00");
-        std::fs::create_dir_all(&take).unwrap();
-        std::fs::write(take.join("transcript.json"), "invalid json").unwrap();
-        let meeting = folder::create(
-            &root,
-            Some("Zoom"),
-            local_ms("2026-10-07", "10:00:00").unwrap(),
-        )
-        .unwrap();
-        std::fs::write(
-            meeting.join(folder::MARKDOWN),
-            "[00:05] You: Meeting words.\n",
-        )
-        .unwrap();
-        let sources = spoken_sources_in(&root, &root);
-        assert_eq!(sources.len(), 3);
-        assert!(sources.contains(&day));
-        assert!(sources.contains(&meeting.join(folder::MANIFEST)));
-        assert!(sources.contains(&meeting.join(folder::MARKDOWN)));
-        let lines = spoken_in(&root, &root);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].text, "Meeting words.");
-        assert_eq!(lines[1].text, "Spoken.");
-        assert!(!crate::paths::shadow()
-            .join(take.strip_prefix("/").unwrap())
-            .exists());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

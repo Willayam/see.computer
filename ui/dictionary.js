@@ -42,13 +42,7 @@
     ];
   }
 
-  // A fix waiting for review, or else the word that came up most recently.
-  function opening() {
-    const rows = visible();
-    const heard = rows.filter((o) => o.kind === "word" && !o.item.parked && o.item.recent.length)
-      .sort((a, b) => b.item.recent[0].atMs - a.item.recent[0].atMs);
-    return rows.find((o) => o.kind === "waiting") || heard[0] || rows[0];
-  }
+  function opening() { return visible()[0]; }
 
   function find(sel) {
     if (!view.snap || !sel) return null;
@@ -75,8 +69,7 @@
     const w = o.item;
     if (o.kind === "waiting") return w.heard ? `heard ${quoted(w.heard)}` : "seen once";
     if (w.parked) return "parked, not boosted";
-    if (!w.right && !w.misheard) return w.rules.length ? `heard as ${w.rules.map((r) => r.heard).join(", ")}` : "not heard yet";
-    return `${w.right.toLocaleString()} right · ${w.misheard.toLocaleString()} misheard`;
+    return "";
   }
 
   function renderList() {
@@ -137,34 +130,6 @@
     return "In vocabulary.md.";
   }
 
-  // The words around the first place the term or a heard form came up, so a
-  // long dictation does not push the other lines off the page.
-  function highlight(text, w) {
-    const forms = [w.term, ...w.rules.map((r) => r.heard)].filter(Boolean)
-      .map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-    const pattern = new RegExp(`(^|[^\\p{L}\\p{N}])(${forms.join("|")})(?=$|[^\\p{L}\\p{N}])`, "giu");
-    const at = text.search(pattern);
-    let snippet = text;
-    if (text.length > 220 && at >= 0) {
-      const start = at > 80 ? text.lastIndexOf(" ", at - 70) + 1 : 0;
-      const end = text.indexOf(" ", Math.min(text.length, at + 140));
-      snippet = (start > 0 ? "…" : "") + text.slice(start, end < 0 ? undefined : end) + (end < 0 ? "" : "…");
-    }
-    return esc(snippet).replace(pattern, (_, before, word) => `${before}<mark>${word}</mark>`);
-  }
-
-  function recentEl(w) {
-    const cloud = view.snap.inIcloud ? ` ${plural(view.snap.inIcloud, "file is", "files are")} still downloading from iCloud, so this may change.` : "";
-    if (!w.recent.length) return `<p class="dict-help">Not seen in your ${plural(view.snap.lines, "saved line", "saved lines")} yet.${cloud}</p>`;
-    return `<div class="lines dict-recent">${w.recent.map((r, idx) => {
-      const isMeeting = r.item.startsWith("meeting:");
-      return `<button class="line is-dictation dict-hit" data-recent="${idx}" title="Open in the Library">
-        <span class="line-time">${fmt.day(r.atMs)}<br>${fmt.clock(r.atMs)}</span>
-        <span class="line-body"><span class="speaker ${r.misheard ? "is-miss" : "is-hit"}">${r.misheard ? "Misheard" : "Came out right"}${isMeeting ? " · meeting" : ""}</span>${highlight(r.text, w)}</span>
-      </button>`;
-    }).join("")}</div>`;
-  }
-
   function rulesEl(w) {
     const rows = w.rules.map((r, idx) => `
       <div class="dict-rule">
@@ -205,8 +170,7 @@
   }
 
   function wordPage(w) {
-    const meta = w.parked ? ["<span>Parked</span>"]
-      : [`<span>${w.right.toLocaleString()} right</span>`, `<span class="${w.misheard ? "them" : ""}">${w.misheard.toLocaleString()} misheard</span>`, `<span>Boost ${w.weight}</span>`];
+    const meta = [];
     const acts = [];
     if (w.parked) acts.push(`<button class="act is-primary" data-act="unpark"><span>Turn on</span></button>`);
     else if (!w.learned) acts.push(`<button class="act" data-act="park" title="Keep it in vocabulary.md without boosting it"><span>Park</span></button>`);
@@ -220,9 +184,6 @@
       <div class="bar"><div class="bar-meta">${meta.join('<span class="sep">·</span>')}</div><div class="bar-actions">${acts.join("")}</div></div>
       ${view.confirming ? confirmEl(w) : ""}
       ${message()}
-      ${w.parked ? "" : `<section class="dict-section"><h2 class="dict-h">Recent</h2>
-        <p class="dict-help">Where it came up in your dictations and meetings, newest first. Open a line to fix it.</p>
-        ${recentEl(w)}</section>`}
       ${w.parked ? "" : rulesEl(w)}
       ${w.parked ? "" : boostEl(w)}
     </article>`;
@@ -392,10 +353,7 @@
         edit({ op: "add", text }, { kind: "word", key: keyOf(term) }, () => { view.draftWord = ""; });
       });
     }
-    d.querySelectorAll("[data-recent]").forEach((button) => {
-      const r = word.recent[+button.dataset.recent];
-      button.addEventListener("click", () => L.open(r.item, r.startMs));
-    });
+
   }
 
   function onClick(e) {
