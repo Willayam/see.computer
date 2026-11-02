@@ -266,13 +266,28 @@ impl Lexicon {
         {
             return false;
         }
-        self.stamps = stamps;
+        crate::library::request(&paths);
+        let mut current = true;
         let mut terms: Vec<Term> = Vec::new();
         let mut rules = Vec::new();
         for path in paths {
-            let (parsed, found) = fs::read_to_string(path)
-                .map(|s| parse(&s))
-                .unwrap_or_default();
+            let text = match crate::shadow::read(&path) {
+                crate::shadow::Text::Current(text) => text,
+                crate::shadow::Text::Stale(text) => {
+                    current = false;
+                    text
+                }
+                crate::shadow::Text::Waiting => return false,
+                crate::shadow::Text::Missing => {
+                    if !fs::symlink_metadata(&path)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                    {
+                        return false;
+                    }
+                    String::new()
+                }
+            };
+            let (parsed, found) = parse(&text);
             // Spellings that differ only in case are one term, and the one
             // read last wins. `learned.md` is read last, so a casing the user
             // taught by fixing it replaces the one in `vocabulary.md`.
@@ -299,6 +314,9 @@ impl Lexicon {
             }
         }
         rules.sort_by_key(|r| std::cmp::Reverse(r.heard.len()));
+        if current {
+            self.stamps = stamps;
+        }
         let changed = terms != self.terms || rules != self.rules;
         self.terms = terms;
         self.rules = rules;
@@ -829,6 +847,27 @@ mod tests {
         let path = std::env::temp_dir().join("see-computer-absent-vocabulary.md");
         let _ = fs::remove_file(&path);
         assert!(Lexicon::load(path).terms().is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_file_keeps_terms_and_rules_and_retries() {
+        let root = std::env::temp_dir().join(format!("lexicon-unreadable-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("vocabulary.md");
+        fs::write(&path, "- superbase -> Supabase\n").unwrap();
+        let mut lexicon = Lexicon::load(path.clone());
+        let stamps = lexicon.stamps;
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(!lexicon.refresh());
+        assert_eq!(lexicon.stamps, stamps);
+        assert_eq!(lexicon.terms(), [term("Supabase")]);
+        assert_eq!(lexicon.rewrite("superbase"), "Supabase");
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, "- Tauri\n").unwrap();
+        assert!(lexicon.refresh());
+        assert_eq!(lexicon.terms(), [term("Tauri")]);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -53,3 +53,12 @@ pub fn meeting_log() -> PathBuf {
 pub fn history_fallback() -> PathBuf {
     app_support().join("history")
 }
+
+pub fn shadow() -> PathBuf {
+    #[cfg(test)]
+    return std::env::temp_dir().join(format!("see-shadow-{}", std::process::id()));
+    #[cfg(not(test))]
+    std::env::var_os("SEE_COMPUTER_SHADOW_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| app_support().join("shadow"))
+}

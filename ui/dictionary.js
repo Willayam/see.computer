@@ -495,13 +495,12 @@
     accept(view.snap);
   }
 
-  async function reload() {
-    try {
-      accept(await invoke("dictionary_load"));
-    } catch (error) {
+  let loading = null;
+  function reload() {
+    return (loading ??= invoke("dictionary_load").then((snap) => accept(snap), (error) => {
       view.message = { text: String(error), error: true };
       if (view.active) renderDetail();
-    }
+    }).finally(() => { loading = null; }));
   }
 
   async function poll() {

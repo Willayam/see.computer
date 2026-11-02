@@ -68,7 +68,7 @@ pub fn write_notes(folder: &Path, engine: &mut dyn Engine) -> Result<PathBuf, St
 fn fetch(you: &Path, them: &Path) -> Result<Option<Duration>, String> {
     let mut left: Vec<_> = [you, them]
         .into_iter()
-        .filter(|path| crate::library::evicted(path))
+        .filter(|path| crate::shadow::evicted(path))
         .map(Path::to_path_buf)
         .collect();
     let downloading = !left.is_empty();
@@ -83,7 +83,7 @@ fn fetch(you: &Path, them: &Path) -> Result<Option<Duration>, String> {
             ));
         }
         std::thread::sleep(Duration::from_millis(500));
-        left.retain(|path| crate::library::evicted(path));
+        left.retain(|path| crate::shadow::evicted(path));
     }
     Ok(downloading.then(|| started.elapsed()))
 }

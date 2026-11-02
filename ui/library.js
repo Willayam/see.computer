@@ -372,7 +372,8 @@
 
   // Filters, search, keyboard
   function setKind(next) {
-    if (kind === "dictionary" && next !== "dictionary") window.seeDictionary.deactivate();
+    const leavingDictionary = kind === "dictionary" && next !== "dictionary";
+    if (leavingDictionary) window.seeDictionary.deactivate();
     kind = next;
     document.querySelectorAll(".chip").forEach((c) => {
       c.classList.toggle("is-on", c.dataset.kind === kind);
@@ -383,6 +384,7 @@
     const rows = visible();
     if (!rows.some((r) => r.id === currentId)) currentId = rows[0]?.id;
     renderList(); renderDetail();
+    if (leavingDictionary) return reload();
   }
   for (const chip of document.querySelectorAll(".chip")) {
     chip.addEventListener("click", () => setKind(chip.dataset.kind));
@@ -412,6 +414,7 @@
   }
   $("#theme").addEventListener("click", () => { theme = themes[(themes.indexOf(theme) + 1) % themes.length]; applyTheme(); });
   async function reload() {
+    if (dictionary()) return;
     const version = ++loadVersion;
     const scroll = $("#list").scrollTop;
     try {
@@ -420,7 +423,7 @@
       loaded = true;
       items = next.sort((a, b) => b.at - a.at);
       if (!currentId || !items.some((i) => i.id === currentId)) currentId = items[0]?.id ?? null;
-      if (dictionary()) { dictionary().reload(); return; }
+      if (dictionary()) return;
       renderList();
       // A fix being typed survives a reload unless its line is gone.
       const fix = $(".fix");
@@ -443,7 +446,7 @@
     }
     const edit = path.startsWith("edit:");
     const [id, at] = (edit ? path.slice(5) : path).split("@");
-    if (kind === "dictionary" || (kind !== "all" && !id.startsWith(kind))) setKind("all");
+    if (kind === "dictionary" || (kind !== "all" && !id.startsWith(kind))) await setKind("all");
     if (!items.some((i) => i.id === id)) await reload();
     const i = items.find((x) => x.id === id);
     if (!i) return;
