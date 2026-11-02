@@ -222,7 +222,10 @@ so "sketched" is known). Grammar fixes (to → too), lowered capitals and
 numbers never qualify. An offline study of this user's 13,700 Wispr Flow
 edits on 2026-08-27 found this test 91% precise once a term has two
 sightings and 37% at one; its scripts were not kept, so treat the figures as
-the reason for the two-sighting rule rather than as a reproduced result.
+unreproduced. Words now land on the first fix anyway, because deleting a
+wrong row is one click and a boosted word rarely hurts: replaying the real
+log on 2026-11-02 added 14 words, and the 78-clip corpus went from 219
+errors to 216 with no clip worse.
 The first fix adds the word to `learned.md`, unless either word file
 already has the term or the user forgot it. A replacement needs weight two
 for that exact heard form across distinct dictations. Read-back counts one;
@@ -231,7 +234,7 @@ a manual fix counts two. Both rows can be added by one manual fix.
 A replacement may have several words, or one unknown word of at least two
 letters. A single everyday word and a bare letter never become automatic
 replacements. The system spelling checker checks English and the user's
-preferred languages on one owner thread. Context checks wait at most 50 ms;
+preferred languages on one owner thread. Dictation-path checks wait at most 50 ms;
 learning checks wait at most two seconds. Failure treats a word as known.
 
 A fix that changes a name and plain words together is split before learning,
@@ -296,9 +299,13 @@ The files stay the source of truth. Edits re-read their bytes, change only
 the matching active lines, and keep line position and tab weights. A stale
 edit or a change that duplicates another row is refused. Writes go through
 the ledger thread so the learner and page cannot write at once. Changes
-record forgetting for the old pair unless only letter case changed. The
+record forgetting for the old pair, unless only letter case changed or a
+word gained a replacement. A `# - Word` line is a plain comment that the page
+never shows, and the learner will not bring that word back. The
 page polls only the two file stamps every 1.5 seconds and holds reloads
-while a draft or edit is pending. No file migration is needed.
+while a draft or edit is pending. The file format is unchanged. The first
+fix after upgrading also adds every word the old queue held, because their
+fixes are still in the log.
 
 **Opening the Library.** The Dictionary reads only its two word files.
 Opening it starts no Library transcript load. It selects the first row

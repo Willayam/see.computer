@@ -38,7 +38,10 @@
         time.title = "Learned from your fixes";
         time.setAttribute("aria-label", time.title);
       }
-      el.addEventListener("click", () => choose(keyOf(row)));
+      // On press, because the blur a press causes saves and redraws this list,
+      // and a click needs the row it pressed to still be there.
+      el.addEventListener("mousedown", (e) => { e.preventDefault(); choose(keyOf(row)); });
+      el.addEventListener("click", (e) => { if (!e.detail) choose(keyOf(row)); });
       list.appendChild(el);
     }
     const q = L.query().trim();
@@ -139,7 +142,11 @@
     }
     form.addEventListener("submit", (e) => { e.preventDefault(); save(); });
     $("[data-cancel]", detail)?.addEventListener("click", () => choose(null));
-    $("[data-delete]", detail)?.addEventListener("click", () => {
+    // The field keeps focus through a press on these, so nothing saves and
+    // redraws under the click. A second click of a double-click is not a new delete.
+    $(".bar-actions", detail).addEventListener("mousedown", (e) => e.preventDefault());
+    $("[data-delete]", detail)?.addEventListener("click", (e) => {
+      if (e.detail > 1) return;
       const rows = visible();
       const i = rows.findIndex((r) => keyOf(r) === keyOf(row));
       const next = rows[i + 1] || rows[i - 1];
@@ -152,7 +159,10 @@
   function accept(snap, selection) {
     view.snap = snap;
     if (selection !== undefined) view.selected = selection;
-    if (view.selected !== "new" && !selected()) view.selected = visible()[0] ? keyOf(visible()[0]) : null;
+    if (view.selected !== "new" && !selected()) {
+      view.selected = visible()[0] ? keyOf(visible()[0]) : null;
+      view.draft = null;
+    }
     if (view.active) { renderList(); renderDetail(); }
   }
 

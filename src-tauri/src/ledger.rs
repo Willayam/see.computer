@@ -622,7 +622,7 @@ fn promote(
 ) -> Vec<String> {
     // A word file iCloud cannot hand over reads as nothing known, which would
     // learn the user's own words again. The log keeps the evidence for the next fix.
-    let Ok(known) = known_terms(vocabulary) else {
+    let Ok(known) = terms_not_to_learn(vocabulary) else {
         return Vec::new();
     };
     let promotions = crate::learn::promotions(events, &known, words);
@@ -679,6 +679,13 @@ fn known_terms(vocabulary: &Path) -> std::io::Result<Vec<crate::vocabulary::Entr
             _ => None,
         })
         .collect())
+}
+
+fn terms_not_to_learn(vocabulary: &Path) -> std::io::Result<Vec<crate::vocabulary::Entry>> {
+    let off = crate::vocabulary::Files::beside(vocabulary).read()?.0;
+    let mut terms = known_terms(vocabulary)?;
+    terms.extend(off.switched_off());
+    Ok(terms)
 }
 
 fn announce(pill: &Option<mpsc::Sender<PillEvent>>, names: &[String]) {
@@ -1146,7 +1153,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
     #[test]
-    fn deletion_blocks_later_fixes_and_hand_addition_clears_only_its_pair() {
+    fn deletion_blocks_later_fixes_and_adding_the_word_back_clears_it() {
         use crate::vocabulary::Edit;
         let root = std::env::temp_dir().join(format!(
             "flat-forget-{}",
@@ -1233,7 +1240,7 @@ mod tests {
         )
         .unwrap();
         assert!(!crate::learn::forgotten(&events, "Zentrix", None));
-        assert!(crate::learn::forgotten(
+        assert!(!crate::learn::forgotten(
             &events,
             "Zentrix",
             Some("zen tricks")

@@ -33,9 +33,10 @@ impl Dictionary {
     fn snapshot(&self) -> Result<Snapshot, String> {
         let files = self.files();
         let sources = self.sources();
+        let taken = stamp(&sources);
         crate::library::request(&sources);
         let mut snapshot = snapshot(&display(&files.vocabulary)?, &display(&files.learned)?);
-        snapshot.stamp = stamp(&sources);
+        snapshot.stamp = taken;
         Ok(snapshot)
     }
 

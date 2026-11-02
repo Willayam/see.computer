@@ -576,20 +576,24 @@ fn weight<'a>(sightings: impl IntoIterator<Item = &'a Sighting>) -> usize {
 }
 
 pub fn forgotten(events: &[Event], term: &str, heard: Option<&str>) -> bool {
+    let mut word_came_back = false;
     for event in events.iter().rev() {
         match event {
             Event::Learned {
                 term: t, heard: h, ..
-            } if crate::vocabulary::same(t, term) && same_heard(h.as_deref(), heard) => {
-                return false
+            } if crate::vocabulary::same(t, term) => {
+                if same_heard(h.as_deref(), heard) {
+                    return false;
+                }
+                word_came_back |= h.is_none();
             }
             Event::Forgotten {
                 term: t, heard: h, ..
-            } if crate::vocabulary::same(t, term)
-                && (h.is_none() || same_heard(h.as_deref(), heard)) =>
-            {
-                return true
-            }
+            } if crate::vocabulary::same(t, term) => match h {
+                None if !word_came_back => return true,
+                Some(_) if same_heard(h.as_deref(), heard) => return true,
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -628,10 +632,9 @@ fn candidates(events: &[Event], words: &Words) -> Vec<(String, Vec<Sighting>)> {
             continue;
         };
         for swap in learned_swaps(pasted, edited, words) {
-            let index = match terms
-                .iter()
-                .position(|(term, _)| crate::vocabulary::same(term, &swap.wrote))
-            {
+            // By exact spelling: a later casing fix must teach the casing the
+            // user typed, not rewrite toward the first one they ever wrote.
+            let index = match terms.iter().position(|(term, _)| *term == swap.wrote) {
                 Some(index) => index,
                 None => {
                     terms.push((swap.wrote.clone(), Vec::new()));
@@ -651,6 +654,23 @@ fn candidates(events: &[Event], words: &Words) -> Vec<(String, Vec<Sighting>)> {
     terms
 }
 
+/// The spelling checker is case-sensitive and heard forms are lowercase, so
+/// "monday" alone reads as unknown and one fix would rewrite every Monday.
+fn may_replace(heard: &str, words: &Words) -> bool {
+    let mut letters = heard.chars();
+    let capitalized: String = letters
+        .next()
+        .into_iter()
+        .flat_map(char::to_uppercase)
+        .chain(letters)
+        .collect();
+    match heard.split_whitespace().count() {
+        0 => false,
+        1 => heard.chars().count() >= 2 && !words.knows(heard) && !words.knows(&capitalized),
+        _ => true,
+    }
+}
+
 pub fn promotions(
     events: &[Event],
     known: &[crate::vocabulary::Entry],
@@ -658,15 +678,23 @@ pub fn promotions(
 ) -> Vec<Promotion> {
     let mut out = Vec::new();
     for (term, sightings) in candidates(events, words) {
-        let settled = |heard: Option<&str>| {
+        let in_files = |heard: Option<&str>| {
             known.iter().any(|e| {
                 crate::vocabulary::same(&e.term, &term)
                     && (heard.is_none() || same_heard(e.heard.as_deref(), heard))
-            }) || events.iter().any(|e| {
+            })
+        };
+        let learned = |heard: Option<&str>| {
+            events.iter().any(|e| {
                 matches!(e, Event::Learned { term: t, heard: h, .. }
                     if crate::vocabulary::same(t, &term)
                         && (heard.is_none() || same_heard(h.as_deref(), heard)))
-            }) || forgotten(events, &term, heard)
+            })
+        };
+        // A term the log learned and the files no longer hold was removed by hand.
+        let removed_by_hand = learned(None) && !in_files(None);
+        let settled = |heard: Option<&str>| {
+            removed_by_hand || in_files(heard) || learned(heard) || forgotten(events, &term, heard)
         };
         if !settled(None) {
             out.push(Promotion {
@@ -678,14 +706,11 @@ pub fn promotions(
         let mut forms = HashSet::new();
         for sighting in &sightings {
             let heard = sighting.heard.as_str();
-            if !forms.insert(heard) || settled(Some(heard)) {
+            if !forms.insert(heard) || settled(Some(heard)) || !may_replace(heard, words) {
                 continue;
             }
-            let count = heard.split_whitespace().count();
-            let safe =
-                count >= 2 || (count == 1 && heard.chars().count() >= 2 && !words.knows(heard));
             let evidence: Vec<_> = sightings.iter().filter(|s| s.heard == heard).collect();
-            if safe && weight(evidence.iter().copied()) >= 2 {
+            if weight(evidence.iter().copied()) >= 2 {
                 out.push(Promotion {
                     term: term.clone(),
                     heard: Some(heard.into()),
@@ -952,5 +977,96 @@ mod tests {
                 "Zentrix"
             ]
         );
+    }
+
+    fn fix(id: &str, pasted: &str, edited: &str, source: Source) -> Vec<Event> {
+        vec![
+            Event::Dictated {
+                id: Id::test(id),
+                at: String::new(),
+                text: pasted.into(),
+                audio: None,
+            },
+            Event::Corrected {
+                id: Id::test(id),
+                at: String::new(),
+                text: edited.into(),
+                source,
+            },
+        ]
+    }
+
+    fn entry(term: &str) -> crate::vocabulary::Entry {
+        crate::vocabulary::Entry {
+            heard: None,
+            term: term.into(),
+            weight: 1.0,
+        }
+    }
+
+    #[test]
+    fn a_capitalized_everyday_word_heard_in_lowercase_is_never_replaced() {
+        let words = Words::from_list(&["on", "we", "ship", "Monday"]);
+        let promoted: Vec<_> = promotions(
+            &fix(
+                "1",
+                "on Monday we ship",
+                "on Zentrix we ship",
+                Source::Manual,
+            ),
+            &[],
+            &words,
+        )
+        .into_iter()
+        .map(|p| (p.term, p.heard))
+        .collect();
+        assert_eq!(promoted, [("Zentrix".to_owned(), None)]);
+    }
+
+    #[test]
+    fn a_word_removed_by_hand_does_not_return_as_a_replacement() {
+        let mut events = fix("1", "zentrixx", "Zentrix", Source::ReadBack);
+        events.push(Event::Learned {
+            at: String::new(),
+            term: "Zentrix".into(),
+            heard: None,
+            from: Vec::new(),
+        });
+        events.extend(fix("2", "zentrixx", "Zentrix", Source::ReadBack));
+        assert!(rows(&events, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_casing_fix_replaces_toward_the_casing_the_user_typed() {
+        let mut events = fix("1", "zentrixx", "Zentrix", Source::ReadBack);
+        events.extend(fix("2", "Zentrix", "ZenTrix", Source::Manual));
+        assert_eq!(
+            rows(&events, &[entry("Zentrix")]),
+            [("ZenTrix".to_owned(), Some("zentrix".to_owned()))]
+        );
+    }
+
+    #[test]
+    fn renaming_a_word_away_and_back_unblocks_its_replacements() {
+        let mut events = fix("1", "zentrixx", "Zentrix", Source::Manual);
+        events.push(Event::Forgotten {
+            at: String::new(),
+            term: "Zentrix".into(),
+            heard: Some("zentrixx".into()),
+        });
+        events.push(Event::Forgotten {
+            at: String::new(),
+            term: "Zentrix".into(),
+            heard: None,
+        });
+        events.push(Event::Learned {
+            at: String::new(),
+            term: "Zentrix".into(),
+            heard: None,
+            from: Vec::new(),
+        });
+        assert!(forgotten(&events, "Zentrix", Some("zentrixx")));
+        assert!(!forgotten(&events, "Zentrix", Some("zentrics")));
+        assert!(!forgotten(&events, "Zentrix", None));
     }
 }

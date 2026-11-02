@@ -168,6 +168,15 @@ impl Document {
         true
     }
 
+    /// `# - Word` lines: comments now, but the user switched these words off,
+    /// so the learner must not bring them back.
+    pub fn switched_off(&self) -> impl Iterator<Item = Entry> + '_ {
+        self.chunks.iter().filter_map(|chunk| {
+            let comment = body(chunk).trim().strip_prefix('#')?;
+            entry(comment.trim_start().strip_prefix("- ")?)
+        })
+    }
+
     pub fn has_pair(&self, term: &str, heard: Option<&str>) -> bool {
         !self.pair(term, heard).is_empty()
     }
@@ -194,14 +203,17 @@ impl Document {
             let mut entry = to.clone();
             entry.weight = self.entry_at(index).weight;
             let weight = body(&self.chunks[index])
+                .trim_start()
                 .split_once('\t')
                 .map(|(_, w)| w.to_owned());
             self.rewrite(index, &Line::Active(entry));
             if let Some(weight) = weight {
                 let chunk = &self.chunks[index];
                 let end = ending(chunk).to_owned();
-                let text = body(chunk).split('\t').next().unwrap();
-                self.chunks[index] = format!("{text}\t{weight}{end}");
+                let line = body(chunk);
+                let indent = &line[..line.len() - line.trim_start().len()];
+                let text = line.trim_start().split('\t').next().unwrap();
+                self.chunks[index] = format!("{indent}{text}\t{weight}{end}");
             }
         }
         !indices.is_empty()
@@ -313,19 +325,10 @@ impl Edit {
             Edit::Add { text } => {
                 checked_entry(text)?;
             }
-            Edit::Change { term, heard, to } => {
-                checked_part(term)?;
-                if let Some(h) = heard {
-                    checked_part(h)?;
-                }
+            Edit::Change { to, .. } => {
                 checked_entry(to)?;
             }
-            Edit::Delete { term, heard } => {
-                checked_part(term)?;
-                if let Some(h) = heard {
-                    checked_part(h)?;
-                }
-            }
+            Edit::Delete { .. } => {}
         }
         Ok(self)
     }
