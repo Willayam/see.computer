@@ -85,17 +85,26 @@
   #iwrap { position: fixed; left: 50%; bottom: 11px; height: 24px; opacity: 0; pointer-events: none; }
   #iclip { position: absolute; inset: 0; overflow: hidden; }
   /* Anchored at the right, because once the line is full its right end is
-     what stays put. placeWords() moves it with a transform; words arrive with a Web Animation (blurIn), not a CSS rule, so
-     the blur and its timing live with the other tunables. */
+     what stays put. placeWords() moves it with a transform; words change with
+     Web Animations (blurIn, blurOut), not CSS rules, so the blur and its timing
+     live with the other tunables. */
   #iline { position: absolute; right: 0; top: 0; white-space: nowrap; will-change: transform;
            font: 400 12px/24px -apple-system, system-ui, "SF Pro Text", Helvetica, sans-serif;
            letter-spacing: -.003em; -webkit-font-smoothing: antialiased;
            color: rgba(255,255,255,.5); transition: color .25s ease-out; }
   #iclip.isettled #iline { color: rgba(255,255,255,.36); }
+  /* A word is a box so it can glide when a rewrite moves it. Boxes drop the
+     space between words, so the margin stands in for one. */
+  .iw, .ifresh { display: inline-block; }
+  .iw + .iw { margin-left: .279em; }
+  /* What a rewrite took away, fading over the line. Out of flow, so it never
+     counts toward the line's width. */
+  #ighosts { position: absolute; left: 0; top: 0; }
+  .ighost { position: absolute; top: 0; }
 </style>
 <canvas id="cv" role="img" aria-label="Dictation status"></canvas>
 <div id="pill"><span id="dot"></span><span id="text"></span></div>
-<div id="iwrap" aria-hidden="true"><div id="iclip"><div id="iline"></div></div></div>
+<div id="iwrap" aria-hidden="true"><div id="iclip"><div id="iline"><div id="ighosts"></div></div></div></div>
 <div id="card"><div class="row" id="crow">
   <span class="cglyph" id="cglyph"></span><span id="cnote"></span><span id="csaid"></span>
   <button id="ccopy">Copy</button><span id="crule"></span>
@@ -290,8 +299,9 @@ function hideCard() {
    after the bars. The mask placeWords() writes each frame clips them at the
    capsule's edges, so no glyph shows over the desktop. Once the line no
    longer fits at MAX_W it pins PAD_R inside the right edge, and old words
-   step left and leave through the fade by the bars. Every preview redraws
-   from the first word that changed, and each redrawn word blurs in. */
+   step left and leave through the fade by the bars. Each pass is compared with
+   the line word by word, so only what changed moves: a word that stayed keeps
+   its element and is never redrawn. */
 
 /* Tunables. Everything below derives from them. */
 const MAX_W = 320;           // the capsule stops growing here and the line starts stepping
@@ -306,7 +316,8 @@ const FADE_R = 6;            // the soft edge the capsule's right end uncovers w
 const FADE_L_IN = 8;         // the left fade's width while the line grows. It sits before the
                              // first letter, where nothing is, so the first glyph stays whole.
 const FADE_L = 32;           // the left fade once the line is full and steps: old words leave through it
-const BLUR_MS = 320, BLUR_PX = 2;             // a word's entrance, from opacity 0 and blur(2px), ease-out
+const BLUR_MS = 320, BLUR_PX = 2;             // a new word's entrance, from opacity 0 and blur(2px), ease-out
+const MORPH_MS = 240;        // a rewrite: old letters blur out as new ones blur in, over each other
 const STAGGER_MS = 45, STAGGER_MAX_MS = 270;  // each word of a burst starts this much after the one before
 const SETTLE_K = 18;         // per second: a step, and the left fade's widening, are 95% done after about 170 ms
 const CV_MARGIN = 26;        // canvas room each side of MAX_W for the shadow and the lock ring
@@ -322,7 +333,9 @@ const iwrapEl = document.getElementById('iwrap'), iclipEl = document.getElementB
 const ilineEl = document.getElementById('iline');
 /* The text layer is the canvas's rectangle, so both share one x. */
 iwrapEl.style.width = CV_W + 'px'; iwrapEl.style.marginLeft = -CX + 'px';
-let previewWords = [];
+const ighostsEl = document.getElementById('ighosts');
+let shownWords = [];   // what the line says
+let lastPass = [];     // the previous pass, read the same way
 const still = matchMedia('(prefers-reduced-motion: reduce)');
 let wide = false, full = false, closing = false, shownAlpha = -1;
 let capW = 0;      // the capsule's target width; only ever grows within a take
@@ -330,41 +343,146 @@ let openW = 0;     // capW after the first word: the bars gather over this first
 let lineW = 0;     // the line's measured width
 let stepX = 0;     // how far right of its rest the line sits; settles to 0
 let fadeU = 0;     // 0: the left fade sits before the text; 1: the 32 px exit fade. Eases once full.
-let spans = [];
-function makeSpan(word) {
-  const s = document.createElement('span');
-  s.className = 'iw';
-  s.textContent = word;
-  return s;
+let spans = [];                // the line's words, in order: { el, word, x, dx }
+const gliding = new Set();     // those still easing to where a rewrite moved them
+/* A word as the comparison sees it: no case, no punctuation around it. */
+const bare = w => w.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+/* Every pass closes its last sentence whether or not the speaker has, so the
+   last word's punctuation means nothing yet and the line leaves it off. */
+function readPass(text) {
+  const words = text.split(/\s+/).filter(Boolean);
+  const last = words.length - 1;
+  if (last >= 0) words[last] = words[last].replace(/[.,;:!?…]+$/, '') || words[last];
+  return words;
 }
-function addSpan(word) {
-  if (ilineEl.childNodes.length) ilineEl.appendChild(document.createTextNode(' '));
-  const s = makeSpan(word);
-  ilineEl.appendChild(s);
-  spans.push(s);
-  return s;
+/* The words a and b share, as [i, j] pairs in order: a longest common
+   subsequence over bare forms, each word paired as early as it can be, so a
+   phrase said twice grows the end of the line and not its middle. */
+function sameWords(a, b) {
+  const A = a.map(bare), B = b.map(bare);
+  let head = 0;
+  while (head < A.length && head < B.length && A[head] === B[head]) head++;
+  const an = A.length - head, bn = B.length - head;
+  const best = Array.from({ length: an + 1 }, () => new Uint16Array(bn + 1));
+  for (let i = an - 1; i >= 0; i--) for (let j = bn - 1; j >= 0; j--)
+    best[i][j] = A[head + i] === B[head + j] ? best[i + 1][j + 1] + 1 : Math.max(best[i + 1][j], best[i][j + 1]);
+  const pairs = [];
+  for (let k = 0; k < head; k++) pairs.push([k, k]);
+  for (let i = 0, j = 0; i < an && j < bn;) {
+    if (A[head + i] === B[head + j]) { pairs.push([head + i, head + j]); i++; j++; }
+    else if (best[i + 1][j] >= best[i][j + 1]) i++;
+    else j++;
+  }
+  return pairs;
 }
-/* A word's entrance: from opacity 0 and blur(2px), 320 ms ease-out, held at the
-   start through the stagger delay. Reduced motion drops the blur. */
-function blurIn(s, delay) {
+/* What the line should say after this pass. The model changes its mind about
+   words it already gave, often back and forth, so a rewrite of words on screen
+   waits until two passes in a row agree on it. Words past the end of the line
+   are new speech and never wait. */
+function steadyLine(shown, pass, last) {
+  const here = sameWords(shown, pass);
+  const lastHad = new Map(sameWords(last, pass).map(([i, j]) => [j, last[i]]));
+  const lastKept = new Set(sameWords(shown, last).map(([i]) => i));
+  const line = [];
+  let i = 0, j = 0;
+  for (const [pi, pj] of [...here, [shown.length, pass.length]]) {
+    const was = shown.slice(i, pi), now = pass.slice(j, pj);
+    const grew = pi === shown.length && pj === pass.length && now.length > was.length;
+    let agreed = true;
+    for (let k = j; k < pj; k++) if (!lastHad.has(k)) agreed = false;
+    for (let k = i; k < pi; k++) if (lastKept.has(k)) agreed = false;
+    line.push(...(grew || agreed ? now : was));
+    if (pj < pass.length) line.push(lastHad.get(pj) === pass[pj] ? pass[pj] : shown[pi]);
+    i = pi + 1; j = pj + 1;
+  }
+  return line;
+}
+function blurIn(el, ms, delay) {
   const from = { opacity: 0 }, to = { opacity: 1 };
   if (!still.matches) { from.filter = `blur(${BLUR_PX}px)`; to.filter = 'blur(0px)'; }
-  s.animate([from, to], { duration: BLUR_MS, delay, easing: 'ease-out', fill: 'backwards' });
+  el.animate([from, to], { duration: ms, delay, easing: 'ease-out', fill: 'backwards' });
 }
-function apply(words, same) {
-  if (!words.length && !wide) return;
+/* Text leaving the line at x, from however visible it was. */
+function blurOut(text, x, opacity) {
+  const el = document.createElement('span');
+  el.className = 'ighost';
+  el.textContent = text;
+  el.style.left = x + 'px';
+  ighostsEl.appendChild(el);
+  const from = { opacity }, to = { opacity: 0 };
+  if (!still.matches) { from.filter = 'blur(0px)'; to.filter = `blur(${BLUR_PX}px)`; }
+  el.animate([from, to], { duration: MORPH_MS, easing: 'ease-out', fill: 'forwards' }).onfinish = () => el.remove();
+}
+/* A word the model rewrote. The letters that changed blur out as the new ones
+   blur in over them, so the word never passes through empty, and the letters
+   they share hold still. A word still arriving swaps whole, from however far
+   it got. */
+function rewrite(s, word) {
+  const parts = s.el.getAnimations({ subtree: true });
+  const seen = parts.length ? +getComputedStyle(s.el.lastElementChild || s.el).opacity : 1;
+  parts.forEach(part => part.cancel());
+  let keep = 0;
+  if (!parts.length) while (keep < s.word.length && keep < word.length && s.word[keep] === word[keep]) keep++;
+  s.el.textContent = s.word;
+  const range = document.createRange();
+  range.setEnd(s.el.firstChild, keep);
+  range.setStart(s.el.firstChild, 0);
+  if (keep < s.word.length) blurOut(s.word.slice(keep), s.x + s.dx + range.getBoundingClientRect().width, seen);
+  s.el.textContent = word.slice(0, keep);
+  if (keep < word.length) {
+    const fresh = document.createElement('span');
+    fresh.className = 'ifresh';
+    fresh.textContent = word.slice(keep);
+    s.el.appendChild(fresh);
+    blurIn(fresh, MORPH_MS, 0);
+  }
+  s.word = word;
+}
+function setGlide(s) { s.el.style.transform = s.dx ? `translateX(${s.dx.toFixed(2)}px)` : ''; }
+function apply(next) {
+  if (!next.length && !wide) return;
   const W = store.sw.x, w0 = lineW;
-  /* Keep the complete raw line so its measured width has the same origin
-     before and after a rewrite, even when the changed word is offscreen. */
-  ilineEl.textContent = '';
-  spans = [];
-  const burst = [];
-  words.forEach((word, i) => {
-    const s = addSpan(word);
-    if (i >= same) burst.push(s);
-  });
-  lineW = ilineEl.getBoundingClientRect().width;
-  burst.forEach((s, k) => blurIn(s, Math.min(k * STAGGER_MS, STAGGER_MAX_MS)));
+  const line = [], arrived = [];
+  let i = 0, j = 0;
+  for (const [pi, pj] of [...sameWords(shownWords, next), [spans.length, next.length]]) {
+    const swaps = Math.min(pi - i, pj - j);
+    for (let k = 0; k < swaps; k++) { rewrite(spans[i + k], next[j + k]); line.push(spans[i + k]); }
+    for (let k = i + swaps; k < pi; k++) {
+      const s = spans[k];
+      blurOut(s.word, s.x + s.dx, +getComputedStyle(s.el).opacity);
+      gliding.delete(s);
+      s.el.remove();
+    }
+    const before = pi < spans.length ? spans[pi].el : null;
+    for (let k = j + swaps; k < pj; k++) {
+      const s = { el: document.createElement('span'), word: next[k], x: null, dx: 0 };
+      s.el.className = 'iw';
+      s.el.textContent = s.word;
+      ilineEl.insertBefore(s.el, before);
+      line.push(s);
+      arrived.push(s.el);
+    }
+    if (pj < next.length) {
+      if (spans[pi].word !== next[pj]) rewrite(spans[pi], next[pj]);
+      line.push(spans[pi]);
+    }
+    i = pi + 1; j = pj + 1;
+  }
+  spans = line;
+  shownWords = next;
+  const box = ilineEl.getBoundingClientRect();
+  lineW = box.width;
+  /* A word a rewrite moved starts from where it was and glides. */
+  for (const s of spans) {
+    const x = s.el.getBoundingClientRect().left - box.left - s.dx;
+    if (s.x !== null && !still.matches && Math.abs(x - s.x) > 0.01) {
+      s.dx += s.x - x;
+      gliding.add(s);
+      setGlide(s);
+    }
+    s.x = x;
+  }
+  arrived.forEach((el, k) => blurIn(el, BLUR_MS, Math.min(k * STAGGER_MS, STAGGER_MAX_MS)));
   const fit = fitW(lineW);
   if (!wide) { wide = true; openW = Math.min(MAX_W, Math.ceil(fit)); }
   if (!full && fit > MAX_W) {
@@ -388,11 +506,10 @@ function apply(words, same) {
   placeWords(still.matches ? capW : W);
 }
 function showPreview(text) {
-  const words = text.split(/\s+/).filter(Boolean);
-  let same = 0;
-  while (same < words.length && words[same] === previewWords[same]) same++;
-  apply(words, same);
-  previewWords = words;
+  const pass = readPass(text);
+  const next = steadyLine(shownWords, pass, lastPass);
+  lastPass = pass;
+  if (next.join(' ') !== shownWords.join(' ')) apply(next);
 }
 function settlePreview() {
   if (!wide) return;
@@ -400,13 +517,16 @@ function settlePreview() {
 }
 /* The words stay while the chip fades; the frame loop clears them once it is
    gone, or at once if the next take starts before that. */
-function hidePreview() { if (wide) closing = true; else previewWords = []; }
+function hidePreview() { if (wide) closing = true; else { shownWords = []; lastPass = []; } }
 function finishHide() {
   wide = false; full = false; closing = false;
   capW = 0; openW = 0; lineW = 0; stepX = 0; fadeU = 0;
-  previewWords = [];
+  shownWords = [];
+  lastPass = [];
+  spans.forEach(s => s.el.remove());
   spans = [];
-  ilineEl.textContent = '';
+  gliding.clear();
+  ighostsEl.textContent = '';
   ilineEl.style.transform = '';
   placedMask = ''; placedTx = Infinity;   // so the next take's first frame is written even if it matches
   iclipEl.classList.remove('isettled');
@@ -468,6 +588,11 @@ function syncWords(g, dt) {
   if (wide) {
     if (stepX) { stepX -= stepX * Math.min(1, dt * SETTLE_K); if (Math.abs(stepX) < 0.2) stepX = 0; }
     if (full && fadeU < 1) { fadeU += (1 - fadeU) * Math.min(1, dt * SETTLE_K); if (fadeU > 0.995) fadeU = 1; }
+    for (const s of gliding) {
+      s.dx -= s.dx * Math.min(1, dt * SETTLE_K);
+      if (Math.abs(s.dx) < 0.2) { s.dx = 0; gliding.delete(s); }
+      setGlide(s);
+    }
     placeWords(g.W);
   }
   const a = wide ? Math.min(1, g.sc) : 0;
