@@ -311,6 +311,7 @@ impl Words {
             crate::qos::spawn("see-words", crate::qos::Class::Upkeep, move || {
                 let languages = proven_languages();
                 let mut memo = HashMap::new();
+                let mut slips = HashMap::new();
                 while let Ok(ask) = rx.recv() {
                     let answer = match ask.question {
                         Question::Knows => memoized_word(&mut memo, &ask.word, || {
@@ -325,14 +326,15 @@ impl Words {
                         }),
                         // No answer counts as a slip, as a failed spelling check
                         // counts as known: the word waits rather than landing.
-                        Question::OneSlipFromAWord => {
-                            languages.is_empty()
-                                || std::time::Instant::now() >= ask.deadline
-                                || languages.iter().any(|language| {
-                                    correction(&ask.word, language)
-                                        .is_some_and(|fixed| one_slip_apart(&ask.word, &fixed))
-                                })
-                        }
+                        Question::OneSlipFromAWord => memoized_word(&mut slips, &ask.word, || {
+                            if languages.is_empty() || std::time::Instant::now() >= ask.deadline {
+                                return None;
+                            }
+                            Some(languages.iter().any(|language| {
+                                correction(&ask.word, language)
+                                    .is_some_and(|fixed| one_slip_apart(&ask.word, &fixed))
+                            }))
+                        }),
                     };
                     let _ = ask.reply.send(answer);
                 }

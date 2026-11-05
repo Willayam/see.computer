@@ -263,7 +263,8 @@ or a rare spelling, and it costs a decode per margin. The labels came from
 reading the text, not from listening to the clips.
 
 The limit has known gaps. It cannot see a change that sounds close, such as one
-name for a similar name, or a half-typed word, which the next section handles. It also fails some real
+name for a similar name, or a half-typed word. The next section catches some of
+those. It also fails some real
 mishearings: a number said whole (`b twelve -> B12`) and a fix in another
 script. Those words land on the second dictation, and a replacement for them
 has to be written by hand.
@@ -272,16 +273,22 @@ has to be written by hand.
 field clears, and it polls once a second, so a fix followed quickly by Enter
 can be recorded mid-word. Three kinds of word never count: a figure with an
 ending of up to two lowercase letters (`26e`, `26:e`, `1st`, `5kg`), a term
-made only of bare letters (`F`, while `Plan B` stays), and a word the checker
+made only of bare letters (`F`), and a word the checker
 does not know that has fewer than three letters or anything but letters in it
 (`br`, `min"utes`). A likely typo waits for a second fix, or one manual fix.
 That is a word with no capital, digit or punctuation to speak for it, which
 the system checker's own correction turns into a word by adding a letter,
 dropping one or swapping two neighbours (`deligh`, `vuxnen`; `may_be_a_typo`).
 A changed letter does not count, because that is how a name respells a word
-(`poteto`, `skool`, `mobbin`). Nor does a correction that only splits a word,
-because the checker offers that for compound names (`build ship`). Capitals,
-camelCase, all caps and internal punctuation still land on the first fix.
+(`poteto`, `skool`, `mobbin`). Nor does a correction with anything but letters in
+it, because the checker offers a split for compound names (`build ship`). Capitals,
+camelCase, all caps and a dot, dash, underscore or slash inside a word still land
+on the first fix.
+
+These rules have costs. A lowercase short form (`ux`, `3d`) never counts, so it
+has to be added on the Dictionary page. A word with two or more letters missing
+(`branc`) still lands. A fix that splits one heard word into a name and a fragment
+(`nodejs -> Node js`) teaches nothing.
 
 Replaying the real log of 103 corrections on 2026-11-05 took the first fix from
 19 words to 14. All five removed were junk and all 14 kept were real. Over this
@@ -291,7 +298,7 @@ outright; two wait for a second fix, and one of those is itself a typo. About
 18 typos still land, such as `avove`, `thankto` and `solutiom`. Tightening
 further delayed more real words than it removed junk: counting changed letters
 caught 9 more of 34 labelled junk words and delayed 16 more of 74 real ones.
-A capitalized typo also still lands. Deleting one is one click.
+A typo capitalized mid-sentence also still lands. Deleting one is one click.
 
 With the change-of-mind test as well, replaying the log of 107 corrections on
 2026-11-05 took the first fix from 20 words to 14. All six removed were junk or
