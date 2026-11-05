@@ -156,21 +156,7 @@ fn split_names_from_plain_words(swap: Swap, words: &Words) -> Vec<Swap> {
     if heard.len() < runs.len() {
         return Vec::new();
     }
-    let spoken = |words: &[&str]| -> Vec<char> {
-        const DIGITS: [&str; 10] = [
-            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
-        ];
-        let mut out = Vec::new();
-        for c in words.concat().chars().flat_map(char::to_lowercase) {
-            match c.to_digit(10) {
-                Some(d) => out.extend(DIGITS[d as usize].chars()),
-                None if c.is_alphabetic() => out.push(c),
-                None => {}
-            }
-        }
-        out
-    };
-    let mut best: Option<(usize, Vec<usize>)> = None;
+    let mut best: Option<(f32, Vec<usize>)> = None;
     let mut cuts = vec![0usize; runs.len() + 1];
     cuts[runs.len()] = heard.len();
     fn each_partition(
@@ -195,8 +181,10 @@ fn split_names_from_plain_words(swap: Swap, words: &Words) -> Vec<Swap> {
             .enumerate()
             .map(|(i, &Run { start, end, .. })| {
                 distance(
-                    &spoken(&heard[cuts[i]..cuts[i + 1]]),
-                    &spoken(&wrote[start..end]),
+                    &spoken(&heard[cuts[i]..cuts[i + 1]].concat()),
+                    &spoken(&wrote[start..end].concat()),
+                    1.0,
+                    |x, y| f32::from(u8::from(x != y)),
                 )
             })
             .sum();
@@ -217,20 +205,67 @@ fn split_names_from_plain_words(swap: Swap, words: &Words) -> Vec<Swap> {
         .collect()
 }
 
-fn distance(a: &[char], b: &[char]) -> usize {
-    let mut previous: Vec<usize> = (0..=b.len()).collect();
+/// Letters as they are said: lowercase, digits spelled out, the rest dropped.
+fn spoken(text: &str) -> Vec<char> {
+    const DIGITS: [&str; 10] = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    ];
+    let mut out = Vec::new();
+    for c in text.chars().flat_map(char::to_lowercase) {
+        match c.to_digit(10) {
+            Some(d) => out.extend(DIGITS[d as usize].chars()),
+            None if c.is_alphabetic() => out.push(c),
+            None => {}
+        }
+    }
+    out
+}
+
+fn distance(a: &[char], b: &[char], gap: f32, swap: impl Fn(char, char) -> f32) -> f32 {
+    let mut previous: Vec<f32> = (0..=b.len()).map(|j| j as f32 * gap).collect();
     for (i, x) in a.iter().enumerate() {
-        let mut current = vec![i + 1];
+        let mut current = vec![(i + 1) as f32 * gap];
         for (j, y) in b.iter().enumerate() {
             current.push(
-                (previous[j + 1] + 1)
-                    .min(current[j] + 1)
-                    .min(previous[j] + usize::from(x != y)),
+                (previous[j + 1] + gap)
+                    .min(current[j] + gap)
+                    .min(previous[j] + swap(*x, *y)),
             );
         }
         previous = current;
     }
     previous[b.len()]
+}
+
+/// Whether the model could have written `heard` for someone saying `wrote`.
+///
+/// `heard` is the model's own record of the sound, so a fix far from it is a
+/// change of mind about the sentence, not a mishearing. No spelling test can
+/// see that, because a change of mind to a name looks like any other name.
+///
+/// Measured 2026-11-05: at this limit all 27 labelled mishearings in the log
+/// pass, and 7% of 13,572 unrelated name pairs do. docs/dictionary.md has more.
+fn sounds_like(heard: &str, wrote: &str) -> bool {
+    const VOWELS: &str = "aeiouyåäö";
+    const NEIGHBOURS: [&str; 8] = ["bp", "dt", "gkcq", "fvw", "szcx", "mn", "lr", "jy"];
+    let (mut a, mut b) = (spoken(heard), spoken(wrote));
+    a.dedup();
+    b.dedup();
+    let cost = distance(&a, &b, 0.75, |x, y| {
+        if x == y {
+            0.0
+        } else if VOWELS.contains(x) && VOWELS.contains(y) {
+            0.25
+        } else if NEIGHBOURS
+            .iter()
+            .any(|group| group.contains(x) && group.contains(y))
+        {
+            0.5
+        } else {
+            1.0
+        }
+    });
+    cost <= 0.5 * a.len().max(b.len()) as f32
 }
 
 /// A single owner thread keeps NSSpellChecker calls serial.
@@ -696,7 +731,8 @@ pub fn promotions(
         let settled = |heard: Option<&str>| {
             removed_by_hand || in_files(heard) || learned(heard) || forgotten(events, &term, heard)
         };
-        if !settled(None) {
+        let misheard = sightings.iter().any(|s| sounds_like(&s.heard, &term));
+        if !settled(None) && (misheard || sightings.len() >= 2) {
             out.push(Promotion {
                 term: term.clone(),
                 heard: None,
@@ -706,7 +742,11 @@ pub fn promotions(
         let mut forms = HashSet::new();
         for sighting in &sightings {
             let heard = sighting.heard.as_str();
-            if !forms.insert(heard) || settled(Some(heard)) || !may_replace(heard, words) {
+            if !forms.insert(heard)
+                || settled(Some(heard))
+                || !may_replace(heard, words)
+                || !sounds_like(heard, &term)
+            {
                 continue;
             }
             let evidence: Vec<_> = sightings.iter().filter(|s| s.heard == heard).collect();
@@ -821,6 +861,15 @@ mod tests {
                 rows(&fixes(heard, Source::ReadBack, 8), &[]),
                 [("Zentrix".into(), None)]
             );
+        }
+        for (heard, wrote) in [("river", "Rivver"), ("z", "Z")] {
+            let events = fix(
+                "1",
+                &format!("on {heard} now"),
+                &format!("on {wrote} now"),
+                Source::Manual,
+            );
+            assert_eq!(rows(&events, &[]), [(wrote.to_owned(), None)]);
         }
     }
     #[test]
@@ -1011,7 +1060,7 @@ mod tests {
             &fix(
                 "1",
                 "on Monday we ship",
-                "on Zentrix we ship",
+                "on Munday we ship",
                 Source::Manual,
             ),
             &[],
@@ -1020,7 +1069,7 @@ mod tests {
         .into_iter()
         .map(|p| (p.term, p.heard))
         .collect();
-        assert_eq!(promoted, [("Zentrix".to_owned(), None)]);
+        assert_eq!(promoted, [("Munday".to_owned(), None)]);
     }
 
     #[test]
@@ -1067,6 +1116,31 @@ mod tests {
             )),
             [("Zentrix".to_owned(), None)]
         );
+    }
+
+    #[test]
+    fn a_fix_sounds_like_what_was_heard_only_when_it_could_be_misheard() {
+        for (heard, wrote) in [
+            ("cloud filler", "Cloudflare"),
+            ("candle", "Kindle"),
+            ("one password", "1Password"),
+            ("t three", "T3"),
+            ("m c p", "MCP"),
+            ("post hoc", "PostHog"),
+            ("corner", "Klorna"),
+            ("fake money", "fika.money"),
+        ] {
+            assert!(sounds_like(heard, wrote), "{heard} -> {wrote}");
+        }
+        for (heard, wrote) in [
+            ("oslo", "Zentrix"),
+            ("stockholm", "Gothenburg"),
+            ("the month", "February"),
+            ("whole app", "Zentrix data"),
+            ("the", "Journey"),
+        ] {
+            assert!(!sounds_like(heard, wrote), "{heard} -> {wrote}");
+        }
     }
 
     #[test]

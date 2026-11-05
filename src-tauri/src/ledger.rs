@@ -571,7 +571,7 @@ fn prune(root: &Path, keep: usize, slack: usize, corrected: &HashSet<Id>) {
     }
 }
 
-const HEADER: &str = "# see.computer learned words\n#\n# The first fix adds a word. Two fixes of the same heard form add a\n# replacement, or one manual fix. Everyday single words are never replaced.\n# Words are boosted like vocabulary.md. A line \"heard -> Word\" also rewrites what the model heard. Delete a line to\n# stop it; it will not be learned again.\n";
+const HEADER: &str = "# see.computer learned words\n#\n# The first fix adds a word that sounds like what the model heard, and the\n# second adds any other. Two fixes of the same heard form add a replacement, or\n# one manual fix, if they sound alike. Everyday single words are never replaced.\n# Words are boosted like vocabulary.md. A line \"heard -> Word\" also rewrites what the model heard. Delete a line to\n# stop it; it will not be learned again.\n";
 
 fn save_promotion(
     root: &Path,
@@ -1150,6 +1150,47 @@ mod tests {
             shown,
             vec!["zentrixx -> Zentrix true", "zentrixx -> Zentrix true"]
         );
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn a_change_of_mind_adds_nothing_until_it_comes_up_again() {
+        let root = std::env::temp_dir().join(format!(
+            "see-ledger-mind-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap()
+        ));
+        let (pill, notices) = mpsc::channel();
+        let ledger = Ledger::start_at(
+            root.clone(),
+            Arc::new(AtomicBool::new(true)),
+            500,
+            Some(root.join("vocabulary.md")),
+            Some(pill),
+        );
+        let change = || {
+            let id = ledger.mint();
+            ledger.dictated(
+                &id,
+                "We meet in Oslo.",
+                crate::mic::Audio16k::from_samples(vec![0.0; 160]),
+            );
+            ledger.corrected(&id, "We meet in Zentrix.", Source::ReadBack);
+            ledger.flush();
+            let learned = fs::read_to_string(root.join("learned.md")).unwrap_or_default();
+            (
+                learned
+                    .lines()
+                    .filter(|line| line.starts_with("- "))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+                notices
+                    .try_iter()
+                    .filter(|event| matches!(event, PillEvent::Fixed(_)))
+                    .count(),
+            )
+        };
+        assert_eq!(change(), (Vec::new(), 0));
+        assert_eq!(change(), (vec!["- Zentrix".to_owned()], 1));
         let _ = fs::remove_dir_all(root);
     }
     #[test]

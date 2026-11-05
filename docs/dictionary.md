@@ -222,14 +222,50 @@ so "sketched" is known). Grammar fixes (to → too), lowered capitals and
 numbers never qualify. An offline study of this user's 13,700 Wispr Flow
 edits on 2026-08-27 found this test 91% precise once a term has two
 sightings and 37% at one; its scripts were not kept, so treat the figures as
-unreproduced. Words now land on the first fix anyway, because deleting a
+unreproduced. Most words now land on the first fix anyway, because deleting a
 wrong row is one click and a boosted word rarely hurts: replaying the real
 log on 2026-11-02 added 13 words, and the 78-clip corpus went from 219
 errors to 217 with no clip worse.
-The first fix adds the word to `learned.md`, unless either word file
-already has the term or the user forgot it. A replacement needs weight two
+The first fix adds the word to `learned.md`, unless it is a change of mind
+(below), either word file already has the term or the user forgot it. A replacement needs weight two
 for that exact heard form across distinct dictations. Read-back counts one;
 a manual fix counts two. Both rows can be added by one manual fix.
+
+**Changes of mind.** A correction says what the user wants on the page, not
+what they said. Saying one city and then typing another looks like any fix,
+and every test above reads only the spelling of the fix, so a change of mind
+to a name landed on the first fix. The heard form is the model's record of the
+sound, so the learner compares it with the fix (`sounds_like`). The distance
+works on spoken letters, with digits spelled out and repeated letters counted
+once. A swap between vowels costs
+0.25, between neighbours such as `d` and `t` 0.5, any other swap 1, and an added
+or dropped letter 0.75. A fix sounds like the heard form at no more than 0.5 per
+letter of the longer one. A word whose every sighting fails this waits for a
+second dictation, from any source, because typing a change into the Fix dialog
+is still a change. A replacement never comes from a pair that fails it.
+
+Measured 2026-11-05. All 27 mishearings hand-labelled from the log's 107
+corrections pass, the farthest at 0.48. So do 7% of 13,572 unrelated name pairs,
+which is the rate a change between two names gets through. Plain edit distance
+had to pass 31% of those pairs to keep all 27, and vowel-free edit distance 17%.
+Replaying the real log took the first fix from 20 words to 18. Both removed were
+wrong, and it kept every word labelled a mishearing. Over this user's Wispr edits, 88 of 376
+words wait, and nearly all of those read by eye as changes (`the month ->
+February`). 8 of the 76 that reached Wispr's dictionary wait too, mostly from
+loose alignments (`the -> Journey`). No heard form that fails the test came up
+twice, so no replacement is lost.
+
+Asking the audio was tested and rejected. Boosting one fix at a time over its
+own clip, with the margin raised to 20, never wrote the clearest change of mind.
+It also never wrote 6 of the 27 mishearings, among them names with punctuation
+or a rare spelling, and it costs a decode per margin. The labels came from
+reading the text, not from listening to the clips.
+
+The limit has known gaps. It cannot see a change that sounds close, such as one
+name for a similar name, or a half-typed word. It also fails some real
+mishearings: a number said whole (`b twelve -> B12`) and a fix in another
+script. Those words land on the second dictation, and a replacement for them
+has to be written by hand.
 
 A replacement may have several words, or one unknown word of at least two
 letters. A single everyday word and a bare letter never become automatic
@@ -304,8 +340,8 @@ word gained a replacement. A `# - Word` line is a plain comment that the page
 never shows, and the learner will not bring that word back. The
 page polls only the two file stamps every 1.5 seconds and holds reloads
 while a draft or edit is pending. The file format is unchanged. The first
-fix after upgrading also adds every word the old queue held, because their
-fixes are still in the log.
+fix after upgrading also adds every word the old queue held that sounds like
+what the model heard, because their fixes are still in the log.
 
 **Opening the Library.** The Dictionary reads only its two word files.
 Opening it starts no Library transcript load. It selects the first row
@@ -331,6 +367,10 @@ Library load.
 
 ## What is verified
 
+- The change-of-mind test, run on 2026-11-05 through a scratch ledger with the
+  real spelling checker and through a copy of the real log. A change of mind
+  added no row and no card on the first fix, and the word landed on the second.
+  Read-back in a live text field and the installed app were not run.
 - The shadow, run on 2026-11-02 with release builds of main and this branch
   against 230 scratch text files in iCloud Documents. The timer runs from the
   Library window opening on the Dictionary to its rows showing. With every
@@ -412,7 +452,8 @@ Library load.
   warnings denied. New tests cover a paste that ends its field, with each
   trailing form an editor reported, and the cards a read-back fix sends:
   the former first-sighting card, then learned, and none for a grammar fix.
-  The current learner teaches the word on the first fix.
+  The current learner teaches a word that sounds like the heard form on the
+  first fix.
 - Read-back live on 2026-10-16, in a scratch Electron 44.4.5 app (the
   version T3 Code ships) with a TipTap editor like T3 Code's composer. A
   dictation was replayed from one of the user's "Larston" recordings and
