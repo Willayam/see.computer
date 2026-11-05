@@ -226,8 +226,9 @@ unreproduced. Most words now land on the first fix anyway, because deleting a
 wrong row is one click and a boosted word rarely hurts: replaying the real
 log on 2026-11-02 added 13 words, and the 78-clip corpus went from 219
 errors to 217 with no clip worse.
-The first fix adds the word to `learned.md`, unless it is a change of mind
-(below), either word file already has the term or the user forgot it. A replacement needs weight two
+The first fix adds the word to `learned.md`, unless it is a change of mind or
+junk (below), either word file already has the term or the user forgot it. A
+replacement needs weight two
 for that exact heard form across distinct dictations. Read-back counts one;
 a manual fix counts two. Both rows can be added by one manual fix.
 
@@ -262,10 +263,45 @@ or a rare spelling, and it costs a decode per margin. The labels came from
 reading the text, not from listening to the clips.
 
 The limit has known gaps. It cannot see a change that sounds close, such as one
-name for a similar name, or a half-typed word. It also fails some real
+name for a similar name, or a half-typed word, which the next section handles. It also fails some real
 mishearings: a number said whole (`b twelve -> B12`) and a fix in another
 script. Those words land on the second dictation, and a replacement for them
 has to be written by hand.
+
+**Junk the first fix keeps out.** Read-back keeps the last snapshot before the
+field clears, and it polls once a second, so a fix followed quickly by Enter
+can be recorded mid-word. Three kinds of word never count: a figure with an
+ending of up to two lowercase letters (`26e`, `26:e`, `1st`, `5kg`), a term
+made only of bare letters (`F`, while `Plan B` stays), and a word the checker
+does not know that has fewer than three letters or anything but letters in it
+(`br`, `min"utes`). A likely typo waits for a second fix, or one manual fix.
+That is a word with no capital, digit or punctuation to speak for it, which
+the system checker's own correction turns into a word by adding a letter,
+dropping one or swapping two neighbours (`deligh`, `vuxnen`; `may_be_a_typo`).
+A changed letter does not count, because that is how a name respells a word
+(`poteto`, `skool`, `mobbin`). Nor does a correction that only splits a word,
+because the checker offers that for compound names (`build ship`). Capitals,
+camelCase, all caps and internal punctuation still land on the first fix.
+
+Replaying the real log of 103 corrections on 2026-11-05 took the first fix from
+19 words to 14. All five removed were junk and all 14 kept were real. Over this
+user's 3,593 Wispr edits with word changes, 22 of the 289 words learned at one
+sighting no longer land on it. No word in Wispr's own dictionary is blocked
+outright; two wait for a second fix, and one of those is itself a typo. About
+18 typos still land, such as `avove`, `thankto` and `solutiom`. Tightening
+further delayed more real words than it removed junk: counting changed letters
+caught 9 more of 34 labelled junk words and delayed 16 more of 74 real ones.
+A capitalized typo also still lands. Deleting one is one click.
+
+With the change-of-mind test as well, replaying the log of 107 corrections on
+2026-11-05 took the first fix from 20 words to 14. All six removed were junk or
+a change of mind, and all 14 kept were real.
+
+The corpus agrees. The 78 clips of 2026-11-02 still go from 219 errors to 217,
+and no clip differs from the old rule. All 106 clips the log holds now go from
+301 errors to 298, with no clip worse. The old list scored 297, but only because
+a boosted `F` wrote one stray letter mid-sentence where the plain decode had two
+wrong words.
 
 A replacement may have several words, or one unknown word of at least two
 letters. A single everyday word and a bare letter never become automatic
@@ -340,8 +376,9 @@ word gained a replacement. A `# - Word` line is a plain comment that the page
 never shows, and the learner will not bring that word back. The
 page polls only the two file stamps every 1.5 seconds and holds reloads
 while a draft or edit is pending. The file format is unchanged. The first
-fix after upgrading also adds every word the old queue held that sounds like
-what the model heard, because their fixes are still in the log.
+fix after upgrading also adds every real word the old queue held that sounds
+like what the model heard, because their fixes are still in the log. Junk in
+that log stays out under the same rules.
 
 **Opening the Library.** The Dictionary reads only its two word files.
 Opening it starts no Library transcript load. It selects the first row
@@ -371,6 +408,11 @@ Library load.
   real spelling checker and through a copy of the real log. A change of mind
   added no row and no card on the first fix, and the word landed on the second.
   Read-back in a live text field and the installed app were not run.
+- The first-fix junk rules, run on 2026-11-05 against a copy of the real log
+  with the real spelling checker and scratch word files. The figures are under
+  [The learning loop](#the-learning-loop). Tests use invented text. The real
+  checker's answers are pinned in an ignored test, because they depend on the
+  macOS version and the user's languages. Not run inside the installed app.
 - The shadow, run on 2026-11-02 with release builds of main and this branch
   against 230 scratch text files in iCloud Documents. The timer runs from the
   Library window opening on the Dictionary to its rows showing. With every
@@ -503,6 +545,8 @@ Follow-up still open:
 
 - Read-back against live text fields remains unverified.
 - Visual verification of the flat Dictionary page remains open.
+- Read-back's one-second poll records half-typed words. The learner filters
+  them, but the ledger and the eval corpus keep them as the user's fix.
 
 ## Measuring
 
