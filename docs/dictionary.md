@@ -281,12 +281,17 @@ the system checker's own correction turns into a word by adding a letter,
 dropping one or swapping two neighbours (`deligh`, `vuxnen`; `may_be_a_typo`).
 A changed letter does not count, because that is how a name respells a word
 (`poteto`, `skool`, `mobbin`). Nor does a correction with anything but letters in
-it, because the checker offers a split for compound names (`build ship`). Capitals,
-camelCase, all caps and a dot, dash, underscore or slash inside a word still land
-on the first fix.
+it, because the checker offers a split for compound names (`build ship`). A fix
+that only capitalizes a word the checker knows in lowercase (`save` -> `Save`)
+also waits for a second fix (`capitalizes_a_word`). In the Wispr edits 28
+different words were fixed this way, and at most three were names. The rest were
+headings, buttons and list items, the same kind of word that wrote "Yeah. Yeah."
+from the screen. Other capitals, camelCase, all caps and a dot, dash, underscore
+or slash inside a word still land on the first fix.
 
 These rules have costs. A lowercase short form (`ux`, `3d`) never counts, so it
-has to be added on the Dictionary page. A word with two or more letters missing
+has to be added on the Dictionary page. A product named like a word takes two
+fixes. A word with two or more letters missing
 (`branc`) still lands. A fix that splits one heard word into a name and a fragment
 (`nodejs -> Node js`) teaches nothing.
 
@@ -302,7 +307,9 @@ A typo capitalized mid-sentence also still lands. Deleting one is one click.
 
 With the change-of-mind test as well, replaying the log of 107 corrections on
 2026-11-05 took the first fix from 20 words to 14. All six removed were junk or
-a change of mind, and all 14 kept were real.
+a change of mind, and all 14 kept were real. Making a capitalized dictionary
+word wait kept the same 14, because the one word of that kind
+in the log has three fixes.
 
 The corpus agrees. The 78 clips of 2026-11-02 still go from 219 errors to 217,
 and no clip differs from the old rule. All 106 clips the log holds now go from
