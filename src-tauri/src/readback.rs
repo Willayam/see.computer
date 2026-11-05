@@ -188,7 +188,7 @@ pub fn trim_unrelated(pasted: &str, region: &str) -> String {
     if a.len() > 400 || b.len() > 400 {
         return region.to_owned();
     }
-    let matches = crate::learn::alignment(&a, &b);
+    let matches = crate::align::alignment(&a, &b);
     let (Some(&(first_a, first_b)), Some(&(last_a, last_b))) = (matches.first(), matches.last())
     else {
         return region.to_owned();
@@ -216,7 +216,7 @@ pub fn resembles(pasted: &str, region: &str) -> bool {
         && !b.is_empty()
         && a.len() <= 400
         && b.len() <= 400
-        && crate::learn::alignment(&a, &b).len() * 2 >= a.len()
+        && crate::align::alignment(&a, &b).len() * 2 >= a.len()
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]

@@ -1,5 +1,6 @@
 //! Process entry point and actor wiring.
 
+mod align;
 mod boost;
 mod cli;
 mod clip;

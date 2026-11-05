@@ -1,0 +1,313 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		5EEC0000000000000000000C /* Keyboard.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 5EEC0000000000000000000B /* Keyboard.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		5EEC0000000000000000000D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5EEC00000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5EEC00000000000000000009;
+			remoteInfo = Keyboard;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		5EEC0000000000000000000E /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				5EEC0000000000000000000C /* Keyboard.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		5EEC0000000000000000000A /* see.computer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "see.computer.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		5EEC0000000000000000000B /* Keyboard.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = Keyboard.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		5EEC00000000000000000004 /* App */ = {isa = PBXFileSystemSynchronizedRootGroup; path = App; sourceTree = "<group>"; };
+		5EEC00000000000000000005 /* Keyboard */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Keyboard; sourceTree = "<group>"; };
+		5EEC00000000000000000006 /* Shared */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Shared; sourceTree = "<group>"; };
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		5EEC0000000000000000000F /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		5EEC00000000000000000010 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		5EEC00000000000000000002 = {
+			isa = PBXGroup;
+			children = (
+				5EEC00000000000000000004 /* App */,
+				5EEC00000000000000000005 /* Keyboard */,
+				5EEC00000000000000000006 /* Shared */,
+				5EEC00000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		5EEC00000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				5EEC0000000000000000000A /* see.computer.app */,
+				5EEC0000000000000000000B /* Keyboard.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		5EEC00000000000000000008 /* see.computer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5EEC00000000000000000011;
+			buildPhases = (
+				5EEC00000000000000000012 /* Build Rust engine */,
+				5EEC00000000000000000013 /* Sources */,
+				5EEC0000000000000000000F /* Frameworks */,
+				5EEC00000000000000000014 /* Resources */,
+				5EEC0000000000000000000E /* Embed Foundation Extensions */,
+			);
+			buildRules = ();
+			dependencies = (
+				5EEC00000000000000000015 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				5EEC00000000000000000004 /* App */,
+				5EEC00000000000000000006 /* Shared */,
+			);
+			name = "see.computer";
+			productName = "see.computer";
+			productReference = 5EEC0000000000000000000A;
+			productType = "com.apple.product-type.application";
+		};
+		5EEC00000000000000000009 /* Keyboard */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5EEC00000000000000000016;
+			buildPhases = (
+				5EEC00000000000000000017 /* Sources */,
+				5EEC00000000000000000010 /* Frameworks */,
+				5EEC00000000000000000018 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			fileSystemSynchronizedGroups = (
+				5EEC00000000000000000005 /* Keyboard */,
+				5EEC00000000000000000006 /* Shared */,
+			);
+			name = Keyboard;
+			productName = Keyboard;
+			productReference = 5EEC0000000000000000000B;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		5EEC00000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2700;
+				LastUpgradeCheck = 2700;
+			};
+			buildConfigurationList = 5EEC00000000000000000019;
+			compatibilityVersion = "Xcode 15.3";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = 5EEC00000000000000000002;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 5EEC00000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				5EEC00000000000000000008 /* see.computer */,
+				5EEC00000000000000000009 /* Keyboard */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		5EEC00000000000000000014 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		5EEC00000000000000000018 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		5EEC00000000000000000012 /* Build Rust engine */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = ();
+			name = "Build Rust engine";
+			outputPaths = ();
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/scripts/build-core.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		5EEC00000000000000000013 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		5EEC00000000000000000017 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		5EEC00000000000000000015 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5EEC00000000000000000009 /* Keyboard */;
+			targetProxy = 5EEC0000000000000000000D /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		5EEC0000000000000000001A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = Y6BFTH26P4;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = "DEBUG=1";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		5EEC0000000000000000001B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = Y6BFTH26P4;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		5EEC0000000000000000001C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Config/App.entitlements;
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/core/include";
+				INFOPLIST_FILE = "Config/App-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/core/target/aarch64-apple-ios/release";
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/core/target/aarch64-apple-ios-sim/release";
+				OTHER_LDFLAGS = ("-lsee_core", "-lc++", "-framework", CoreML, "-framework", Accelerate, "-framework", Security, "-framework", SystemConfiguration);
+				PRODUCT_BUNDLE_IDENTIFIER = computer.see.ios;
+				PRODUCT_NAME = "see.computer";
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				SWIFT_OBJC_BRIDGING_HEADER = "Config/App-Bridging.h";
+			};
+			name = Debug;
+		};
+		5EEC0000000000000000001D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Config/App.entitlements;
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/core/include";
+				INFOPLIST_FILE = "Config/App-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/core/target/aarch64-apple-ios/release";
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(SRCROOT)/core/target/aarch64-apple-ios-sim/release";
+				OTHER_LDFLAGS = ("-lsee_core", "-lc++", "-framework", CoreML, "-framework", Accelerate, "-framework", Security, "-framework", SystemConfiguration);
+				PRODUCT_BUNDLE_IDENTIFIER = computer.see.ios;
+				PRODUCT_NAME = "see.computer";
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				SWIFT_OBJC_BRIDGING_HEADER = "Config/App-Bridging.h";
+			};
+			name = Release;
+		};
+		5EEC0000000000000000001E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Config/Keyboard.entitlements;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Config/Keyboard-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
+				PRODUCT_BUNDLE_IDENTIFIER = computer.see.ios.keyboard;
+				PRODUCT_NAME = Keyboard;
+				SKIP_INSTALL = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				SWIFT_OBJC_BRIDGING_HEADER = "Config/Keyboard-Bridging.h";
+			};
+			name = Debug;
+		};
+		5EEC0000000000000000001F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Config/Keyboard.entitlements;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Config/Keyboard-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
+				PRODUCT_BUNDLE_IDENTIFIER = computer.see.ios.keyboard;
+				PRODUCT_NAME = Keyboard;
+				SKIP_INSTALL = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				SWIFT_OBJC_BRIDGING_HEADER = "Config/Keyboard-Bridging.h";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		5EEC00000000000000000019 = {isa = XCConfigurationList; buildConfigurations = (5EEC0000000000000000001A /* Debug */, 5EEC0000000000000000001B /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		5EEC00000000000000000011 = {isa = XCConfigurationList; buildConfigurations = (5EEC0000000000000000001C /* Debug */, 5EEC0000000000000000001D /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		5EEC00000000000000000016 = {isa = XCConfigurationList; buildConfigurations = (5EEC0000000000000000001E /* Debug */, 5EEC0000000000000000001F /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = 5EEC00000000000000000001 /* Project object */;
+}

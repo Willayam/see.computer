@@ -10,12 +10,17 @@ https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
 The app downloads the INT8 ONNX conversion published by **istupakov**, also under CC BY 4.0.
 https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx
 
-The model is not in this repository. It is fetched on first launch into `~/Library/Application Support/see.computer/models/`.
+The model is not in this repository. The Mac app fetches it on first launch into `~/Library/Application Support/see.computer/models/`, and the iPhone app into its own Application Support folder.
 
 ## Vendored crate
 
 **parakeet-rs** 0.3.7 by altunenes, MIT OR Apache-2.0, vendored at `src-tauri/vendor/parakeet-rs` with one addition described in `src-tauri/vendor/parakeet-rs/FORK.md`. The original license file is kept alongside it.
 https://github.com/altunenes/parakeet-rs
+
+## Adapted code
+
+`ios/Keyboard/HostCapture.m` adapts the arbiter hook from **KeyboardHostBundleID** by editorss, MIT.
+https://github.com/Muskupecli/KeyboardHostBundleID
 
 ## Runtime and framework
 

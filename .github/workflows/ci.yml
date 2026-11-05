@@ -38,6 +38,24 @@ jobs:
             -framework UniformTypeIdentifiers -framework VideoToolbox -framework AudioToolbox \
             -o .audit/native-media-test/test-recorder
 
+  ios-core:
+    name: iPhone engine builds from the shared sources
+    runs-on: macos-26
+    defaults:
+      run:
+        working-directory: ios/core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ios/core
+      - run: cargo fmt --check
+      - run: cargo clippy --target aarch64-apple-ios -- -D warnings
+
   sharing:
     name: Sharing service tests
     runs-on: ubuntu-latest

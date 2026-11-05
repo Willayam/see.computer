@@ -65,7 +65,7 @@ pub fn merge(plain: &str, boosted: &str, terms: &[Term]) -> String {
     };
     let mut out = Vec::new();
     let (mut ai, mut bi) = (0usize, 0usize);
-    for (x, y) in crate::learn::alignment(&a, &b)
+    for (x, y) in crate::align::alignment(&a, &b)
         .into_iter()
         .chain(std::iter::once((a.len(), b.len())))
     {
