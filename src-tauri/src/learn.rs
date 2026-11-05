@@ -4,6 +4,7 @@
 //! Pure functions over the ledger's events, so learning is replayable and the
 //! same log always yields the same decisions.
 
+use crate::align::{alignment, strip};
 use crate::ledger::{Event, Id, Source};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -12,42 +13,6 @@ pub struct Swap {
     pub heard: String,
     pub wrote: String,
     pub opens_sentence: bool,
-}
-
-fn strip(token: &str) -> &str {
-    token.trim_matches(|c: char| !c.is_alphanumeric())
-}
-fn form(token: &str) -> String {
-    strip(token).to_lowercase()
-}
-
-pub(crate) fn alignment(a: &[&str], b: &[&str]) -> Vec<(usize, usize)> {
-    let af: Vec<_> = a.iter().map(|s| form(s)).collect();
-    let bf: Vec<_> = b.iter().map(|s| form(s)).collect();
-    let mut dp = vec![vec![0usize; b.len() + 1]; a.len() + 1];
-    for i in (0..a.len()).rev() {
-        for j in (0..b.len()).rev() {
-            dp[i][j] = if af[i] == bf[j] {
-                dp[i + 1][j + 1] + 1
-            } else {
-                dp[i + 1][j].max(dp[i][j + 1])
-            };
-        }
-    }
-    let (mut i, mut j) = (0, 0);
-    let mut anchors = Vec::new();
-    while i < a.len() && j < b.len() {
-        if af[i] == bf[j] {
-            anchors.push((i, j));
-            i += 1;
-            j += 1;
-        } else if dp[i + 1][j] >= dp[i][j + 1] {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
-    anchors
 }
 
 pub fn swaps(pasted: &str, edited: &str) -> Vec<Swap> {
