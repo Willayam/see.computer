@@ -578,6 +578,19 @@ fn may_be_a_typo(swap: &Swap, words: &Words) -> bool {
         })
 }
 
+/// The fix only gives a word the checker knows in lowercase its first capital.
+/// "Save" or "Search" is more often a heading or a button than a name, and a
+/// boosted dictionary word is what wrote "Yeah. Yeah." into silence. A name
+/// spelled like a word, such as a product, gets fixed again.
+/// All caps and file names ("ELF", "AGENTS.md") keep their own evidence.
+fn capitalizes_a_word(swap: &Swap, words: &Words) -> bool {
+    let mut letters = swap.wrote.chars();
+    letters.next().is_some_and(char::is_uppercase)
+        && letters.all(char::is_lowercase)
+        && swap.heard.to_lowercase() == swap.wrote.to_lowercase()
+        && words.knows(&swap.heard.to_lowercase())
+}
+
 /// Names and identifiers in context text, the most frequent first.
 ///
 /// Stricter than the correction test, because nobody confirmed these words:
@@ -685,7 +698,8 @@ struct Sighting {
     id: Id,
     heard: String,
     source: Source,
-    may_be_a_typo: bool,
+    /// A likely typo or a capitalized dictionary word, which one fix cannot settle.
+    needs_another_fix: bool,
 }
 
 impl Sighting {
@@ -774,7 +788,8 @@ fn candidates(events: &[Event], words: &Words) -> Vec<(String, Vec<Sighting>)> {
                     id: id.clone(),
                     heard: swap.heard.to_lowercase(),
                     source,
-                    may_be_a_typo: may_be_a_typo(&swap, words),
+                    needs_another_fix: may_be_a_typo(&swap, words)
+                        || capitalizes_a_word(&swap, words),
                 });
             }
         }
@@ -825,9 +840,10 @@ pub fn promotions(
             removed_by_hand || in_files(heard) || learned(heard) || forgotten(events, &term, heard)
         };
         let misheard = sightings.iter().any(|s| sounds_like(&s.heard, &term));
-        // A typo rarely comes out the same way twice, and a manual fix is finished.
-        let not_a_typo = weight(&sightings) >= 2 || sightings.iter().any(|s| !s.may_be_a_typo);
-        if !settled(None) && not_a_typo && (misheard || sightings.len() >= 2) {
+        // A typo rarely comes out the same way twice, a capitalized dictionary
+        // word is more often a heading than a name, and a manual fix is finished.
+        let confirmed = weight(&sightings) >= 2 || sightings.iter().any(|s| !s.needs_another_fix);
+        if !settled(None) && confirmed && (misheard || sightings.len() >= 2) {
             out.push(Promotion {
                 term: term.clone(),
                 heard: None,
@@ -1168,6 +1184,43 @@ mod tests {
 
         let opening = fix("1", "Light here", "Deligh here", Source::ReadBack);
         assert!(promotions(&opening, &[], &words).is_empty());
+    }
+
+    #[test]
+    fn a_capitalized_dictionary_word_waits_for_a_second_fix() {
+        let words = Words::from_list(&["we", "press", "save", "now", "on"]);
+        let capital = |id: &str, source| fix(id, "we press save now", "we press Save now", source);
+        assert!(promotions(&capital("1", Source::ReadBack), &[], &words).is_empty());
+
+        let mut twice = capital("1", Source::ReadBack);
+        twice.extend(capital("2", Source::ReadBack));
+        assert_eq!(
+            promotions(&twice, &[], &words)
+                .into_iter()
+                .map(|p| p.term)
+                .collect::<Vec<_>>(),
+            ["Save"]
+        );
+        assert_eq!(
+            promotions(&capital("1", Source::Manual), &[], &words).len(),
+            1
+        );
+
+        // A capital on a word the checker does not know is a name, and all caps
+        // or a file name has a shape of its own.
+        for (heard, wrote) in [
+            ("quorvo", "Quorvo"),
+            ("save", "SAVE"),
+            ("save.md", "SAVE.md"),
+        ] {
+            let name = fix(
+                "1",
+                &format!("on {heard}"),
+                &format!("on {wrote}"),
+                Source::ReadBack,
+            );
+            assert_eq!(promotions(&name, &[], &words).len(), 1, "{wrote}");
+        }
     }
 
     #[test]
