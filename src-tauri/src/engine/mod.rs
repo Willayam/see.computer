@@ -252,7 +252,7 @@ pub enum Loader {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct JobId(u64);
+pub struct JobId(pub u64);
 
 pub enum Event {
     Progress(Progress),

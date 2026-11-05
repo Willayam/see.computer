@@ -2,6 +2,8 @@
 
 Ultra-fast, local-first dictation and instant video links for the Mac. Free and open source (MIT). Website at [see.computer](https://see.computer).
 
+The same dictation engine also runs as a keyboard on iPhone. See [ios/README.md](ios/README.md).
+
 ## Install
 
 Download the DMG from the [latest release](https://github.com/Willayam/see.computer/releases/latest), drag see.computer into Applications, and open it. It needs macOS 14 or later on Apple Silicon.

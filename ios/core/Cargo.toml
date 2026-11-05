@@ -1,0 +1,24 @@
+[package]
+name = "see-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+description = "The Mac app's speech engine and text passes, behind a C interface for the iPhone app."
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+parakeet-rs = { path = "../../src-tauri/vendor/parakeet-rs", default-features = false, features = ["cpu", "api-28"] }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native", "coreml"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[workspace]
