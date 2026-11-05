@@ -1024,6 +1024,52 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_mind_is_not_a_mishearing() {
+        let words = Words::from_list(&["we", "meet", "in"]);
+        let promoted = |events: &[Event]| -> Vec<(String, Option<String>)> {
+            promotions(events, &[], &words)
+                .into_iter()
+                .map(|p| (p.term, p.heard))
+                .collect()
+        };
+        let changed = |id| {
+            fix(
+                id,
+                "we meet in Oslo",
+                "we meet in Zentrix",
+                Source::ReadBack,
+            )
+        };
+        assert_eq!(promoted(&changed("1")), []);
+        assert_eq!(
+            promoted(&fix(
+                "1",
+                "we meet in Oslo",
+                "we meet in Zentrix",
+                Source::Manual
+            )),
+            [],
+            "typing the change into the Fix dialog is still a change"
+        );
+        let mut twice = changed("1");
+        twice.extend(changed("2"));
+        assert_eq!(
+            promoted(&twice),
+            [("Zentrix".to_owned(), None)],
+            "a word the user keeps asking for is real, but it never rewrites what was heard"
+        );
+        assert_eq!(
+            promoted(&fix(
+                "1",
+                "we meet in Zen tricks",
+                "we meet in Zentrix",
+                Source::ReadBack
+            )),
+            [("Zentrix".to_owned(), None)]
+        );
+    }
+
+    #[test]
     fn a_word_removed_by_hand_does_not_return_as_a_replacement() {
         let mut events = fix("1", "zentrixx", "Zentrix", Source::ReadBack);
         events.push(Event::Learned {
