@@ -571,7 +571,7 @@ fn prune(root: &Path, keep: usize, slack: usize, corrected: &HashSet<Id>) {
     }
 }
 
-const HEADER: &str = "# see.computer learned words\n#\n# The first fix adds a word that sounds like what the model heard, and the\n# second adds any other. Two fixes of the same heard form add a replacement, or\n# one manual fix, if they sound alike. Everyday single words are never replaced.\n# Words are boosted like vocabulary.md. A line \"heard -> Word\" also rewrites what the model heard. Delete a line to\n# stop it; it will not be learned again.\n";
+const HEADER: &str = "# see.computer learned words\n#\n# The first fix adds a word that sounds like what the model heard, and the\n# second adds any other, or a likely typo. Two fixes of the same heard form add a replacement, or\n# one manual fix, if they sound alike. Everyday single words are never replaced.\n# Words are boosted like vocabulary.md. A line \"heard -> Word\" also rewrites what the model heard. Delete a line to\n# stop it; it will not be learned again.\n";
 
 fn save_promotion(
     root: &Path,

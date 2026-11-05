@@ -116,8 +116,15 @@ pub fn learned_swaps(pasted: &str, edited: &str, words: &Words) -> Vec<Swap> {
     swaps(pasted, edited)
         .into_iter()
         .flat_map(|swap| split_names_from_plain_words(swap, words))
-        .filter(|swap| learnable(swap, words))
+        .filter(|swap| !only_bare_letters(&swap.wrote) && learnable(swap, words))
         .collect()
+}
+
+/// Boosting a bare letter feeds the stray letters the decoder already writes
+/// into silence. Checked on the whole term, so "Plan B" keeps its letter.
+fn only_bare_letters(term: &str) -> bool {
+    term.split_whitespace()
+        .all(|word| word.chars().count() == 1 && word.chars().all(char::is_alphabetic))
 }
 
 fn split_names_from_plain_words(swap: Swap, words: &Words) -> Vec<Swap> {
@@ -184,7 +191,7 @@ fn split_names_from_plain_words(swap: Swap, words: &Words) -> Vec<Swap> {
                     &spoken(&heard[cuts[i]..cuts[i + 1]].concat()),
                     &spoken(&wrote[start..end].concat()),
                     1.0,
-                    |x, y| f32::from(u8::from(x != y)),
+                    unit_swap,
                 )
             })
             .sum();
@@ -219,6 +226,10 @@ fn spoken(text: &str) -> Vec<char> {
         }
     }
     out
+}
+
+fn unit_swap(x: char, y: char) -> f32 {
+    f32::from(u8::from(x != y))
 }
 
 fn distance(a: &[char], b: &[char], gap: f32, swap: impl Fn(char, char) -> f32) -> f32 {
@@ -279,8 +290,15 @@ enum WordSource {
 
 struct Ask {
     word: String,
+    question: Question,
     reply: std::sync::mpsc::Sender<bool>,
     deadline: std::time::Instant,
+}
+
+#[derive(Clone, Copy)]
+enum Question {
+    Knows,
+    OneSlipFromAWord,
 }
 
 impl Words {
@@ -293,17 +311,31 @@ impl Words {
             crate::qos::spawn("see-words", crate::qos::Class::Upkeep, move || {
                 let languages = proven_languages();
                 let mut memo = HashMap::new();
+                let mut slips = HashMap::new();
                 while let Ok(ask) = rx.recv() {
-                    let answer = memoized_word(&mut memo, &ask.word, || {
-                        if languages.is_empty() || std::time::Instant::now() >= ask.deadline {
-                            return None;
-                        }
-                        let mut known = false;
-                        for language in &languages {
-                            known |= check_word(&ask.word, language)?;
-                        }
-                        (std::time::Instant::now() < ask.deadline).then_some(known)
-                    });
+                    let answer = match ask.question {
+                        Question::Knows => memoized_word(&mut memo, &ask.word, || {
+                            if languages.is_empty() || std::time::Instant::now() >= ask.deadline {
+                                return None;
+                            }
+                            let mut known = false;
+                            for language in &languages {
+                                known |= check_word(&ask.word, language)?;
+                            }
+                            (std::time::Instant::now() < ask.deadline).then_some(known)
+                        }),
+                        // No answer counts as a slip, as a failed spelling check
+                        // counts as known: the word waits rather than landing.
+                        Question::OneSlipFromAWord => memoized_word(&mut slips, &ask.word, || {
+                            if languages.is_empty() || std::time::Instant::now() >= ask.deadline {
+                                return None;
+                            }
+                            Some(languages.iter().any(|language| {
+                                correction(&ask.word, language)
+                                    .is_some_and(|fixed| one_slip_apart(&ask.word, &fixed))
+                            }))
+                        }),
+                    };
                     let _ = ask.reply.send(answer);
                 }
             });
@@ -319,22 +351,35 @@ impl Words {
     }
 
     pub fn knows(&self, word: &str) -> bool {
-        self.ask(word, std::time::Duration::from_secs(2))
+        self.ask(word, Question::Knows, std::time::Duration::from_secs(2))
     }
 
     pub fn knows_quickly(&self, word: &str) -> bool {
-        self.ask(word, std::time::Duration::from_millis(50))
+        self.ask(word, Question::Knows, std::time::Duration::from_millis(50))
     }
 
-    fn ask(&self, word: &str, limit: std::time::Duration) -> bool {
+    /// Whether autocorrect would turn this into a word by one typing slip.
+    pub fn one_slip_from_a_word(&self, word: &str) -> bool {
+        self.ask(
+            word,
+            Question::OneSlipFromAWord,
+            std::time::Duration::from_secs(2),
+        )
+    }
+
+    fn ask(&self, word: &str, question: Question, limit: std::time::Duration) -> bool {
         match &self.0 {
             #[cfg(test)]
-            WordSource::List(set) => set.contains(word) || set.contains(&word.to_lowercase()),
+            WordSource::List(set) => match question {
+                Question::Knows => set.contains(word) || set.contains(&word.to_lowercase()),
+                Question::OneSlipFromAWord => set.iter().any(|known| one_slip_apart(word, known)),
+            },
             WordSource::Checker(tx) => {
                 let (reply, rx) = std::sync::mpsc::channel();
                 if tx
                     .send(Ask {
                         word: word.into(),
+                        question,
                         reply,
                         deadline: std::time::Instant::now() + limit,
                     })
@@ -381,31 +426,81 @@ unsafe impl objc2::Encode for SpellRange {
         objc2::Encoding::Struct("_NSRange", &[usize::ENCODING, usize::ENCODING]);
 }
 
-fn check_word(word: &str, language: &str) -> Option<bool> {
+/// The shared checker and its two string arguments. Call inside an autorelease
+/// pool, which owns the strings.
+unsafe fn checker_with(
+    word: &str,
+    language: &str,
+) -> Option<(
+    *mut objc2::runtime::AnyObject,
+    *mut objc2::runtime::AnyObject,
+    *mut objc2::runtime::AnyObject,
+)> {
     use objc2::{
         msg_send,
         runtime::{AnyClass, AnyObject},
     };
+    let class = AnyClass::get(c"NSSpellChecker")?;
+    let string = AnyClass::get(c"NSString")?;
+    let checker: *mut AnyObject = msg_send![class, sharedSpellChecker];
+    if checker.is_null() {
+        return None;
+    }
+    let word = std::ffi::CString::new(word).ok()?;
+    let language = std::ffi::CString::new(language).ok()?;
+    let word: *mut AnyObject = msg_send![string, stringWithUTF8String: word.as_ptr()];
+    let language: *mut AnyObject = msg_send![string, stringWithUTF8String: language.as_ptr()];
+    (!word.is_null() && !language.is_null()).then_some((checker, word, language))
+}
+
+fn check_word(word: &str, language: &str) -> Option<bool> {
+    use objc2::msg_send;
     objc2::rc::autoreleasepool(|_| unsafe {
-        let class = AnyClass::get(c"NSSpellChecker")?;
-        let string = AnyClass::get(c"NSString")?;
-        let checker: *mut AnyObject = msg_send![class, sharedSpellChecker];
-        if checker.is_null() {
-            return None;
-        }
-        let word = std::ffi::CString::new(word).ok()?;
-        let language = std::ffi::CString::new(language).ok()?;
-        let word: *mut AnyObject = msg_send![string, stringWithUTF8String: word.as_ptr()];
-        let language: *mut AnyObject = msg_send![string, stringWithUTF8String: language.as_ptr()];
-        if word.is_null() || language.is_null() {
-            return None;
-        }
+        let (checker, word, language) = checker_with(word, language)?;
         let count: *mut isize = std::ptr::null_mut();
         let range: SpellRange = msg_send![checker, checkSpellingOfString: word,
             startingAt: 0isize, language: language, wrap: false,
             inSpellDocumentWithTag: 0isize, wordCount: count];
         Some(range.length == 0)
     })
+}
+
+/// What autocorrect would write instead, which is close to any unknown word.
+fn correction(word: &str, language: &str) -> Option<String> {
+    use objc2::{msg_send, runtime::AnyObject};
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let (checker, word, language) = checker_with(word, language)?;
+        let length: usize = msg_send![word, length];
+        let fixed: *mut AnyObject = msg_send![checker,
+            correctionForWordRange: SpellRange { location: 0, length },
+            inString: word, language: language, inSpellDocumentWithTag: 0isize];
+        if fixed.is_null() {
+            return None;
+        }
+        let utf8: *const std::ffi::c_char = msg_send![fixed, UTF8String];
+        (!utf8.is_null()).then(|| {
+            std::ffi::CStr::from_ptr(utf8)
+                .to_string_lossy()
+                .into_owned()
+        })
+    })
+}
+
+/// A letter added or dropped, or two neighbours swapped, ignoring case. This is
+/// how an unfinished or mistyped word differs from the word meant ("deligh",
+/// "vuxnen"). A changed letter does not count: that is how a name respells a word
+/// ("poteto", "mobbin"). Nor does a fix that only splits a word ("build ship").
+fn one_slip_apart(typed: &str, fixed: &str) -> bool {
+    let typed: Vec<char> = typed.to_lowercase().chars().collect();
+    let fixed: Vec<char> = fixed.to_lowercase().chars().collect();
+    if !fixed.iter().all(|c| c.is_alphabetic()) {
+        return false;
+    }
+    if typed.len() != fixed.len() {
+        return distance(&typed, &fixed, 1.0, unit_swap) == 1.0;
+    }
+    let differ: Vec<usize> = (0..typed.len()).filter(|&i| typed[i] != fixed[i]).collect();
+    matches!(differ[..], [i, j] if j == i + 1 && typed[i] == fixed[j] && typed[j] == fixed[i])
 }
 
 /// Some languages `NSSpellChecker` lists pass nonsense as correctly spelled.
@@ -453,38 +548,69 @@ pub fn learnable(swap: &Swap, words: &Words) -> bool {
     {
         return false;
     }
-    for (index, word) in swap.wrote.split_whitespace().enumerate() {
-        let letters: Vec<_> = word.chars().filter(|c| c.is_alphabetic()).collect();
-        if letters.is_empty() {
-            continue;
-        }
-        if letters.len() >= 2 && letters.iter().all(|c| c.is_uppercase()) {
-            return true;
-        }
-        if word.chars().skip(1).any(|c| c.is_uppercase()) {
-            return true;
-        }
-        if word
-            .chars()
-            .skip(1)
-            .take(word.chars().count().saturating_sub(2))
-            .any(|c| "._-/".contains(c))
-        {
-            return true;
-        }
-        if word.chars().any(|c| c.is_alphabetic()) && word.chars().any(|c| c.is_numeric()) {
-            return true;
-        }
-        if word.chars().next().is_some_and(char::is_uppercase)
-            && !(index == 0 && swap.opens_sentence)
-        {
-            return true;
-        }
-        if !words.knows(word) {
-            return true;
-        }
+    swap.wrote
+        .split_whitespace()
+        .enumerate()
+        .any(|(index, word)| {
+            shaped_like_a_name(word, index == 0 && swap.opens_sentence)
+                || (could_be_spelled(word) && !words.knows(word))
+        })
+}
+
+/// What a word's form says on its own: the model could not have written it
+/// unprompted, so somebody chose it.
+fn shaped_like_a_name(word: &str, opens_sentence: bool) -> bool {
+    let letters: Vec<_> = word.chars().filter(|c| c.is_alphabetic()).collect();
+    if letters.is_empty() || is_figure(word) {
+        return false;
     }
-    false
+    if letters.len() >= 2 && letters.iter().all(|c| c.is_uppercase()) {
+        return true;
+    }
+    if word.chars().skip(1).any(|c| c.is_uppercase()) {
+        return true;
+    }
+    if word
+        .chars()
+        .skip(1)
+        .take(word.chars().count().saturating_sub(2))
+        .any(|c| "._-/".contains(c))
+    {
+        return true;
+    }
+    if word.chars().any(|c| c.is_numeric()) {
+        return true;
+    }
+    word.chars().next().is_some_and(char::is_uppercase) && !opens_sentence
+}
+
+/// A figure with a short ending is still a figure: "26e" and "26:e" are dates,
+/// "1st" an ordinal, "5kg" a measure, "8.30am" a time. Capitals or a longer
+/// ending make it a name: "3D", "2FA", "1Password", "7zip".
+fn is_figure(word: &str) -> bool {
+    let ending = word.trim_start_matches(|c: char| c.is_numeric() || ".,:".contains(c));
+    word.starts_with(char::is_numeric)
+        && ending.chars().count() <= 2
+        && ending.chars().all(char::is_lowercase)
+}
+
+/// The spelling checker's silence only counts for what could be a word. Read-back
+/// catches half-typed text: "br" on the way to "branch", or a stray `min"utes`.
+fn could_be_spelled(word: &str) -> bool {
+    word.chars().count() >= 3 && word.chars().all(char::is_alphabetic)
+}
+
+/// Nothing but the spelling checker's silence speaks for this fix, and autocorrect
+/// would turn it into a word by one slip. Read-back keeps the last snapshot before
+/// the field clears, so this is often a word caught mid-typing.
+fn may_be_a_typo(swap: &Swap, words: &Words) -> bool {
+    swap.wrote
+        .split_whitespace()
+        .enumerate()
+        .all(|(index, word)| {
+            !shaped_like_a_name(word, index == 0 && swap.opens_sentence)
+                && (words.knows(word) || words.one_slip_from_a_word(word))
+        })
 }
 
 /// Names and identifiers in context text, the most frequent first.
@@ -594,6 +720,7 @@ struct Sighting {
     id: Id,
     heard: String,
     source: Source,
+    may_be_a_typo: bool,
 }
 
 impl Sighting {
@@ -682,6 +809,7 @@ fn candidates(events: &[Event], words: &Words) -> Vec<(String, Vec<Sighting>)> {
                     id: id.clone(),
                     heard: swap.heard.to_lowercase(),
                     source,
+                    may_be_a_typo: may_be_a_typo(&swap, words),
                 });
             }
         }
@@ -732,7 +860,9 @@ pub fn promotions(
             removed_by_hand || in_files(heard) || learned(heard) || forgotten(events, &term, heard)
         };
         let misheard = sightings.iter().any(|s| sounds_like(&s.heard, &term));
-        if !settled(None) && (misheard || sightings.len() >= 2) {
+        // A typo rarely comes out the same way twice, and a manual fix is finished.
+        let not_a_typo = weight(&sightings) >= 2 || sightings.iter().any(|s| !s.may_be_a_typo);
+        if !settled(None) && not_a_typo && (misheard || sightings.len() >= 2) {
             out.push(Promotion {
                 term: term.clone(),
                 heard: None,
@@ -862,7 +992,7 @@ mod tests {
                 [("Zentrix".into(), None)]
             );
         }
-        for (heard, wrote) in [("river", "Rivver"), ("z", "Z")] {
+        for (heard, wrote) in [("river", "Rivver"), ("z", "Zee")] {
             let events = fix(
                 "1",
                 &format!("on {heard} now"),
@@ -998,6 +1128,172 @@ mod tests {
             opens_sentence: false,
         };
         assert!(!learnable(&swap, &words));
+    }
+
+    #[test]
+    fn figures_with_a_short_ending_are_not_terms() {
+        let words = Words::from_list(&[]);
+        let learns = |wrote: &str| {
+            learnable(
+                &Swap {
+                    heard: "27".into(),
+                    wrote: wrote.into(),
+                    opens_sentence: false,
+                },
+                &words,
+            )
+        };
+        for figure in ["26e", "26:e", "1st", "5kg", "8.30am", "10x"] {
+            assert!(!learns(figure), "{figure}");
+        }
+        for name in ["T3", "3D", "2FA", "1Password", "7zip", "k8s", "mp3", "n8n"] {
+            assert!(learns(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_bare_letter_is_not_a_term_but_can_end_one() {
+        let words = Words::from_list(&["as", "a", "user", "the", "office"]);
+        assert!(learned_swaps("as a user ef", "as a user F", &words).is_empty());
+        assert!(learned_swaps("the u s office", "the U S office", &words).is_empty());
+        assert_eq!(
+            learned_swaps("as a blan be user", "as a Plan B user", &words)
+                .iter()
+                .map(|s| s.wrote.as_str())
+                .collect::<Vec<_>>(),
+            ["Plan B"]
+        );
+    }
+
+    #[test]
+    fn half_typed_text_is_not_a_term() {
+        let words = Words::from_list(&["we", "paint", "with", "a", "brush", "wait", "minutes"]);
+        assert!(learned_swaps("we paint with a brush", "we paint with a br", &words).is_empty());
+        assert!(learned_swaps("wait minutes", "wait min\"utes", &words).is_empty());
+    }
+
+    #[test]
+    fn a_likely_typo_waits_for_a_second_fix() {
+        let words = Words::from_list(&["we", "like", "the", "here", "light", "delight"]);
+        let typo = |id: &str, source| {
+            fix(
+                id,
+                "we like the light here",
+                "we like the deligh here",
+                source,
+            )
+        };
+        assert!(promotions(&typo("1", Source::ReadBack), &[], &words).is_empty());
+
+        let mut twice = typo("1", Source::ReadBack);
+        twice.extend(typo("2", Source::ReadBack));
+        assert_eq!(
+            promotions(&twice, &[], &words)
+                .into_iter()
+                .map(|p| (p.term, p.heard))
+                .collect::<Vec<_>>(),
+            [("deligh".to_owned(), None)]
+        );
+
+        assert_eq!(
+            promotions(&typo("1", Source::Manual), &[], &words).len(),
+            1,
+            "a manual fix is a finished word"
+        );
+
+        let opening = fix("1", "Light here", "Deligh here", Source::ReadBack);
+        assert!(promotions(&opening, &[], &words).is_empty());
+    }
+
+    #[test]
+    fn a_respelled_name_lands_on_the_first_fix() {
+        let words = Words::from_list(&["on", "potato", "school", "bobbin", "delight"]);
+        for (heard, wrote) in [
+            ("potato", "poteto"),
+            ("school", "skool"),
+            ("bobbin", "mobbin"),
+        ] {
+            let terms: Vec<_> = promotions(
+                &fix(
+                    "1",
+                    &format!("on {heard}"),
+                    &format!("on {wrote}"),
+                    Source::ReadBack,
+                ),
+                &[],
+                &words,
+            )
+            .into_iter()
+            .map(|p| p.term)
+            .collect();
+            assert_eq!(terms, [wrote]);
+        }
+    }
+
+    #[test]
+    fn an_old_log_adds_only_its_real_words() {
+        let words = Words::from_list(&["we", "see", "on", "light", "delight", "vuxen", "the"]);
+        let mut events = Vec::new();
+        for (id, pasted, edited) in [
+            ("1", "we see the brush", "we see the br"),
+            ("2", "we see the 27", "we see the 26e"),
+            ("3", "we see the ef", "we see the F"),
+            ("4", "we see the light", "we see the deligh"),
+            ("5", "we see the vuxna", "we see the vuxnen"),
+            ("6", "we see the zentrixx", "we see the Zentrix"),
+            ("7", "we see the m c p", "we see the MCP"),
+            ("8", "we see the school", "we see the skool"),
+        ] {
+            events.extend(fix(id, pasted, edited, Source::ReadBack));
+        }
+        assert_eq!(
+            promotions(&events, &[], &words)
+                .into_iter()
+                .map(|p| p.term)
+                .collect::<Vec<_>>(),
+            ["Zentrix", "MCP", "skool"]
+        );
+    }
+
+    #[test]
+    fn a_slip_is_a_letter_too_many_or_too_few_or_swapped() {
+        for (typed, fixed) in [
+            ("deligh", "delight"),
+            ("vuxnen", "vuxen"),
+            ("mian", "main"),
+            ("OOPEN", "open"),
+        ] {
+            assert!(one_slip_apart(typed, fixed), "{typed}");
+        }
+        for (typed, fixed) in [
+            ("poteto", "potato"),
+            ("mobbin", "bobbin"),
+            ("skool", "school"),
+            ("buildship", "build ship"),
+            ("github", "GitHub"),
+        ] {
+            assert!(!one_slip_apart(typed, fixed), "{typed}");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn real_checker_holds_back_slips_but_not_respellings() {
+        let words = Words::shared();
+        for word in ["deligh", "vuxnen", "imnplement", "geometr"] {
+            assert!(words.one_slip_from_a_word(word), "{word}");
+        }
+        for word in [
+            "skool",
+            "mobbin",
+            "poteto",
+            "vercel",
+            "posthog",
+            "github",
+            "buildship",
+        ] {
+            assert!(!words.one_slip_from_a_word(word), "{word}");
+        }
     }
 
     #[test]
