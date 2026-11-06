@@ -162,6 +162,35 @@ enum MicrophoneFailure: Error {
     case noInput
 }
 
+/// How long and how loud one take's audio was, for the diagnostics log. Fed from
+/// the audio thread.
+final class CaptureStats: Sendable {
+    private struct Sums {
+        var count = 0
+        var peak: Float = 0
+        var squares: Double = 0
+    }
+    private let sums = OSAllocatedUnfairLock(initialState: Sums())
+
+    func add(_ samples: [Float]) {
+        let peak = samples.reduce(Float(0)) { max($0, abs($1)) }
+        let squares = samples.reduce(0.0) { $0 + Double($1 * $1) }
+        sums.withLock {
+            $0.count += samples.count
+            $0.peak = max($0.peak, peak)
+            $0.squares += squares
+        }
+    }
+
+    /// Seconds of audio, and peak and RMS level in dBFS.
+    func summary() -> (seconds: Double, peak: Double, rms: Double) {
+        let sums = sums.withLock { $0 }
+        let rms = sums.count == 0 ? 0 : (sums.squares / Double(sums.count)).squareRoot()
+        let decibels = { (level: Double) in 20 * log10(max(level, 1e-9)) }
+        return (Double(sums.count) / 16_000, decibels(Double(sums.peak)), decibels(rms))
+    }
+}
+
 /// Plays a WAV file once per take at the pace the tap asks for, then silence.
 final class TestInput {
     private let samples: [Float]
