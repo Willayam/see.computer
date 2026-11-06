@@ -41,6 +41,14 @@ impl Saved {
     pub fn remove(&self, path: &Path) {
         let _ = std::fs::remove_file(path);
     }
+
+    /// Deletes the oldest files beyond `keep`.
+    pub fn trim(&self, keep: usize) {
+        let paths = self.list();
+        for path in &paths[..paths.len().saturating_sub(keep)] {
+            self.remove(path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -62,6 +70,9 @@ mod tests {
         assert!((audio.samples()[0] - 0.25).abs() < 0.001);
         saved.remove(&first);
         assert_eq!(saved.list().len(), 1);
+        let third = saved.keep(&crate::mic::Audio16k::silence(0.1)).unwrap();
+        saved.trim(1);
+        assert_eq!(saved.list(), vec![third]);
         let _ = std::fs::remove_dir_all(root);
     }
 }

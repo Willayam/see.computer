@@ -111,6 +111,7 @@ fn main() {
             history: history.clone(),
             ledger: ledger.clone(),
             saved: saved.clone(),
+            empties: saved::Saved::at(paths::empty_takes()),
             sharing: sharing.clone(),
             status: status.clone(),
             gesture: gesture.clone(),

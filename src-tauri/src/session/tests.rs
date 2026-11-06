@@ -85,6 +85,7 @@ fn test_controller_with_fixture(
         history: crate::history::History::off(),
         ledger: crate::ledger::Ledger::off(),
         saved: crate::saved::Saved::at(dir.join("saved")),
+        empties: crate::saved::Saved::at(dir.join("empty-takes")),
         status: std::sync::Arc::new(std::sync::Mutex::new(EngineStatus::Ready)),
         gesture: std::sync::Arc::default(),
     });
@@ -758,5 +759,27 @@ fn stray_letter_skips_paste_and_ledger() {
         .any(|event| event == PillEvent::Finish(Notice::NothingHeard)));
     controller.ledger.flush();
     assert!(crate::ledger::read(&root).is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_dictation_that_comes_back_empty_keeps_its_audio() {
+    let (mut controller, pill, dir) = test_controller();
+    controller.step(Msg::MainPressed);
+    controller.step(Msg::MainReleased);
+    let job = match controller.session {
+        Session::Transcribing { job, .. } => job,
+        _ => panic!("expected transcription"),
+    };
+    controller.step(Msg::Engine(engine::Event::Done(
+        job,
+        Ok(engine::Transcription::empty()),
+    )));
+    assert!(pill
+        .try_iter()
+        .any(|event| event == PillEvent::Finish(Notice::NothingHeard)));
+    let kept = controller.empties.list();
+    assert_eq!(kept.len(), 1);
+    assert!(mic::Audio16k::from_wav(&kept[0]).unwrap().seconds() > 0.5);
     let _ = std::fs::remove_dir_all(dir);
 }

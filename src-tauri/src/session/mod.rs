@@ -131,6 +131,7 @@ pub enum Msg {
     TriggerReset,
     TriggerReady,
     TriggerUnavailable,
+    HoldIgnored(trigger::Ignored),
     Cancel,
     Quit,
     RetryEngine,
@@ -159,6 +160,7 @@ pub struct Wiring {
     pub history: crate::history::History,
     pub ledger: crate::ledger::Ledger,
     pub saved: crate::saved::Saved,
+    pub empties: crate::saved::Saved,
     pub sharing: crate::sharing::Sharing,
     pub status: std::sync::Arc<std::sync::Mutex<EngineStatus>>,
     pub gesture: std::sync::Arc<trigger::Gesture>,
@@ -172,6 +174,8 @@ pub fn spawn(wiring: Wiring, inbox: (Sender<Msg>, Receiver<Msg>)) -> std::thread
 
 /// Captured audio always includes the pre-roll, so this is time after the press.
 pub const MIN_DICTATION: Duration = Duration::from_millis(250);
+/// Enough empty dictations to hear a pattern in, at about 1.5 MB.
+const EMPTY_TAKES_KEPT: usize = 30;
 /// A shorter hold is an accidental combo tap; the file would be unplayable noise.
 pub const MIN_RECORDING: Duration = Duration::from_millis(600);
 /// While Dictating the controller checks the physical key this often, so a
@@ -196,6 +200,7 @@ struct Controller {
     history: crate::history::History,
     ledger: crate::ledger::Ledger,
     saved: crate::saved::Saved,
+    empties: crate::saved::Saved,
     /// Jobs that outran the deadline, still owed their words, with the audio
     /// file that stands in for them if the engine never answers.
     late: Vec<(JobId, Option<PathBuf>)>,
@@ -242,6 +247,7 @@ impl Controller {
             history: wiring.history,
             ledger: wiring.ledger,
             saved: wiring.saved,
+            empties: wiring.empties,
             late: Vec::new(),
             heard: Vec::new(),
             sharing: wiring.sharing,
@@ -334,7 +340,10 @@ impl Controller {
                 self.late_done(job, result)
             }
             Msg::RetrySaved => self.retry_saved(),
-            Msg::TriggerReset | Msg::TriggerReady | Msg::TriggerUnavailable => {}
+            Msg::TriggerReset
+            | Msg::TriggerReady
+            | Msg::TriggerUnavailable
+            | Msg::HoldIgnored(_) => {}
             Msg::Engine(engine::Event::Progress(progress)) => {
                 let activity = Activity::Preparing {
                     phase: progress.phase,
@@ -464,6 +473,13 @@ impl Controller {
                 let audio = self.mic.as_mut().map(|mic| mic.disarm(armed));
                 let mic_live = self.mic.as_ref().is_some_and(Mic::is_live);
                 let mic_heard = self.mic.as_ref().is_some_and(Mic::heard);
+                if let Some(audio) = &audio {
+                    let detail = format!(
+                        "{} mic_live={mic_live} mic_heard={mic_heard}",
+                        audio_detail(&self.heard, audio.samples())
+                    );
+                    self.trail.note("Dictating", "Heard", &detail);
+                }
                 if let Some(notice) = audio
                     .as_ref()
                     .and_then(|audio| incomplete_dictation_notice(fed, audio, mic_live, mic_heard))
@@ -699,7 +715,20 @@ impl Controller {
                 state @ Session::Transcribing { job, .. },
                 Msg::Engine(engine::Event::Done(done, _result)),
             ) if job != done => state,
-            (Session::Transcribing { .. }, Msg::Engine(engine::Event::Done(_, result))) => {
+            (
+                Session::Transcribing { audio: whole, .. },
+                Msg::Engine(engine::Event::Done(_, result)),
+            ) => {
+                if let Some(why) = match &result {
+                    Ok(engine::Transcription { text: None, .. }) => Some("no-text"),
+                    Ok(engine::Transcription {
+                        text: Some(text), ..
+                    }) if stray_letter(text.as_str()) => Some("stray-letter"),
+                    Ok(_) => None,
+                    Err(_) => Some("error"),
+                } {
+                    self.keep_empty(why, &whole);
+                }
                 match result {
                     Ok(engine::Transcription {
                         text: Some(text),
@@ -995,6 +1024,23 @@ impl Controller {
         mic::Audio16k::from_samples(samples)
     }
 
+    /// Logs why a dictation came back without words and keeps its audio, so
+    /// the cause can be heard rather than guessed.
+    fn keep_empty(&mut self, why: &str, audio: &mic::Audio16k) {
+        let file = self.empties.keep(audio).ok();
+        self.empties.trim(EMPTY_TAKES_KEPT);
+        let name = file
+            .as_deref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let detail = format!(
+            "why={why} {} file={name}",
+            audio_detail(&[], audio.samples())
+        );
+        self.trail.note("Transcribing", "EngineEmpty", &detail);
+    }
+
     /// Stops waiting on a job without giving up on it. Its words still come
     /// back as an ordinary `Done`, and the audio on disk covers an engine that
     /// never answers, for a retry from the menu.
@@ -1267,6 +1313,27 @@ fn utterance_seconds(fed: usize, tail: &mic::Audio16k) -> f32 {
     (fed + tail.samples().len()) as f32 / mic::RATE as f32
 }
 
+/// Length and loudness of a dictation's audio, for the trail. Never its words.
+fn audio_detail(fed: &[f32], tail: &[f32]) -> String {
+    let samples = fed.iter().chain(tail);
+    let count = fed.len() + tail.len();
+    let peak = samples
+        .clone()
+        .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    let power = samples
+        .map(|sample| f64::from(*sample).powi(2))
+        .sum::<f64>();
+    let rms = if count == 0 {
+        0.0
+    } else {
+        (power / count as f64).sqrt()
+    };
+    format!(
+        "secs={:.2} peak={peak:.3} rms={rms:.4}",
+        count as f32 / mic::RATE as f32
+    )
+}
+
 fn incomplete_dictation_notice(
     fed: usize,
     tail: &mic::Audio16k,
@@ -1357,6 +1424,7 @@ pub fn msg_label(message: &Msg) -> &'static str {
         Msg::TriggerReset => "TriggerReset",
         Msg::TriggerReady => "TriggerReady",
         Msg::TriggerUnavailable => "TriggerUnavailable",
+        Msg::HoldIgnored(why) => why.label(),
         Msg::Cancel => "Cancel",
         Msg::Quit => "Quit",
         Msg::RetryEngine => "RetryEngine",
@@ -1404,7 +1472,29 @@ impl Trail {
         self.record_at(from, msg, to, std::time::SystemTime::now());
     }
 
+    /// A row that changes no state and carries measurements in a fifth column.
+    fn note(&mut self, state: &str, msg: &str, detail: &str) {
+        self.write(
+            state,
+            msg,
+            state,
+            std::time::SystemTime::now(),
+            Some(detail),
+        );
+    }
+
     fn record_at(&mut self, from: &str, msg: &str, to: &str, at: std::time::SystemTime) {
+        self.write(from, msg, to, at, None);
+    }
+
+    fn write(
+        &mut self,
+        from: &str,
+        msg: &str,
+        to: &str,
+        at: std::time::SystemTime,
+        detail: Option<&str>,
+    ) {
         let Some(file) = self.0.as_mut() else {
             return;
         };
@@ -1419,7 +1509,10 @@ impl Trail {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_millis())
             .unwrap_or(0);
-        let _ = writeln!(file, "{millis}\t{from}\t{msg}\t{to}");
+        let _ = match detail {
+            Some(detail) => writeln!(file, "{millis}\t{from}\t{msg}\t{to}\t{detail}"),
+            None => writeln!(file, "{millis}\t{from}\t{msg}\t{to}"),
+        };
         let _ = file.flush();
     }
 }
