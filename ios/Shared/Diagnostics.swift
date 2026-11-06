@@ -8,9 +8,15 @@ enum Diagnostics {
     private static let cap: off_t = 1 << 20
 
     /// Under `Library`, because `devicectl` refuses to copy files from the folder's top level.
-    private static let path: String? = FileManager.default
-        .containerURL(forSecurityApplicationGroupIdentifier: Bridge.group)?
-        .appendingPathComponent("Library/diagnostics.tsv").path
+    private static let path: String? = {
+        guard
+            let library = FileManager.default
+                .containerURL(forSecurityApplicationGroupIdentifier: Bridge.group)?
+                .appendingPathComponent("Library")
+        else { return nil }
+        try? FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
+        return library.appendingPathComponent("diagnostics.tsv").path
+    }()
 
     private static let source = Bundle.main.bundlePath.hasSuffix(".appex") ? "keyboard" : "app"
 
