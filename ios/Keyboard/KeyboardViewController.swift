@@ -55,8 +55,12 @@ final class KeyboardViewController: UIInputViewController {
         super.viewWillDisappear(animated)
         hasLeft = true
         isActive = false
+        Diagnostics.log("keyboard_hidden", ["phase": state.phase.rawValue])
         // Leaving must end a take. Otherwise a tapped one records what comes next.
-        if state.phase == .recording { Signals.post(.stop) }
+        if state.phase == .recording {
+            Diagnostics.log("stop_sent", ["by": "leaving"])
+            Signals.post(.stop)
+        }
         heartbeat?.invalidate()
         heartbeat = nil
         page.stop()
@@ -79,6 +83,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         HostCapture.refresh()
         reload()
+        Diagnostics.log("keyboard_shown", ["phase": state.phase.rawValue, "full_access": hasFullAccess])
         Signals.post(.ping)
         let beat = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Signals.post(.ping)
@@ -99,6 +104,7 @@ final class KeyboardViewController: UIInputViewController {
     private func switchAwayFromFieldsThatNeedTheirOwnKeys() {
         switch textDocumentProxy.keyboardType {
         case .numberPad, .phonePad, .decimalPad, .asciiCapableNumberPad, .numbersAndPunctuation, .emailAddress:
+            Diagnostics.log("switched_away", ["keyboard_type": textDocumentProxy.keyboardType?.rawValue ?? -1])
             advanceToNextInputMode()
         default:
             break
@@ -108,7 +114,15 @@ final class KeyboardViewController: UIInputViewController {
     // MARK: Following the app
 
     private func reload() {
-        state = Bridge.read(SessionState.self, "state.json") ?? SessionState()
+        let read = Bridge.read(SessionState.self, "state.json")
+        if read == nil { Diagnostics.log("state_unreadable") }
+        let previous = state.phase
+        state = read ?? SessionState()
+        if state.phase != previous {
+            Diagnostics.log(
+                "phase_seen",
+                ["from": previous.rawValue, "to": state.phase.rawValue, "problem": state.problem ?? "none"])
+        }
         settleField()
         showWords()
         render()
@@ -137,6 +151,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         let words = Bridge.read(String.self, "words.json") ?? ""
         if wordsInField, state.phase == .recording, isActive, !words.isEmpty, !putInField(words) {
+            Diagnostics.log("words_left_field", ["chars": words.count])
             wordsInField = false
             render()
         }
@@ -170,9 +185,11 @@ final class KeyboardViewController: UIInputViewController {
         if before != draft.before, let before, Self.endsWith(before, draft.text) {
             // Marked text is never in the context, so iOS committed this one when
             // the keyboard went away, and it would stay behind the real take.
+            Diagnostics.log("draft_cleared", ["how": "deleted", "chars": draft.text.count])
             for _ in draft.text { proxy.deleteBackward() }
             return draft
         }
+        Diagnostics.log("draft_cleared", ["how": "unmarked", "chars": draft.text.count])
         // A controller that did not set the mark cannot clear it with an empty one.
         proxy.setMarkedText(" ", selectedRange: NSRange(location: 1, length: 0))
         proxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
@@ -192,18 +209,32 @@ final class KeyboardViewController: UIInputViewController {
         let inserted = Bridge.read(Int64.self, "inserted.json") ?? 0
         guard take.id > inserted else { return }
         Bridge.write(take.id, "inserted.json")
-        guard Date().timeIntervalSince(take.finished) < Bridge.insertWindow else { return }
+        let age = Date().timeIntervalSince(take.finished)
+        guard age < Bridge.insertWindow else {
+            Diagnostics.log("insert_stale", ["age_s": age, "chars": take.text.count])
+            return
+        }
         let draft = takeDraftBack()
         let spacing = draft?.spacing ?? Spacing.prefix(before: textDocumentProxy.documentContextBeforeInput)
+        Diagnostics.log("inserted", ["chars": take.text.count, "age_s": age, "draft": draft != nil])
         textDocumentProxy.insertText(spacing + take.text)
     }
 
     private func startAfterReturningFromTheApp() {
         guard let handoff = Bridge.read(Handoff.self, "handoff.json") else { return }
         Bridge.remove("handoff.json")
-        guard Date().timeIntervalSince(handoff.asked) < Bridge.handoffWindow else { return }
+        let age = Date().timeIntervalSince(handoff.asked)
+        guard age < Bridge.handoffWindow else {
+            Diagnostics.log("handoff_expired", ["age_s": age])
+            return
+        }
         whenAlive { [weak self] alive in
-            guard alive, self?.state.phase == .armed else { return }
+            guard alive, self?.state.phase == .armed else {
+                Diagnostics.log(
+                    "handoff_start_failed", ["alive": alive, "phase": self?.state.phase.rawValue ?? "none"])
+                return
+            }
+            Diagnostics.log("start_sent", ["by": "handoff", "age_s": age])
             Signals.post(.start)
         }
     }
@@ -218,7 +249,9 @@ final class KeyboardViewController: UIInputViewController {
         waiting[id] = then
         Signals.post(.ping)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            self?.waiting.removeValue(forKey: id)?(false)
+            guard let then = self?.waiting.removeValue(forKey: id) else { return }
+            Diagnostics.log("ping_timeout")
+            then(false)
         }
     }
 
@@ -229,24 +262,32 @@ final class KeyboardViewController: UIInputViewController {
         pressedAt = Date()
         pressStartedTake = false
         note = nil
+        Diagnostics.log(
+            "tap", ["phase": state.phase.rawValue, "pong_age_s": min(Date().timeIntervalSince(lastPong), 9999)])
         guard hasFullAccess else {
+            Diagnostics.log("tap_no_full_access")
             openSettings()
             return
         }
         // Asking first would only delay the app opening when the mic is known to be off.
         guard state.phase != .off else {
+            Diagnostics.log("tap_app_off")
             openApp()
             return
         }
         whenAlive { [weak self] alive in
             guard let self else { return }
             guard alive else {
+                Diagnostics.log("tap_app_dead", ["phase": self.state.phase.rawValue])
                 self.openApp()
                 return
             }
             if self.state.phase == .armed {
+                Diagnostics.log("start_sent", ["by": "tap"])
                 self.pressStartedTake = true
                 Signals.post(.start)
+            } else if self.state.phase != .recording {
+                Diagnostics.log("tap_not_armed", ["phase": self.state.phase.rawValue])
             }
         }
     }
@@ -254,15 +295,20 @@ final class KeyboardViewController: UIInputViewController {
     @objc private func micUp() {
         let held = Date().timeIntervalSince(pressedAt) > 0.35
         if pressStartedTake && !held { return }
-        if state.phase == .recording || pressStartedTake { Signals.post(.stop) }
+        if state.phase == .recording || pressStartedTake {
+            Diagnostics.log("stop_sent", ["by": held ? "release" : "tap", "phase": state.phase.rawValue])
+            Signals.post(.stop)
+        }
     }
 
     @objc private func cancelTapped() {
+        Diagnostics.log("cancel_sent", ["phase": state.phase.rawValue])
         Signals.post(.cancel)
     }
 
     private func openApp() {
         Bridge.write(Handoff(asked: Date(), host: HostCapture.host), "handoff.json")
+        Diagnostics.log("open_app", ["host": HostCapture.host != nil])
         // A keyboard has no public way to open a URL. The app's object sits on its
         // responder chain and accepts the call.
         var responder: UIResponder? = self
@@ -270,6 +316,7 @@ final class KeyboardViewController: UIInputViewController {
             if let application = current as? UIApplication {
                 application.open(Bridge.armURL, options: [:]) { [weak self] opened in
                     guard !opened else { return }
+                    Diagnostics.log("open_app_refused")
                     self?.note = "Open see.computer to turn on the mic"
                     self?.render()
                 }
@@ -277,6 +324,7 @@ final class KeyboardViewController: UIInputViewController {
             }
             responder = current.next
         }
+        Diagnostics.log("open_app_unreachable")
         note = "Open see.computer to turn on the mic"
         render()
     }

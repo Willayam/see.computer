@@ -53,6 +53,18 @@ Each has a fallback, and each can break in any iOS update.
 - `HostCapture` reads the host app's bundle id from a private UIKit callback, and `HostReturn` opens that app with a private system class. iOS 26.4 removed every supported way to do this. When either fails, the app shows a screen asking you to swipe right along the bottom edge.
 - The keyboard opens the app by walking its responder chain to the `UIApplication` object. Apple documents opening the containing app from a keyboard as unsupported. When it fails, the keyboard asks you to open the app yourself.
 
+## Diagnostics log
+
+The app and the keyboard both append one line per event to `Library/diagnostics.tsv` in the shared App Group folder: every step of a take, every way one ends, and every tap the keyboard could not act on. Each line holds the time in unix milliseconds, `app` or `keyboard`, the event name, and `key=value` pairs. It records lengths, durations, levels and error messages, never the dictated words. The file empties itself once it passes 1 MiB.
+
+To copy it off a connected iPhone:
+
+```sh
+ios/scripts/pull-diagnostics.sh [destination] [device id]
+```
+
+The destination defaults to `./diagnostics-iphone.tsv`. The log sits under `Library` because `devicectl` will not copy files from the top of an App Group folder.
+
 ## Verify it without a microphone
 
 Debug builds replace the microphone when `Documents/test-input.wav` exists in the app's container. Every take then returns that file's audio, as `SEE_COMPUTER_AUDIO_FILE` does on the Mac. Use this in the simulator, because the input node goes through the Mac's audio service there and aborts the app if that service does not answer in time.

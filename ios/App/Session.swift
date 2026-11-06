@@ -56,6 +56,10 @@ final class Session: ObservableObject {
     private var keyboardWatch: Timer?
     /// Tells a tap from this app's own field apart from one that launched or resumed it.
     private var hasBeenInFront = false
+    /// For the diagnostics log only.
+    private var takeStarted = Date()
+    private var takeAudio = CaptureStats()
+    private var finishAsked = Date()
 
     /// A keyboard that stops pinging has gone: the user left, or it was killed.
     private static let keyboardGoneAfter: TimeInterval = 3
@@ -69,6 +73,7 @@ final class Session: ObservableObject {
         state = restored
         publish()
         guard !benching else { return }
+        Diagnostics.log("app_launch", ["phase": state.phase.rawValue])
 
         engine.onStage = { [weak self] stage in
             MainActor.assumeIsolated { self?.stageChanged(stage) }
@@ -93,6 +98,7 @@ final class Session: ObservableObject {
         center.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
+            Diagnostics.log("app_active")
             MainActor.assumeIsolated { self?.hasBeenInFront = true }
         }
         center.addObserver(
@@ -103,6 +109,7 @@ final class Session: ObservableObject {
         center.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
+            Diagnostics.log("app_background")
             MainActor.assumeIsolated { self?.showSwipeBack = false }
         }
         center.addObserver(
@@ -111,8 +118,15 @@ final class Session: ObservableObject {
         ) { [weak self] note in
             let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
             let began = raw.flatMap(AVAudioSession.InterruptionType.init(rawValue:)) == .began
+            let reason = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt
             MainActor.assumeIsolated {
-                if began { self?.micLost() }
+                Diagnostics.log(
+                    "interruption",
+                    [
+                        "type": began ? "began" : "ended", "reason": reason.map(String.init) ?? "none",
+                        "phase": self?.state.phase.rawValue ?? "none",
+                    ])
+                if began { self?.micLost(because: "interruption") }
             }
         }
         center.addObserver(
@@ -124,7 +138,8 @@ final class Session: ObservableObject {
             forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.micLost()
+                Diagnostics.log("media_services_reset")
+                self?.micLost(because: "media_reset")
                 self?.microphone.rebuild()
             }
         }
@@ -136,6 +151,7 @@ final class Session: ObservableObject {
     func arm() async {
         guard !micIsOn else { return }
         guard await AVAudioApplication.requestRecordPermission() else {
+            Diagnostics.log("arm_denied")
             state.problem = "Microphone access is off."
             publish()
             return
@@ -143,11 +159,13 @@ final class Session: ObservableObject {
         do {
             try microphone.start()
         } catch {
+            Diagnostics.log("arm_failed", ["error": error])
             state.problem = "The microphone would not start."
             publish()
             return
         }
         micIsOn = true
+        Diagnostics.log("armed", ["phase": state.phase.rawValue])
         state.problem = nil
         if state.phase == .off { state.phase = .armed }
         publish()
@@ -158,7 +176,9 @@ final class Session: ObservableObject {
     /// its words are not lost.
     func turnOff() {
         disarmAt?.cancel()
+        Diagnostics.log("mic_off", ["phase": state.phase.rawValue])
         if state.phase == .recording {
+            Diagnostics.log("take_dropped", ["seconds": Date().timeIntervalSince(takeStarted)])
             stopWatchingKeyboard()
             microphone.endCapture()
             engine.discard()
@@ -174,6 +194,7 @@ final class Session: ObservableObject {
     }
 
     func retryEngine() {
+        Diagnostics.log("engine_retry")
         stage = .waiting
         engine.restart(previews: true)
     }
@@ -184,14 +205,23 @@ final class Session: ObservableObject {
         let wasInFront = UIApplication.shared.applicationState == .active && hasBeenInFront
         Task {
             await arm()
-            guard micIsOn, Engine.isModelPrepared else { return }
+            Diagnostics.log("opened_from_keyboard", ["in_front": wasInFront, "phase": state.phase.rawValue])
+            guard micIsOn, Engine.isModelPrepared else {
+                Diagnostics.log("handoff_not_ready", ["mic": micIsOn, "model": Engine.isModelPrepared])
+                return
+            }
             if wasInFront {
+                Diagnostics.log("handoff_in_front")
                 Bridge.remove("handoff.json")
                 startTake()
                 return
             }
             let host = Bridge.read(Handoff.self, "handoff.json")?.host
-            if let host, HostReturn.open(bundle: host) { return }
+            if let host, HostReturn.open(bundle: host) {
+                Diagnostics.log("host_return", ["host": host])
+                return
+            }
+            Diagnostics.log("swipe_back", ["host": host ?? "none"])
             showSwipeBack = true
         }
     }
@@ -199,7 +229,10 @@ final class Session: ObservableObject {
     private func scheduleDisarm() {
         disarmAt?.cancel()
         guard state.phase == .armed, let seconds = readyFor.seconds else { return }
-        let work = DispatchWorkItem { [weak self] in self?.turnOff() }
+        let work = DispatchWorkItem { [weak self] in
+            Diagnostics.log("disarm_timer")
+            self?.turnOff()
+        }
         disarmAt = work
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
@@ -207,8 +240,12 @@ final class Session: ObservableObject {
     // MARK: Takes
 
     private func startTake() {
-        guard state.phase == .armed else { return }
+        guard state.phase == .armed else {
+            Diagnostics.log("start_ignored", ["phase": state.phase.rawValue])
+            return
+        }
         if case .failed(let message) = stage {
+            Diagnostics.log("start_refused", ["error": message])
             state.problem = message
             publish()
             return
@@ -220,7 +257,14 @@ final class Session: ObservableObject {
         engine.warm()
         engine.begin()
         let engine = self.engine
-        microphone.beginCapture { engine.feed($0) }
+        let audio = CaptureStats()
+        takeAudio = audio
+        takeStarted = Date()
+        Diagnostics.log("take_started", ["stage": stage])
+        microphone.beginCapture {
+            audio.add($0)
+            engine.feed($0)
+        }
         state.phase = .recording
         state.problem = nil
         publish()
@@ -235,26 +279,45 @@ final class Session: ObservableObject {
         Signals.post(.words)
     }
 
-    private func stopTake() {
-        guard state.phase == .recording else { return }
+    private func stopTake(by cause: String = "keyboard") {
+        guard state.phase == .recording else {
+            Diagnostics.log("stop_ignored", ["phase": state.phase.rawValue, "by": cause])
+            return
+        }
+        let seconds = Date().timeIntervalSince(takeStarted)
         stopWatchingKeyboard()
         state.phase = .transcribing
         publish()
         takeTask = UIApplication.shared.beginBackgroundTask { [weak self] in
-            MainActor.assumeIsolated { self?.endTakeTask() }
+            MainActor.assumeIsolated {
+                Diagnostics.log("background_expired", ["phase": self?.state.phase.rawValue ?? "none"])
+                self?.endTakeTask()
+            }
         }
         // The tap delivers audio in blocks, so the last word is still in one.
         let work = DispatchWorkItem { [self] in
             pendingFinish = nil
             microphone.endCapture()
+            let audio = takeAudio.summary()
+            Diagnostics.log(
+                "take_stopped",
+                [
+                    "by": cause, "seconds": seconds, "audio_s": audio.seconds,
+                    "peak_db": audio.peak, "rms_db": audio.rms,
+                ])
+            finishAsked = Date()
             job = engine.finish()
-            if job == 0 { settle(problem: "The speech engine stopped.") }
+            if job == 0 {
+                Diagnostics.log("engine_finish_failed")
+                settle(problem: "The speech engine stopped.")
+            }
         }
         pendingFinish = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
     private func cancelTake() {
+        Diagnostics.log("take_cancelled", ["phase": state.phase.rawValue])
         switch state.phase {
         case .recording:
             stopWatchingKeyboard()
@@ -276,21 +339,33 @@ final class Session: ObservableObject {
     }
 
     private func finished(job finishedJob: UInt64, _ result: Result<String, EngineFailure>) {
-        guard finishedJob == job else { return }
+        guard finishedJob == job else {
+            Diagnostics.log("transcript_stale", ["job": finishedJob, "current": job])
+            return
+        }
         job = 0
+        let engineMs = Int(Date().timeIntervalSince(finishAsked) * 1000)
         switch result {
         case .success(let text):
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty {
+                let audio = takeAudio.summary()
+                Diagnostics.log(
+                    "transcript_empty",
+                    ["engine_ms": engineMs, "audio_s": audio.seconds, "peak_db": audio.peak, "rms_db": audio.rms])
                 settle(problem: nil)
                 return
             }
+            Diagnostics.log(
+                "transcript_delivered",
+                ["words": trimmed.split(whereSeparator: \.isWhitespace).count, "chars": trimmed.count, "engine_ms": engineMs])
             let now = Date()
             state.take = Take(id: Int64(now.timeIntervalSince1970 * 1000), text: trimmed, finished: now)
             History.append(trimmed, at: now)
             recent = History.recent(limit: 30)
             settle(problem: nil)
         case .failure(let failure):
+            Diagnostics.log("engine_error", ["error": failure.message, "engine_ms": engineMs])
             settle(problem: failure.message)
         }
     }
@@ -318,7 +393,8 @@ final class Session: ObservableObject {
         keyboardWatch = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, Date().timeIntervalSince(self.lastPing) > Self.keyboardGoneAfter else { return }
-                self.stopTake()
+                Diagnostics.log("keyboard_gone", ["since_ping_s": Date().timeIntervalSince(self.lastPing)])
+                self.stopTake(by: "keyboard_gone")
             }
         }
     }
@@ -331,24 +407,32 @@ final class Session: ObservableObject {
     // MARK: The system taking the microphone away, or the engine failing
 
     /// Says nothing, because the next tap brings the mic back.
-    private func micLost() {
+    private func micLost(because cause: String) {
+        Diagnostics.log("mic_lost", ["by": cause, "mic": micIsOn, "phase": state.phase.rawValue])
         guard micIsOn else { return }
-        if state.phase == .recording { stopTake() }
+        if state.phase == .recording { stopTake(by: "mic_lost") }
         turnOff()
     }
 
     private func routeChanged() {
+        Diagnostics.log("route_change", ["mic": micIsOn, "phase": state.phase.rawValue])
         guard micIsOn else { return }
         do {
             try microphone.restart()
         } catch {
-            micLost()
+            Diagnostics.log("route_restart_failed", ["error": error])
+            micLost(because: "route")
         }
     }
 
     private func stageChanged(_ newStage: Engine.Stage) {
+        switch (stage, newStage) {
+        case (.downloading, .downloading), (_, .failed): break
+        default: Diagnostics.log("engine_stage", ["stage": newStage])
+        }
         stage = newStage
         guard case .failed(let message) = newStage else { return }
+        Diagnostics.log("engine_failed", ["error": message, "phase": state.phase.rawValue])
         switch state.phase {
         case .recording:
             stopWatchingKeyboard()
