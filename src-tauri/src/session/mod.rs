@@ -39,12 +39,15 @@ pub enum Session {
     Transcribing {
         job: JobId,
         since: Instant,
+        /// The whole utterance, saved to disk if the engine misses the deadline.
+        audio: mic::Audio16k,
     },
     TranscribingTake {
         job: JobId,
         take: Take,
         duration_ms: u64,
         since: Instant,
+        audio: mic::Audio16k,
     },
     PackagingTake {
         turn: Turn,
@@ -131,6 +134,8 @@ pub enum Msg {
     Cancel,
     Quit,
     RetryEngine,
+    /// Transcribe the dictations saved after a timeout again.
+    RetrySaved,
     PrepareUpdate(Sender<bool>),
     UpdateAborted,
     Engine(engine::Event),
@@ -153,6 +158,7 @@ pub struct Wiring {
     pub trail: Trail,
     pub history: crate::history::History,
     pub ledger: crate::ledger::Ledger,
+    pub saved: crate::saved::Saved,
     pub sharing: crate::sharing::Sharing,
     pub status: std::sync::Arc<std::sync::Mutex<EngineStatus>>,
     pub gesture: std::sync::Arc<trigger::Gesture>,
@@ -189,6 +195,12 @@ struct Controller {
     trail: Trail,
     history: crate::history::History,
     ledger: crate::ledger::Ledger,
+    saved: crate::saved::Saved,
+    /// Jobs that outran the deadline, still owed their words, with the audio
+    /// file that stands in for them if the engine never answers.
+    late: Vec<(JobId, Option<PathBuf>)>,
+    /// Every sample of the live take sent to the engine so far.
+    heard: Vec<f32>,
     sharing: crate::sharing::Sharing,
     updating: bool,
     share_take: bool,
@@ -229,6 +241,9 @@ impl Controller {
             trail: wiring.trail,
             history: wiring.history,
             ledger: wiring.ledger,
+            saved: wiring.saved,
+            late: Vec::new(),
+            heard: Vec::new(),
             sharing: wiring.sharing,
             updating: false,
             share_take: false,
@@ -313,6 +328,12 @@ impl Controller {
                 }
             }
             Msg::UpdateAborted => self.updating = false,
+            Msg::Engine(engine::Event::Done(job, result))
+                if self.late.iter().any(|(late, _)| *late == job) =>
+            {
+                self.late_done(job, result)
+            }
+            Msg::RetrySaved => self.retry_saved(),
             Msg::TriggerReset | Msg::TriggerReady | Msg::TriggerUnavailable => {}
             Msg::Engine(engine::Event::Progress(progress)) => {
                 let activity = Activity::Preparing {
@@ -408,6 +429,7 @@ impl Controller {
                                 return;
                             }
                             let armed = mic.arm();
+                            self.heard.clear();
                             self.share_take = self.sharing.enabled();
                             self.utterance = self.engine.begin_context(crate::context::begin());
                             self.engine.warm();
@@ -453,12 +475,14 @@ impl Controller {
                     self.finish(notice);
                     Session::Idle
                 } else if let Some(audio) = audio {
+                    let whole = self.take_heard(&audio);
                     match self.engine.submit(audio) {
                         Ok(job) => {
                             self.show(Activity::Transcribing);
                             Session::Transcribing {
                                 job,
                                 since: Instant::now(),
+                                audio: whole,
                             }
                         }
                         Err(error) => {
@@ -504,6 +528,7 @@ impl Controller {
                     dir: capture_dir,
                     captures,
                 };
+                let whole = audio.as_ref().map(|audio| self.take_heard(audio));
                 match audio.map(|audio| self.engine.submit(audio)) {
                     Some(Ok(job)) => {
                         self.show(Activity::Transcribing);
@@ -512,6 +537,7 @@ impl Controller {
                             take,
                             duration_ms,
                             since: Instant::now(),
+                            audio: whole.unwrap_or_else(|| mic::Audio16k::silence(0.0)),
                         }
                     }
                     Some(Err(_)) | None => {
@@ -791,6 +817,9 @@ impl Controller {
             }
             (state, _) => state,
         };
+        if !matches!(self.session, Session::Dictating { .. }) {
+            self.heard = Vec::new();
+        }
     }
 
     fn take_screenshot(
@@ -909,26 +938,45 @@ impl Controller {
                 if let Some(audio) = self.mic.as_mut().map(|mic| mic.drain(armed)) {
                     if !audio.samples().is_empty() {
                         *fed += audio.samples().len();
+                        self.heard.extend_from_slice(audio.samples());
                         self.engine.feed(audio);
                     }
                 }
             }
             return;
         }
-        if matches!(self.session, Session::TranscribingTake { .. }) {
+        // A slow engine is not a failed one. The job stays queued and its words
+        // arrive later, so only the wait ends here, never the dictation.
+        if matches!(
+            self.session,
+            Session::Transcribing { .. } | Session::TranscribingTake { .. }
+        ) {
             let from = session_label(&self.session);
-            if let Session::TranscribingTake { take, .. } =
-                std::mem::replace(&mut self.session, Session::Idle)
-            {
-                self.sharing.cancel(take.dir.as_deref());
-                discard_take(take);
+            match std::mem::replace(&mut self.session, Session::Idle) {
+                Session::Transcribing { job, audio, .. } => {
+                    self.keep_late(job, &audio);
+                    self.finish(Notice::Saved);
+                }
+                Session::TranscribingTake {
+                    job,
+                    take,
+                    duration_ms,
+                    audio,
+                    ..
+                } => {
+                    // The screenshots and video are already on disk, so the
+                    // take is packaged now and its narration follows alone.
+                    self.keep_late(job, &audio);
+                    self.session =
+                        self.spawn_take_package(take, duration_ms, engine::Transcription::empty());
+                }
+                _ => {}
             }
-            self.finish(Notice::TimedOut("Transcription"));
-            self.trail.record(from, "Timeout", "Idle");
+            let to = session_label(&self.session);
+            self.trail.record(from, "Timeout", to);
             return;
         }
         let what = match self.session {
-            Session::Transcribing { .. } | Session::TranscribingTake { .. } => "Transcription",
             Session::PackagingTake { .. } => "Saving",
             Session::Pasting { .. } => "Paste",
             _ => return,
@@ -937,6 +985,125 @@ impl Controller {
         self.session = Session::Idle;
         self.finish(Notice::TimedOut(what));
         self.trail.record(from, "Timeout", "Idle");
+    }
+
+    /// The whole utterance as the engine received it: what was fed during the
+    /// take, then the tail that goes with the release.
+    fn take_heard(&mut self, tail: &mic::Audio16k) -> mic::Audio16k {
+        let mut samples = std::mem::take(&mut self.heard);
+        samples.extend_from_slice(tail.samples());
+        mic::Audio16k::from_samples(samples)
+    }
+
+    /// Stops waiting on a job without giving up on it. Its words still come
+    /// back as an ordinary `Done`, and the audio on disk covers an engine that
+    /// never answers, for a retry from the menu.
+    fn keep_late(&mut self, job: JobId, audio: &mic::Audio16k) {
+        let path = self.saved.keep(audio).ok();
+        self.late.push((job, path));
+    }
+
+    /// Words that missed their deadline. They are filed like any dictation but
+    /// not pasted, because the cursor has likely moved on, so the pill holds
+    /// them for a copy when nothing else is on screen.
+    fn late_done(&mut self, job: JobId, result: Result<engine::Transcription, EngineError>) {
+        let Some(index) = self.late.iter().position(|(late, _)| *late == job) else {
+            return;
+        };
+        let (_, path) = self.late.remove(index);
+        let outcome = match result {
+            Ok(engine::Transcription {
+                text: Some(text),
+                audio,
+                ..
+            }) if !stray_letter(text.as_str()) => {
+                let id = self.ledger.mint();
+                if let Some(audio) = audio {
+                    self.ledger.dictated(&id, text.as_str(), audio);
+                }
+                self.history.record(text.as_str());
+                if matches!(self.session, Session::Idle) {
+                    let _ = self.pill.send(PillEvent::Held(crate::pill::Held {
+                        text: text.as_str().to_owned(),
+                        note: None,
+                        clipboard: text.as_str().to_owned(),
+                    }));
+                }
+                "LateText"
+            }
+            Ok(_) => "LateEmpty",
+            // Kept on disk, so the menu can offer another pass.
+            Err(_) => "LateFailed",
+        };
+        if outcome != "LateFailed" {
+            if let Some(path) = &path {
+                self.saved.remove(path);
+            }
+        }
+        let state = session_label(&self.session);
+        self.trail.record(state, outcome, state);
+    }
+
+    /// Sends every saved dictation through the engine again, oldest first.
+    /// Their words come back as late jobs, so they are filed the same way.
+    fn retry_saved(&mut self) {
+        if !matches!(self.session, Session::Idle) {
+            self.flash(Notice::Info("Finish this dictation first".to_owned()));
+            return;
+        }
+        match &self.readiness {
+            Readiness::Loading(progress) => {
+                self.finish(Notice::Loading(progress.percent()));
+                return;
+            }
+            Readiness::Broken(error) => {
+                self.finish(Notice::Unavailable(error.to_string()));
+                return;
+            }
+            Readiness::Ready => {}
+        }
+        let mut sent = 0;
+        let mut waiting = 0;
+        for path in self.saved.list() {
+            if self
+                .late
+                .iter()
+                .any(|(_, late)| late.as_ref() == Some(&path))
+            {
+                waiting += 1;
+                continue;
+            }
+            let audio = match mic::Audio16k::from_wav(&path) {
+                Ok(audio) => audio,
+                Err(_) => {
+                    // Set aside rather than deleted, and out of the menu's count.
+                    let _ = std::fs::rename(&path, path.with_extension("wav.unreadable"));
+                    continue;
+                }
+            };
+            // Fed rather than submitted whole, so a long take is cut into the
+            // same chunks it would have been while it was spoken.
+            self.engine.discard();
+            self.engine.feed(audio);
+            match self.engine.submit(mic::Audio16k::silence(0.0)) {
+                Ok(job) => {
+                    self.late.push((job, Some(path)));
+                    sent += 1;
+                }
+                Err(error) => {
+                    self.finish(Notice::TranscriptionFailed(error.to_string()));
+                    return;
+                }
+            }
+        }
+        if sent > 0 {
+            self.flash(Notice::Info(match sent {
+                1 => "Transcribing 1 saved dictation".to_owned(),
+                count => format!("Transcribing {count} saved dictations"),
+            }));
+        } else if waiting > 0 {
+            self.flash(Notice::StillTranscribing);
+        }
     }
 
     fn spawn_take_package(
@@ -1050,7 +1217,12 @@ impl Controller {
                 self.sharing.cancel(capture_dir.as_deref());
                 discard_captures(capture_dir, captures);
             }
-            Session::TranscribingTake { take, .. } => {
+            // Words still owed at quit wait on disk for a retry after relaunch.
+            Session::Transcribing { audio, .. } => {
+                let _ = self.saved.keep(&audio);
+            }
+            Session::TranscribingTake { take, audio, .. } => {
+                let _ = self.saved.keep(&audio);
                 self.sharing.cancel(take.dir.as_deref());
                 discard_take(take);
             }
@@ -1188,6 +1360,7 @@ pub fn msg_label(message: &Msg) -> &'static str {
         Msg::Cancel => "Cancel",
         Msg::Quit => "Quit",
         Msg::RetryEngine => "RetryEngine",
+        Msg::RetrySaved => "RetrySaved",
         Msg::PrepareUpdate(_) => "PrepareUpdate",
         Msg::UpdateAborted => "UpdateAborted",
         Msg::Engine(engine::Event::Progress(_)) => "EngineProgress",

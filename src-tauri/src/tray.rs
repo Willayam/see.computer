@@ -70,6 +70,7 @@ struct Panel {
     pill: Sender<PillEvent>,
     history: History,
     ledger: Ledger,
+    saved: crate::saved::Saved,
     sharing: crate::sharing::Sharing,
     updater: crate::updater::Updater,
     meetings: crate::meeting::controller::Meetings,
@@ -91,6 +92,7 @@ pub struct Wiring {
     pub pill: Sender<PillEvent>,
     pub history: History,
     pub ledger: Ledger,
+    pub saved: crate::saved::Saved,
     pub status: Arc<Mutex<EngineStatus>>,
     pub sharing: crate::sharing::Sharing,
     pub updater: crate::updater::Updater,
@@ -105,6 +107,7 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
         pill,
         history,
         ledger,
+        saved,
         status,
         sharing,
         updater,
@@ -119,6 +122,7 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
         pill,
         history,
         ledger,
+        saved,
         sharing,
         updater,
         meetings,
@@ -190,6 +194,16 @@ impl Panel {
     fn main_rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
         rows.extend(self.problem_rows());
+        // Words a slow engine still owes. App Support is local, so counting
+        // here cannot stall the main thread the way ~/Documents can.
+        let saved = self.saved.list().len();
+        if saved > 0 {
+            let label = match saved {
+                1 => "Transcribe 1 saved dictation".to_owned(),
+                count => format!("Transcribe {count} saved dictations"),
+            };
+            rows.push(item("saved-retry", &label, false, Some("arrow.clockwise")));
+        }
         let (label, symbol) = match self.meetings.status() {
             crate::meeting::controller::Status::Idle => {
                 ("Record a meeting".to_owned(), "record.circle")
@@ -478,6 +492,10 @@ impl Panel {
             }
             "retry" => {
                 let _ = self.inbox.send(Msg::RetryEngine);
+                None
+            }
+            "saved-retry" => {
+                let _ = self.inbox.send(Msg::RetrySaved);
                 None
             }
             "see-computer-folder" => {

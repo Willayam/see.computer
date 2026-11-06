@@ -510,7 +510,7 @@ fn compact(root: &Path, events: &mut Vec<Event>, keep: usize, slack: usize) -> s
     Ok(())
 }
 
-fn write_audio(path: &Path, audio: &crate::mic::Audio16k) -> Result<(), hound::Error> {
+pub(crate) fn write_audio(path: &Path, audio: &crate::mic::Audio16k) -> Result<(), hound::Error> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: crate::mic::RATE,
