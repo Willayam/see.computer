@@ -84,6 +84,7 @@ fn test_controller_with_fixture(
         trail: Trail::off(),
         history: crate::history::History::off(),
         ledger: crate::ledger::Ledger::off(),
+        saved: crate::saved::Saved::at(dir.join("saved")),
         status: std::sync::Arc::new(std::sync::Mutex::new(EngineStatus::Ready)),
         gesture: std::sync::Arc::default(),
     });
@@ -560,16 +561,107 @@ fn stale_stream_with_empty_audio_reports_mic_unavailable() {
     );
 }
 
+fn held_texts(pill: &Receiver<PillEvent>) -> Vec<String> {
+    pill.try_iter()
+        .filter_map(|event| match event {
+            PillEvent::Held(held) => Some(held.text),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
-fn timeout_returns_to_idle() {
-    let (mut controller, _, _) = test_controller();
+fn a_timeout_saves_the_take_and_shows_its_words_when_they_arrive() {
+    let (mut controller, pill, dir) = test_controller();
     controller.step(Msg::MainPressed);
     controller.step(Msg::MainReleased);
-    if let Session::Transcribing { since, .. } = &mut controller.session {
-        *since = Instant::now() - TRANSCRIBE_TIMEOUT;
-    }
+    let job = match controller.session {
+        Session::Transcribing { job, .. } => job,
+        _ => panic!("expected transcription"),
+    };
     controller.expire();
     assert!(matches!(controller.session, Session::Idle));
+    assert!(pill
+        .try_iter()
+        .any(|event| event == PillEvent::Finish(Notice::Saved)));
+    let saved = controller.saved.list();
+    assert_eq!(saved.len(), 1, "the audio waits on disk");
+    assert!(
+        mic::Audio16k::from_wav(&saved[0]).unwrap().seconds() > 0.5,
+        "the whole utterance is saved, not an empty tail"
+    );
+
+    // The next take goes ahead while the engine catches up.
+    controller.step(Msg::MainPressed);
+    assert!(matches!(controller.session, Session::Dictating { .. }));
+    controller.step(Msg::Cancel);
+
+    controller.step(Msg::Engine(engine::Event::Done(
+        job,
+        Ok(engine::Transcription {
+            audio: None,
+            text: Text::parse("late words"),
+            segments: Vec::new(),
+        }),
+    )));
+    assert_eq!(held_texts(&pill), ["late words"]);
+    assert!(controller.saved.list().is_empty());
+    assert!(controller.late.is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_failed_late_job_keeps_its_audio_and_a_retry_delivers_it() {
+    let (mut controller, pill, dir) = test_controller();
+    controller.step(Msg::MainPressed);
+    controller.step(Msg::MainReleased);
+    let job = match controller.session {
+        Session::Transcribing { job, .. } => job,
+        _ => panic!("expected transcription"),
+    };
+    controller.expire();
+    controller.step(Msg::Engine(engine::Event::Done(
+        job,
+        Err(EngineError::Inference("overloaded".to_owned())),
+    )));
+    assert_eq!(controller.saved.list().len(), 1, "kept for a retry");
+
+    controller.step(Msg::RetrySaved);
+    let retry = match controller.late.as_slice() {
+        [(retry, Some(_))] => *retry,
+        other => panic!("expected one retry, got {}", other.len()),
+    };
+    // A second pick while it runs does not queue the same audio twice.
+    controller.step(Msg::RetrySaved);
+    assert_eq!(controller.late.len(), 1);
+
+    controller.step(Msg::Engine(engine::Event::Done(
+        retry,
+        Ok(engine::Transcription {
+            audio: None,
+            text: Text::parse("hello world"),
+            segments: Vec::new(),
+        }),
+    )));
+    assert_eq!(held_texts(&pill), ["hello world"]);
+    assert!(controller.saved.list().is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_take_that_times_out_is_packaged_instead_of_deleted() {
+    let (mut controller, _, dir) = test_controller();
+    controller.step(Msg::MainPressed);
+    controller.step(Msg::ShotTaken(Instant::now()));
+    controller.step(Msg::MainReleased);
+    assert!(matches!(
+        controller.session,
+        Session::TranscribingTake { .. }
+    ));
+    controller.expire();
+    assert!(matches!(controller.session, Session::PackagingTake { .. }));
+    assert_eq!(controller.saved.list().len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

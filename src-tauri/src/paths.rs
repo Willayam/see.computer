@@ -49,6 +49,11 @@ pub fn meeting_log() -> PathBuf {
     app_support().join("meeting-log.tsv")
 }
 
+/// Audio of dictations still waiting for their words.
+pub fn saved() -> PathBuf {
+    app_support().join("saved")
+}
+
 /// Where history goes when macOS denies Documents.
 pub fn history_fallback() -> PathBuf {
     app_support().join("history")

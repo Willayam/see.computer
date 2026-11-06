@@ -92,6 +92,9 @@ pub enum Notice {
     TranscriptionFailed(String),
     PasteFailed(String),
     TimedOut(&'static str),
+    /// A transcription outran its deadline. Its audio is saved and its words
+    /// still come.
+    Saved,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -111,7 +114,8 @@ impl Notice {
             | Notice::Loading(_)
             | Notice::TriggerChanged(_)
             | Notice::Copied
-            | Notice::CopiedNoPaste => Tone::Info,
+            | Notice::CopiedNoPaste
+            | Notice::Saved => Tone::Info,
             Notice::MicSilent
             | Notice::Unavailable(_)
             | Notice::MicUnavailable(_)
@@ -142,6 +146,7 @@ impl Notice {
             Notice::TranscriptionFailed(error) => format!("Transcription failed: {error}"),
             Notice::PasteFailed(error) => format!("Paste failed: {error}"),
             Notice::TimedOut(activity) => format!("{activity} timed out"),
+            Notice::Saved => "Slow to transcribe · saved, the words will follow".to_owned(),
         }
     }
 }

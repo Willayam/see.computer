@@ -27,6 +27,7 @@ mod readback;
 mod recents;
 mod recorder;
 mod rivals;
+mod saved;
 mod session;
 mod setup;
 mod shadow;
@@ -98,6 +99,7 @@ fn main() {
     }));
     let rivals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     rivals::spawn(rivals.clone());
+    let saved = saved::Saved::at(paths::saved());
     let controller = session::spawn(
         session::Wiring {
             mic,
@@ -108,6 +110,7 @@ fn main() {
             trail: session::Trail::from_env(),
             history: history.clone(),
             ledger: ledger.clone(),
+            saved: saved.clone(),
             sharing: sharing.clone(),
             status: status.clone(),
             gesture: gesture.clone(),
@@ -167,6 +170,7 @@ fn main() {
                     pill: tray_pill_tx,
                     history: setup_history,
                     ledger: setup_ledger,
+                    saved,
                     status: setup_status,
                     sharing,
                     updater,
