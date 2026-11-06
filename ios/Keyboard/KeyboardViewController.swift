@@ -15,13 +15,17 @@ final class KeyboardViewController: UIInputViewController {
     /// A message of the keyboard's own, which the heartbeat must not repaint over.
     private var note: String?
 
-    private let mic = BigButton()
+    private let bar = StartBar()
     private let page = LivePage()
     private let cancel = CloseButton()
+    private let keys = UIStackView()
+    private let globe = Key(symbol: "globe", label: "Next keyboard")
+    /// Covers the faint keys during a take, so a tap there finishes it too.
+    private let finishArea = UIControl()
+    private var deleteRepeat: Timer?
     private var activatedAt = Date.distantPast
     /// False once the field has failed to hold the words, for the rest of the take.
     private var wordsInField = true
-    private let globe = UIButton(type: .system)
 
     /// For the label only. A slow answer must not read as the app having died,
     /// so this is looser than the check a tap makes.
@@ -63,6 +67,8 @@ final class KeyboardViewController: UIInputViewController {
         }
         heartbeat?.invalidate()
         heartbeat = nil
+        deleteUp()
+        bar.stop()
         page.stop()
     }
 
@@ -340,58 +346,110 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
+    // MARK: Typing
+
+    @objc private func typed(_ key: Key) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        let straight = key.output == "\u{2019}" && textDocumentProxy.smartQuotesType == .no
+        textDocumentProxy.insertText(straight ? "'" : key.output)
+    }
+
+    @objc private func deleteDown() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        textDocumentProxy.deleteBackward()
+        deleteRepeat?.invalidate()
+        deleteRepeat = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self] _ in
+            self?.deleteRepeat = Timer.scheduledTimer(withTimeInterval: 0.09, repeats: true) { _ in
+                self?.textDocumentProxy.deleteBackward()
+            }
+        }
+    }
+
+    @objc private func deleteUp() {
+        deleteRepeat?.invalidate()
+        deleteRepeat = nil
+    }
+
     // MARK: Drawing
 
     private func render() {
         let phase: SessionState.Phase = looksAlive ? state.phase : .off
         let talking = phase == .recording || phase == .transcribing
-        page.isHidden = !talking
-        cancel.isHidden = !talking
-        globe.isHidden = talking || !needsInputModeSwitchKey
         let message = hasFullAccess ? note ?? state.problem : "Allow Full Access"
-        mic.show(phase, message: message, wordsAbove: !wordsInField)
+        bar.show(phase, message: message, since: state.since)
+        cancel.isHidden = phase != .recording
+        finishArea.isHidden = !talking
+        let wordsHere = talking && !wordsInField
+        page.isHidden = !wordsHere
+        keys.isHidden = wordsHere
+        keys.alpha = talking ? 0.35 : 1
+        globe.isHidden = !needsInputModeSwitchKey
         page.show(phase)
     }
 
     private func layout() {
         guard let root = view else { return }
-        let height = root.heightAnchor.constraint(equalToConstant: 284)
+        let height = root.heightAnchor.constraint(equalToConstant: 262)
         height.priority = .defaultHigh
         height.isActive = true
 
-        mic.addTarget(self, action: #selector(micDown), for: .touchDown)
-        mic.addTarget(self, action: #selector(micUp), for: [.touchUpInside, .touchUpOutside, .touchCancel])
+        for control in [bar, finishArea] as [UIControl] {
+            control.addTarget(self, action: #selector(micDown), for: .touchDown)
+            control.addTarget(self, action: #selector(micUp), for: [.touchUpInside, .touchUpOutside, .touchCancel])
+        }
         cancel.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
         globe.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
-        globe.setImage(UIImage(systemName: "globe"), for: .normal)
-        globe.tintColor = Ink.onFaceDim
-        globe.accessibilityLabel = "Next keyboard"
 
-        // The button lies under the page, so a tap anywhere on the keyboard ends the take.
-        for child in [mic, page, cancel, globe] as [UIView] {
+        let marks = [".", ",", "?", "!", "\u{2019}"].map { Key(title: $0) }
+        let delete = Key(symbol: "delete.left", label: "Delete")
+        let space = Key(label: "Space", output: " ")
+        let enter = Key(symbol: "return.left", label: "Return", output: "\n")
+        for key in marks + [space, enter] { key.addTarget(self, action: #selector(typed(_:)), for: .touchUpInside) }
+        delete.addTarget(self, action: #selector(deleteDown), for: .touchDown)
+        delete.addTarget(self, action: #selector(deleteUp), for: [.touchUpInside, .touchUpOutside, .touchCancel])
+
+        let upper = UIStackView(arrangedSubviews: marks + [delete])
+        upper.distribution = .fillEqually
+        let lower = UIStackView(arrangedSubviews: [globe, space, enter])
+        for row in [upper, lower] {
+            row.spacing = 6
+            row.heightAnchor.constraint(equalToConstant: 46).isActive = true
+            keys.addArrangedSubview(row)
+        }
+        keys.axis = .vertical
+        keys.spacing = 8
+
+        // The finish area lies over the faint keys, so a tap there ends the take too.
+        for child in [bar, keys, finishArea, page, cancel] as [UIView] {
             child.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(child)
         }
         NSLayoutConstraint.activate([
-            mic.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
-            mic.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
-            mic.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
-            mic.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -6),
+            bar.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
+            bar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            bar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
 
-            page.topAnchor.constraint(equalTo: mic.topAnchor),
-            page.leadingAnchor.constraint(equalTo: mic.leadingAnchor),
-            page.trailingAnchor.constraint(equalTo: mic.trailingAnchor),
-            page.bottomAnchor.constraint(equalTo: mic.bottomAnchor, constant: -(BigButton.doneHeight + 8)),
+            keys.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 8),
+            keys.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
+            keys.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
+            keys.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
+            globe.widthAnchor.constraint(equalToConstant: 46),
+            enter.widthAnchor.constraint(equalToConstant: 116),
 
-            cancel.topAnchor.constraint(equalTo: page.topAnchor, constant: 8),
-            cancel.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 8),
-            cancel.widthAnchor.constraint(equalToConstant: 34),
-            cancel.heightAnchor.constraint(equalToConstant: 34),
+            finishArea.topAnchor.constraint(equalTo: keys.topAnchor),
+            finishArea.leadingAnchor.constraint(equalTo: keys.leadingAnchor),
+            finishArea.trailingAnchor.constraint(equalTo: keys.trailingAnchor),
+            finishArea.bottomAnchor.constraint(equalTo: keys.bottomAnchor),
 
-            globe.leadingAnchor.constraint(equalTo: mic.leadingAnchor, constant: 8),
-            globe.bottomAnchor.constraint(equalTo: mic.bottomAnchor, constant: -8),
-            globe.widthAnchor.constraint(equalToConstant: 44),
-            globe.heightAnchor.constraint(equalToConstant: 44),
+            page.topAnchor.constraint(equalTo: keys.topAnchor),
+            page.leadingAnchor.constraint(equalTo: keys.leadingAnchor),
+            page.trailingAnchor.constraint(equalTo: keys.trailingAnchor),
+            page.bottomAnchor.constraint(equalTo: keys.bottomAnchor),
+
+            cancel.topAnchor.constraint(equalTo: bar.topAnchor, constant: 3),
+            cancel.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 3),
+            cancel.widthAnchor.constraint(equalToConstant: 44),
+            cancel.heightAnchor.constraint(equalToConstant: 44),
         ])
     }
 }
@@ -404,76 +462,86 @@ enum Spacing {
     }
 }
 
+/// The system keyboard's own key colours, so the bar and the keys read as one keyboard.
 private enum Ink {
-    static let face = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.23, alpha: 1) : UIColor(white: 0.88, alpha: 1) }
-    static let onFace = UIColor { $0.userInterfaceStyle == .dark ? .white : UIColor(white: 0.11, alpha: 1) }
-    static let onFaceDim = onFace.withAlphaComponent(0.6)
+    static let key = UIColor {
+        $0.userInterfaceStyle == .dark ? UIColor(red: 0.345, green: 0.345, blue: 0.357, alpha: 1) : .white
+    }
+    static let keyDown = UIColor {
+        $0.userInterfaceStyle == .dark ? UIColor(white: 0.24, alpha: 1) : UIColor(red: 0.7, green: 0.72, blue: 0.76, alpha: 1)
+    }
+    static let edge = UIColor { UIColor(white: 0, alpha: $0.userInterfaceStyle == .dark ? 0.4 : 0.16) }
+    static let mark = UIColor { $0.userInterfaceStyle == .dark ? .white : UIColor(white: 0.11, alpha: 1) }
+    static let markDim = mark.withAlphaComponent(0.6)
 }
 
-/// The one large control, from the first tap to the last. It always covers the
-/// whole keyboard, so a thumb that started a take can end it without looking.
-final class BigButton: UIControl {
-    private static let discSize: CGFloat = 76
-    static let doneHeight: CGFloat = 92
+/// A rounded face with the one-point lower edge that system keys have.
+private func keyFace(radius: CGFloat, in control: UIControl) -> UIView {
+    let edge = UIView()
+    let face = UIView()
+    for (view, color) in [(edge, Ink.edge), (face, Ink.key)] {
+        view.backgroundColor = color
+        view.layer.cornerRadius = radius
+        view.layer.cornerCurve = .continuous
+        view.isUserInteractionEnabled = false
+        view.translatesAutoresizingMaskIntoConstraints = false
+        control.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: control.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: control.trailingAnchor),
+            view.topAnchor.constraint(equalTo: control.topAnchor, constant: view === edge ? 1 : 0),
+            view.bottomAnchor.constraint(equalTo: control.bottomAnchor, constant: view === edge ? 1 : 0),
+        ])
+    }
+    return face
+}
 
-    private let face = UIView()
-    private let content = UIStackView()
-    private let mark = UIView()
-    private let disc = UIView()
+/// Start, then Done. It keeps its place and colour through a take, so what
+/// changes is what it says, the clock in its corner, and the keys going faint.
+final class StartBar: UIControl {
+    private var face: UIView!
+    private let middle = UIStackView()
     private let glyph = UIImageView()
-    private let spinner = UIActivityIndicatorView(style: .medium)
     private let label = UILabel()
-    private let lower = UILayoutGuide()
-    private var lowerWhole: NSLayoutConstraint!
-    private var lowerPart: NSLayoutConstraint!
+    private let spinner = UIActivityIndicatorView(style: .medium)
+    private let corner = UIStackView()
+    private let clock = UILabel()
+    private let meter = Meter()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        face.backgroundColor = Ink.face
-        face.layer.cornerRadius = 24
-        face.layer.cornerCurve = .continuous
-        disc.backgroundColor = Ink.onFace.withAlphaComponent(0.16)
-        disc.layer.cornerRadius = Self.discSize / 2
+        face = keyFace(radius: 16, in: self)
+        glyph.tintColor = Ink.mark
         glyph.contentMode = .scaleAspectFit
-        glyph.tintColor = Ink.onFace
-        spinner.hidesWhenStopped = true
-        spinner.color = Ink.onFace
+        label.textColor = Ink.mark
         label.numberOfLines = 2
         label.textAlignment = .center
-        label.font = .systemFont(ofSize: 15, weight: .medium)
-        label.textColor = Ink.onFace
-        content.axis = .vertical
-        content.alignment = .center
-        content.spacing = 4
-        for child in [mark, label] as [UIView] { content.addArrangedSubview(child) }
-        addLayoutGuide(lower)
-        for child in [face, content] as [UIView] {
+        clock.textColor = Ink.mark
+        clock.font = .monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
+        spinner.color = Ink.mark
+        spinner.hidesWhenStopped = true
+        middle.axis = .horizontal
+        middle.alignment = .center
+        middle.spacing = 8
+        [glyph, label].forEach(middle.addArrangedSubview)
+        corner.axis = .horizontal
+        corner.alignment = .center
+        corner.spacing = 8
+        [clock, meter].forEach(corner.addArrangedSubview)
+        for child in [middle, spinner, corner] as [UIView] {
             child.translatesAutoresizingMaskIntoConstraints = false
             child.isUserInteractionEnabled = false
             addSubview(child)
         }
-        for child in [disc, glyph, spinner] as [UIView] {
-            child.translatesAutoresizingMaskIntoConstraints = false
-            mark.addSubview(child)
-            child.centerXAnchor.constraint(equalTo: mark.centerXAnchor).isActive = true
-            child.centerYAnchor.constraint(equalTo: mark.centerYAnchor).isActive = true
-        }
-        lowerWhole = lower.topAnchor.constraint(equalTo: topAnchor)
-        lowerPart = lower.heightAnchor.constraint(equalToConstant: Self.doneHeight)
         NSLayoutConstraint.activate([
-            lowerWhole,
-            face.topAnchor.constraint(equalTo: topAnchor),
-            face.leadingAnchor.constraint(equalTo: leadingAnchor),
-            face.trailingAnchor.constraint(equalTo: trailingAnchor),
-            face.bottomAnchor.constraint(equalTo: bottomAnchor),
-            lower.bottomAnchor.constraint(equalTo: bottomAnchor),
-            content.centerXAnchor.constraint(equalTo: centerXAnchor),
-            content.centerYAnchor.constraint(equalTo: lower.centerYAnchor),
-            content.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
-            mark.widthAnchor.constraint(equalToConstant: Self.discSize),
-            mark.heightAnchor.constraint(equalToConstant: Self.discSize),
-            disc.widthAnchor.constraint(equalToConstant: Self.discSize),
-            disc.heightAnchor.constraint(equalToConstant: Self.discSize),
+            middle.centerXAnchor.constraint(equalTo: centerXAnchor),
+            middle.centerYAnchor.constraint(equalTo: centerYAnchor),
+            middle.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
+            spinner.centerXAnchor.constraint(equalTo: centerXAnchor),
+            spinner.centerYAnchor.constraint(equalTo: centerYAnchor),
+            corner.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            corner.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            corner.heightAnchor.constraint(equalToConstant: 28),
         ])
         isAccessibilityElement = true
         accessibilityTraits = .button
@@ -482,48 +550,149 @@ final class BigButton: UIControl {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     /// `message` is for what a tap alone will not fix. Everything else goes unsaid.
-    func show(_ phase: SessionState.Phase, message: String?, wordsAbove: Bool) {
-        let talking = phase == .recording || phase == .transcribing
-        lowerWhole.isActive = false
-        lowerPart.isActive = false
-        (talking && wordsAbove ? lowerPart : lowerWhole).isActive = true
-
-        disc.isHidden = !talking
-        glyph.isHidden = phase == .transcribing
+    func show(_ phase: SessionState.Phase, message: String?, since: Date?) {
+        middle.isHidden = phase == .transcribing
+        corner.isHidden = phase != .recording
         if phase == .transcribing { spinner.startAnimating() } else { spinner.stopAnimating() }
-        label.text = talking ? nil : message
-        label.isHidden = label.text == nil
+        var font = UIFont.systemFont(ofSize: 20, weight: .semibold)
         switch phase {
         case .off, .armed:
             glyph.image = UIImage(systemName: message == nil ? "mic.fill" : "mic.slash")
-            glyph.preferredSymbolConfiguration = .init(pointSize: 40, weight: .medium)
+            label.text = message ?? "Start"
+            if message != nil { font = .systemFont(ofSize: 15, weight: .medium) }
             accessibilityLabel = message ?? "Start dictation"
         case .recording:
             glyph.image = UIImage(systemName: "checkmark")
-            glyph.preferredSymbolConfiguration = .init(pointSize: 30, weight: .semibold)
+            label.text = "Done"
             accessibilityLabel = "Finish"
         case .transcribing:
             accessibilityLabel = "Writing"
         }
+        label.font = font
+        glyph.preferredSymbolConfiguration = .init(pointSize: 20, weight: .semibold)
+        if phase == .recording {
+            let seconds = max(0, Int(Date().timeIntervalSince(since ?? Date())))
+            clock.text = String(format: "%d:%02d", seconds / 60, seconds % 60)
+            meter.start()
+        } else {
+            meter.stop()
+        }
+    }
+
+    func stop() {
+        meter.stop()
     }
 
     override var isHighlighted: Bool {
-        didSet { face.alpha = isHighlighted ? 0.8 : 1 }
+        didSet { face.backgroundColor = isHighlighted ? Ink.keyDown : Ink.key }
     }
 }
 
-/// A small meter, and the words so far when the field cannot hold them. It takes
-/// no touches, so they reach the button.
+/// A punctuation, space, return, delete or globe key.
+final class Key: UIControl {
+    let output: String
+    private var face: UIView!
+
+    init(title: String? = nil, symbol: String? = nil, label: String? = nil, output: String? = nil) {
+        self.output = output ?? title ?? ""
+        super.init(frame: .zero)
+        face = keyFace(radius: 10, in: self)
+        let content: UIView
+        if let symbol {
+            let image = UIImageView(image: UIImage(systemName: symbol))
+            image.tintColor = Ink.mark
+            image.preferredSymbolConfiguration = .init(pointSize: 19, weight: .regular)
+            content = image
+        } else {
+            let text = UILabel()
+            text.text = title
+            text.textColor = Ink.mark
+            text.font = .systemFont(ofSize: 24)
+            content = text
+        }
+        content.translatesAutoresizingMaskIntoConstraints = false
+        content.isUserInteractionEnabled = false
+        addSubview(content)
+        content.centerXAnchor.constraint(equalTo: centerXAnchor).isActive = true
+        content.centerYAnchor.constraint(equalTo: centerYAnchor).isActive = true
+        isAccessibilityElement = true
+        accessibilityTraits = .keyboardKey
+        accessibilityLabel = label ?? title
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override var isHighlighted: Bool {
+        didSet { face.backgroundColor = isHighlighted ? Ink.keyDown : Ink.key }
+    }
+
+    // Half the gap on each side, so a tap between two keys still lands on one.
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        bounds.insetBy(dx: -3, dy: -4).contains(point)
+    }
+}
+
+/// How loud the microphone hears you, from the level the app writes.
+final class Meter: UIStackView {
+    private var heights: [NSLayoutConstraint] = []
+    private var levels = [Float](repeating: 0, count: 7)
+    private var link: CADisplayLink?
+    private var frames = 0
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        axis = .horizontal
+        alignment = .center
+        spacing = 3
+        for _ in levels {
+            let bar = UIView()
+            bar.layer.cornerRadius = 1.5
+            bar.backgroundColor = Ink.mark.withAlphaComponent(0.75)
+            bar.translatesAutoresizingMaskIntoConstraints = false
+            bar.widthAnchor.constraint(equalToConstant: 3).isActive = true
+            let height = bar.heightAnchor.constraint(equalToConstant: 3)
+            height.isActive = true
+            heights.append(height)
+            addArrangedSubview(bar)
+        }
+        heightAnchor.constraint(equalToConstant: 24).isActive = true
+    }
+
+    required init(coder: NSCoder) { fatalError("not used") }
+
+    func start() {
+        guard link == nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(tick))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    func stop() {
+        link?.invalidate()
+        link = nil
+        levels = [Float](repeating: 0, count: levels.count)
+        heights.forEach { $0.constant = 3 }
+    }
+
+    @objc private func tick() {
+        frames += 1
+        guard frames % 2 == 0 else { return }
+        levels.removeFirst()
+        levels.append(Bridge.readLevel())
+        for (index, height) in heights.enumerated() {
+            height.constant = 3 + CGFloat(levels[index]) * 19
+        }
+    }
+}
+
+/// The words so far, over the faint keys, when the field cannot hold them. It
+/// takes no touches, so they reach the finish area below.
 final class LivePage: UIView {
     private let clip = UIView()
     private let words = UILabel()
     private let fade = CAGradientLayer()
-    private let meter = UIStackView()
-    private let bars = (0..<9).map { _ in UIView() }
-    private var heights: [NSLayoutConstraint] = []
-    private var levels = [Float](repeating: 0, count: 9)
     private var link: CADisplayLink?
-    private var frames = 0
     private var shown = ""
     /// UTF-16 length of the part that has not changed since the last preview.
     private var settled = 0
@@ -540,34 +709,15 @@ final class LivePage: UIView {
         fade.locations = [0, 1]
         clip.layer.mask = fade
         words.numberOfLines = 0
-
-        bars.forEach(meter.addArrangedSubview)
-        meter.axis = .horizontal
-        meter.alignment = .center
-        meter.spacing = 3
-        for bar in bars {
-            bar.layer.cornerRadius = 1.5
-            bar.backgroundColor = Ink.onFace.withAlphaComponent(0.75)
-            bar.translatesAutoresizingMaskIntoConstraints = false
-            bar.widthAnchor.constraint(equalToConstant: 3).isActive = true
-            let height = bar.heightAnchor.constraint(equalToConstant: 3)
-            height.isActive = true
-            heights.append(height)
-        }
-        for child in [clip, meter] as [UIView] {
-            child.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(child)
-        }
+        clip.translatesAutoresizingMaskIntoConstraints = false
         words.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(clip)
         clip.addSubview(words)
         NSLayoutConstraint.activate([
-            meter.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            meter.heightAnchor.constraint(equalToConstant: 34),
-            meter.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            clip.topAnchor.constraint(equalTo: topAnchor, constant: 42),
-            clip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            clip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            clip.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            clip.topAnchor.constraint(equalTo: topAnchor),
+            clip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            clip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            clip.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
             words.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
             words.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
             words.bottomAnchor.constraint(equalTo: clip.bottomAnchor),
@@ -585,7 +735,6 @@ final class LivePage: UIView {
 
     func show(_ phase: SessionState.Phase) {
         writing = phase == .transcribing
-        meter.isHidden = writing
         if phase == .recording || writing { start() } else { stop() }
         paint()
     }
@@ -611,7 +760,7 @@ final class LivePage: UIView {
 
     private func paint() {
         let font = UIFont.systemFont(ofSize: 17)
-        let ink = Ink.onFace
+        let ink = Ink.mark
         let base = ink.withAlphaComponent(writing ? 0.5 : 1)
         let text = NSMutableAttributedString(string: shown, attributes: [.font: font, .foregroundColor: base])
         if let started = fadeStarted {
@@ -637,19 +786,10 @@ final class LivePage: UIView {
     func stop() {
         link?.invalidate()
         link = nil
-        levels = [Float](repeating: 0, count: levels.count)
-        heights.forEach { $0.constant = 3 }
     }
 
     @objc private func tick() {
-        frames += 1
         if fadeStarted != nil { paint() }
-        guard frames % 2 == 0 else { return }
-        levels.removeFirst()
-        levels.append(writing ? 0 : Bridge.readLevel())
-        for (index, height) in heights.enumerated() {
-            height.constant = 3 + CGFloat(levels[index]) * 19
-        }
     }
 }
 
@@ -658,7 +798,7 @@ final class CloseButton: UIControl {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        glyph.tintColor = Ink.onFaceDim
+        glyph.tintColor = Ink.markDim
         glyph.preferredSymbolConfiguration = .init(pointSize: 15, weight: .bold)
         glyph.translatesAutoresizingMaskIntoConstraints = false
         glyph.isUserInteractionEnabled = false

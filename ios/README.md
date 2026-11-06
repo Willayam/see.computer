@@ -26,7 +26,7 @@ To use your Mac dictionary, tap **Use the dictionary from your Mac** in the app 
 
 ## Using it
 
-The whole keyboard is one button. Tap it, talk, then tap anywhere on it. Or hold it, talk, and let go. The X cancels. It has no space, delete or return key, so switch to another keyboard for those.
+Tap **Start**, talk, then tap **Done**. Or hold Start, talk, and let go. While you talk, the keys go faint and a tap on them also finishes. The X cancels. Below Start are punctuation, delete, space and return. For letters, switch to another keyboard.
 
 The words appear in the text field as you talk, underlined until the take is done, and the final text replaces them. If a field stops holding them, because the cursor moved, the rest show on the keyboard. A take you walk away from replaces its words if you are back within 10 seconds. After that the words come out of the field and the take stays in the app's history.
 

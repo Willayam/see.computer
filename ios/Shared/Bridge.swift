@@ -9,6 +9,8 @@ struct SessionState: Codable, Equatable {
     var phase: Phase = .off
     var take: Take?
     var problem: String?
+    /// When the take being recorded started, for the keyboard's clock.
+    var since: Date?
 }
 
 struct Take: Codable, Equatable {

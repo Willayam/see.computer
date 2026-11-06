@@ -267,6 +267,7 @@ final class Session: ObservableObject {
         }
         state.phase = .recording
         state.problem = nil
+        state.since = Date()
         publish()
         watchKeyboard()
     }
