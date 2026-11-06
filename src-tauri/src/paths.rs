@@ -54,6 +54,12 @@ pub fn saved() -> PathBuf {
     app_support().join("saved")
 }
 
+/// Audio of the latest dictations that came back without words, kept so the
+/// cause can be heard.
+pub fn empty_takes() -> PathBuf {
+    app_support().join("empty-takes")
+}
+
 /// Where history goes when macOS denies Documents.
 pub fn history_fallback() -> PathBuf {
     app_support().join("history")

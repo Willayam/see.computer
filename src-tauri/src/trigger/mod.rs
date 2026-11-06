@@ -119,8 +119,32 @@ enum Locked {
     Inert,
 }
 
+/// Why a trigger press that was held never became a take. Logged so a press
+/// that "did nothing" can be told apart from one the user cut short.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ignored {
+    /// Another key went down before the hold threshold, so it was a shortcut.
+    KeyDown,
+    /// Command, Control or Fn was down with the trigger.
+    OtherModifier,
+    /// Held past the threshold, but no tick ran before the release to open it.
+    NoTick,
+}
+
+impl Ignored {
+    pub fn label(self) -> &'static str {
+        match self {
+            Ignored::KeyDown => "HoldIgnoredKeyDown",
+            Ignored::OtherModifier => "HoldIgnoredModifier",
+            Ignored::NoTick => "HoldIgnoredNoTick",
+        }
+    }
+}
+
 pub struct Decoder {
     trigger: Trigger,
+    /// This press of the trigger has already logged its other modifier.
+    other_noted: bool,
     arming_since: Option<Instant>,
     take: Take,
     /// A trigger press that came up before [`HOLD_THRESHOLD`], so it opened no
@@ -153,6 +177,7 @@ impl Decoder {
     pub fn new(trigger: Trigger) -> Self {
         Self {
             trigger,
+            other_noted: false,
             arming_since: None,
             take: Take::Off,
             tapped_at: None,
@@ -167,6 +192,7 @@ impl Decoder {
 
     pub fn set_trigger(&mut self, trigger: Trigger) {
         self.trigger = trigger;
+        self.other_noted = false;
         self.arming_since = None;
         self.take = Take::Off;
         self.tapped_at = None;
@@ -185,9 +211,12 @@ impl Decoder {
             Input::KeyDown(GLOBE_TAP_KEY) => Vec::new(),
             Input::KeyDown(_) => {
                 if !self.dictating() {
-                    self.arming_since = None;
+                    let was_arming = self.arming_since.take().is_some();
                     self.tapped_at = None;
                     self.arm_locks = false;
+                    if was_arming {
+                        return vec![Msg::HoldIgnored(Ignored::KeyDown)];
+                    }
                 }
                 // The trigger is down during a locked take and a key went with
                 // it, so it was the modifier of a shortcut. Neither stop nor
@@ -236,11 +265,19 @@ impl Decoder {
         if other_held && matches!(self.take, Take::Locked(Locked::Pressed(_))) {
             self.take = Take::Locked(Locked::Inert);
         }
+        let mut noted = Vec::new();
+        if !mod_held {
+            self.other_noted = false;
+        } else if other_held && !self.other_noted && !self.dictating() {
+            self.other_noted = true;
+            noted.push(Msg::HoldIgnored(Ignored::OtherModifier));
+        }
 
-        let out = match self.take {
+        let mut out = match self.take {
             Take::Locked(_) => self.locked_flags(session_held, shift_held, now),
             _ => self.open_flags(session_held, shift_held, now),
         };
+        out.extend(noted);
         // Stored last, so the handlers above can still see the Shift that was
         // down before this edge as well as the one after it.
         self.shift_held = shift_held;
@@ -259,6 +296,8 @@ impl Decoder {
                         return self.lock();
                     }
                     self.tapped_at = Some(now);
+                } else {
+                    out.push(Msg::HoldIgnored(Ignored::NoTick));
                 }
             }
             self.arm_locks = false;
@@ -755,8 +794,23 @@ mod tests {
         let start = Instant::now();
         let mut decoder = Decoder::new(Trigger::LeftOption);
         assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), start)).is_empty());
-        assert!(out(&decoder.step(Input::KeyDown(0), after(start, 50))).is_empty());
+        assert_eq!(
+            out(&decoder.step(Input::KeyDown(0), after(start, 50))),
+            ["HoldIgnoredKeyDown"]
+        );
         assert!(out(&decoder.step(Input::Tick, after(start, 300))).is_empty());
+    }
+
+    #[test]
+    fn a_hold_released_before_any_tick_says_so() {
+        let start = Instant::now();
+        let mut decoder = Decoder::new(Trigger::LeftOption);
+        assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), start)).is_empty());
+        assert_eq!(
+            out(&decoder.step(Input::Flags(0), after(start, 900))),
+            ["HoldIgnoredNoTick"]
+        );
+        assert!(!decoder.dictating());
     }
 
     #[test]
@@ -780,6 +834,10 @@ mod tests {
         let start = Instant::now();
         for other in [COMMAND, CONTROL, FN] {
             let mut decoder = Decoder::new(Trigger::LeftOption);
+            assert_eq!(
+                out(&decoder.step(Input::Flags(LEFT_OPTION | other), start)),
+                ["HoldIgnoredModifier"]
+            );
             assert!(out(&decoder.step(Input::Flags(LEFT_OPTION | other), start)).is_empty());
             assert!(out(&decoder.step(Input::Tick, after(start, 180))).is_empty());
         }
