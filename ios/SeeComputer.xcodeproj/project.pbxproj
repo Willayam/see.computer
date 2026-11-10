@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		5EEC0000000000000000000C /* Keyboard.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 5EEC0000000000000000000B /* Keyboard.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		5EEC00000000000000000021 /* Island.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 5EEC00000000000000000020 /* Island.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -17,6 +18,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = 5EEC00000000000000000009;
 			remoteInfo = Keyboard;
+		};
+		5EEC00000000000000000022 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5EEC00000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5EEC00000000000000000026;
+			remoteInfo = Island;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -28,6 +36,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				5EEC0000000000000000000C /* Keyboard.appex in Embed Foundation Extensions */,
+				5EEC00000000000000000021 /* Island.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -37,17 +46,21 @@
 /* Begin PBXFileReference section */
 		5EEC0000000000000000000A /* see.computer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "see.computer.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		5EEC0000000000000000000B /* Keyboard.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = Keyboard.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		5EEC00000000000000000020 /* Island.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = Island.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		5EEC00000000000000000004 /* App */ = {isa = PBXFileSystemSynchronizedRootGroup; path = App; sourceTree = "<group>"; };
 		5EEC00000000000000000005 /* Keyboard */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Keyboard; sourceTree = "<group>"; };
 		5EEC00000000000000000006 /* Shared */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Shared; sourceTree = "<group>"; };
+		5EEC00000000000000000024 /* Island */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Island; sourceTree = "<group>"; };
+		5EEC00000000000000000025 /* Activity */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Activity; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		5EEC0000000000000000000F /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		5EEC00000000000000000010 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		5EEC00000000000000000028 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -57,6 +70,8 @@
 				5EEC00000000000000000004 /* App */,
 				5EEC00000000000000000005 /* Keyboard */,
 				5EEC00000000000000000006 /* Shared */,
+				5EEC00000000000000000025 /* Activity */,
+				5EEC00000000000000000024 /* Island */,
 				5EEC00000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -66,6 +81,7 @@
 			children = (
 				5EEC0000000000000000000A /* see.computer.app */,
 				5EEC0000000000000000000B /* Keyboard.appex */,
+				5EEC00000000000000000020 /* Island.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -86,10 +102,12 @@
 			buildRules = ();
 			dependencies = (
 				5EEC00000000000000000015 /* PBXTargetDependency */,
+				5EEC00000000000000000023 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				5EEC00000000000000000004 /* App */,
 				5EEC00000000000000000006 /* Shared */,
+				5EEC00000000000000000025 /* Activity */,
 			);
 			name = "see.computer";
 			productName = "see.computer";
@@ -113,6 +131,25 @@
 			name = Keyboard;
 			productName = Keyboard;
 			productReference = 5EEC0000000000000000000B;
+			productType = "com.apple.product-type.app-extension";
+		};
+		5EEC00000000000000000026 /* Island */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5EEC0000000000000000002A;
+			buildPhases = (
+				5EEC00000000000000000027 /* Sources */,
+				5EEC00000000000000000028 /* Frameworks */,
+				5EEC00000000000000000029 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			fileSystemSynchronizedGroups = (
+				5EEC00000000000000000024 /* Island */,
+				5EEC00000000000000000025 /* Activity */,
+			);
+			name = Island;
+			productName = Island;
+			productReference = 5EEC00000000000000000020;
 			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
@@ -139,6 +176,7 @@
 			targets = (
 				5EEC00000000000000000008 /* see.computer */,
 				5EEC00000000000000000009 /* Keyboard */,
+				5EEC00000000000000000026 /* Island */,
 			);
 		};
 /* End PBXProject section */
@@ -146,6 +184,7 @@
 /* Begin PBXResourcesBuildPhase section */
 		5EEC00000000000000000014 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		5EEC00000000000000000018 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		5EEC00000000000000000029 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
@@ -167,6 +206,7 @@
 /* Begin PBXSourcesBuildPhase section */
 		5EEC00000000000000000013 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		5EEC00000000000000000017 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		5EEC00000000000000000027 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -174,6 +214,11 @@
 			isa = PBXTargetDependency;
 			target = 5EEC00000000000000000009 /* Keyboard */;
 			targetProxy = 5EEC0000000000000000000D /* PBXContainerItemProxy */;
+		};
+		5EEC00000000000000000023 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5EEC00000000000000000026 /* Island */;
+			targetProxy = 5EEC00000000000000000022 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -301,12 +346,41 @@
 			};
 			name = Release;
 		};
+		5EEC0000000000000000002B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Config/Island-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
+				PRODUCT_BUNDLE_IDENTIFIER = computer.see.ios.island;
+				PRODUCT_NAME = Island;
+				SKIP_INSTALL = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+			};
+			name = Debug;
+		};
+		5EEC0000000000000000002C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Config/Island-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
+				PRODUCT_BUNDLE_IDENTIFIER = computer.see.ios.island;
+				PRODUCT_NAME = Island;
+				SKIP_INSTALL = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
 		5EEC00000000000000000019 = {isa = XCConfigurationList; buildConfigurations = (5EEC0000000000000000001A /* Debug */, 5EEC0000000000000000001B /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		5EEC00000000000000000011 = {isa = XCConfigurationList; buildConfigurations = (5EEC0000000000000000001C /* Debug */, 5EEC0000000000000000001D /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		5EEC00000000000000000016 = {isa = XCConfigurationList; buildConfigurations = (5EEC0000000000000000001E /* Debug */, 5EEC0000000000000000001F /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		5EEC0000000000000000002A = {isa = XCConfigurationList; buildConfigurations = (5EEC0000000000000000002B /* Debug */, 5EEC0000000000000000002C /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 	};
 	rootObject = 5EEC00000000000000000001 /* Project object */;

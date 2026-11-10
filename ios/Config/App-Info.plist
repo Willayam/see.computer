@@ -35,6 +35,8 @@
 	<false/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>see.computer turns what you say into text, on this iPhone.</string>
 	<key>UIApplicationSceneManifest</key>

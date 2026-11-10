@@ -30,7 +30,7 @@ Tap **Start**, talk, then tap **Done**. Or hold Start, talk, and let go. While y
 
 The words appear in the text field as you talk, underlined until the take is done, and the final text replaces them. If a field stops holding them, because the cursor moved, the rest show on the keyboard.
 
-Leaving the keyboard does not end a take. A take ends by itself after 5 minutes away from the keyboard. Its text replaces the words in its own field if you come back within 10 minutes. Sending a message while the words are still underlined also ends the take, and the final text is not typed again. If the app dies mid-take, the words stay in the field as plain text. Any other field gets a finished take only within 10 seconds, and the take stays in the app's history either way.
+Leaving the keyboard does not end a take. The Dynamic Island and the Lock Screen show the mic while it is on, with a clock and the mic level during a take. **Done** there finishes the take, and **Turn off mic** turns the mic off between takes. A take ends by itself after 5 minutes away from the keyboard. Its text replaces the words in its own field if you come back within 10 minutes. Sending a message while the words are still underlined also ends the take, and the final text is not typed again. If the app dies mid-take, the words stay in the field as plain text. Any other field gets a finished take only within 10 seconds, and the take stays in the app's history either way.
 
 iOS gives keyboards no microphone, so the app has to hold it. When the app is not already listening, the first tap opens it, turns the mic on, and comes straight back. Dictation starts when you land. After that the mic stays on in the background, with the orange dot showing, and later taps never leave the app you are in. **Keep the mic ready for** sets how long. A phone call turns it off, and the next tap brings it back the same way.
 
@@ -42,7 +42,7 @@ The keyboard hands over to the next keyboard in number, phone and email fields, 
 
 ## How it is built
 
-The app owns the microphone, the engine and `state.json` in the shared App Group folder. The keyboard reads that file and sends Darwin notifications (`start`, `stop`, `cancel`, `ping`, `away`, `sent`). It holds no audio and makes no decisions. It writes the words so far with `setMarkedText`, the call keyboards for Japanese use for text they have not committed. It decides whether the app is alive by whether a `ping` gets a `pong`, because a killed app cannot correct the file it left behind.
+The app owns the microphone, the engine and `state.json` in the shared App Group folder. The keyboard reads that file and sends Darwin notifications (`start`, `stop`, `cancel`, `ping`, `away`, `sent`). It holds no audio and makes no decisions. It writes the words so far with `setMarkedText`, the call keyboards for Japanese use for text they have not committed. It decides whether the app is alive by whether a `ping` gets a `pong`, because a killed app cannot correct the file it left behind. The `Island` widget extension draws the Live Activity, and only the app starts and updates it.
 
 `core/` is a small Rust crate that compiles the Mac's own source files by path: `engine/`, `boost.rs`, `vocabulary.rs`, `filler.rs`, `numbers.rs`, `text.rs`, `align.rs` and `qos.rs`. `core/src/seams.rs` stands in for the few Mac modules they reach into. A change to any of those files reaches both apps. CI builds this crate so a Mac change cannot break it unnoticed.
 

@@ -80,6 +80,7 @@ final class Session: ObservableObject {
         publish()
         guard !benching else { return }
         Diagnostics.log("app_launch", ["phase": state.phase.rawValue])
+        Island.endLeftovers()
 
         engine.onStage = { [weak self] stage in
             MainActor.assumeIsolated { self?.stageChanged(stage) }
@@ -103,6 +104,12 @@ final class Session: ObservableObject {
         Signals.observe(.sent) { [weak self] in MainActor.assumeIsolated { self?.fieldSent() } }
 
         let center = NotificationCenter.default
+        center.addObserver(forName: .finishFromIsland, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stopTake(by: "island") }
+        }
+        center.addObserver(forName: .turnOffFromIsland, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.turnOff() }
+        }
         center.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -485,5 +492,6 @@ final class Session: ObservableObject {
     private func publish() {
         Bridge.write(state, "state.json")
         Signals.post(.changed)
+        Island.show(state)
     }
 }
