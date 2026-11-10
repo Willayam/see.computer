@@ -26,6 +26,8 @@ final class KeyboardViewController: UIInputViewController {
     private var activatedAt = Date.distantPast
     /// False once the field has failed to hold the words, for the rest of the take.
     private var wordsInField = true
+    /// The field was sent mid-take, so hiding next is not the user walking away.
+    private var takeWasSent = false
 
     /// For the label only. A slow answer must not read as the app having died,
     /// so this is looser than the check a tap makes.
@@ -59,11 +61,17 @@ final class KeyboardViewController: UIInputViewController {
         super.viewWillDisappear(animated)
         hasLeft = true
         isActive = false
-        Diagnostics.log("keyboard_hidden", ["phase": state.phase.rawValue])
-        // Leaving must end a take. Otherwise a tapped one records what comes next.
-        if state.phase == .recording {
-            Diagnostics.log("stop_sent", ["by": "leaving"])
-            Signals.post(.stop)
+        Diagnostics.log(
+            "keyboard_hidden",
+            [
+                "phase": state.phase.rawValue, "has_text": textDocumentProxy.hasText,
+                "draft": Bridge.read(Draft.self, "draft.json") != nil,
+            ])
+        // A take goes on while the user looks elsewhere. The Dynamic Island shows it
+        // and can finish it. Sending the words is the one way of leaving that ends it.
+        if !endTakeIfFieldWasSent(), state.phase == .recording, !takeWasSent {
+            Diagnostics.log("away_sent")
+            Signals.post(.away)
         }
         heartbeat?.invalidate()
         heartbeat = nil
@@ -105,6 +113,26 @@ final class KeyboardViewController: UIInputViewController {
 
     override func textDidChange(_ textInput: UITextInput?) {
         switchAwayFromFieldsThatNeedTheirOwnKeys()
+        _ = endTakeIfFieldWasSent()
+    }
+
+    /// A chat app empties its field when it sends, live words included. Only the
+    /// field can say so, because a keyboard never sees the send button.
+    private func endTakeIfFieldWasSent() -> Bool {
+        guard state.phase == .recording || state.phase == .transcribing, wordsInField, !takeWasSent,
+            let draft = Bridge.read(Draft.self, "draft.json"), !textDocumentProxy.hasText
+        else { return false }
+        Diagnostics.log("sent_seen", ["phase": state.phase.rawValue, "chars": draft.text.count, "active": isActive])
+        takeWasSent = true
+        // The host can empty the field and still draw the words as marked. Once the
+        // keyboard has gone it cannot clear them, so the draft stays for its return.
+        if isActive {
+            _ = takeDraftBack()
+        } else {
+            markDraftDropped()
+        }
+        Signals.post(.sent)
+        return true
     }
 
     private func switchAwayFromFieldsThatNeedTheirOwnKeys() {
@@ -125,6 +153,7 @@ final class KeyboardViewController: UIInputViewController {
         let previous = state.phase
         state = read ?? SessionState()
         if state.phase != previous {
+            if state.phase == .recording { takeWasSent = false }
             Diagnostics.log(
                 "phase_seen",
                 ["from": previous.rawValue, "to": state.phase.rawValue, "problem": state.problem ?? "none"])
@@ -142,9 +171,16 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
         insertFinishedTake()
-        // A cancelled or failed take has no words to replace these with.
-        if state.phase != .recording, state.phase != .transcribing { _ = takeDraftBack() }
+        // A take that ended with no transcript has no words to replace these with.
+        if state.phase != .recording, state.phase != .transcribing,
+            let draft = Bridge.read(Draft.self, "draft.json")
+        {
+            if draft.dropped == true { _ = takeDraftBack() } else { keepDraft(draft) }
+        }
+        showWords()
     }
+
+    private var fieldHasSettled: Bool { Date().timeIntervalSince(activatedAt) >= Self.fieldSettles }
 
     /// The words go in the field, where the take will land, as marked text: what
     /// a keyboard for Japanese uses for text it has not committed yet. A field that
@@ -156,7 +192,9 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
         let words = Bridge.read(String.self, "words.json") ?? ""
-        if wordsInField, state.phase == .recording, isActive, !words.isEmpty, !putInField(words) {
+        if wordsInField, state.phase == .recording, !takeWasSent, isActive, fieldHasSettled, !words.isEmpty,
+            !putInField(words)
+        {
             Diagnostics.log("words_left_field", ["chars": words.count])
             wordsInField = false
             render()
@@ -170,14 +208,19 @@ final class KeyboardViewController: UIInputViewController {
         let last = Bridge.read(Draft.self, "draft.json")
         if let last {
             guard last.words != words else { return true }
-            // iOS leaves marked text out of the context, so this stays as it was
-            // unless the draft got committed or the cursor went elsewhere.
-            guard before == last.before, proxy.hasText else {
-                _ = takeDraftBack()
-                return false
+            if !Self.isMarked(last, before: before, in: proxy) {
+                guard Self.isCommitted(last, before: before) else {
+                    _ = takeDraftBack()
+                    return false
+                }
+                // iOS committed the words when the keyboard went away mid-take.
+                Diagnostics.log("draft_remarked", ["chars": last.text.count])
+                for _ in last.text { proxy.deleteBackward() }
             }
         }
-        let draft = Draft(before: before, spacing: last?.spacing ?? Spacing.prefix(before: before), words: words)
+        let draft = Draft(
+            before: last?.before ?? before, spacing: last?.spacing ?? Spacing.prefix(before: before), words: words,
+            dropped: last?.dropped)
         Bridge.write(draft, "draft.json")
         proxy.setMarkedText(draft.text, selectedRange: NSRange(location: (draft.text as NSString).length, length: 0))
         return true
@@ -187,10 +230,8 @@ final class KeyboardViewController: UIInputViewController {
         guard isActive, let draft = Bridge.read(Draft.self, "draft.json") else { return nil }
         Bridge.remove("draft.json")
         let proxy = textDocumentProxy
-        let before = proxy.documentContextBeforeInput
-        if before != draft.before, let before, Self.endsWith(before, draft.text) {
-            // Marked text is never in the context, so iOS committed this one when
-            // the keyboard went away, and it would stay behind the real take.
+        if Self.isCommitted(draft, before: proxy.documentContextBeforeInput) {
+            // It would stay behind the real take.
             Diagnostics.log("draft_cleared", ["how": "deleted", "chars": draft.text.count])
             for _ in draft.text { proxy.deleteBackward() }
             return draft
@@ -201,6 +242,42 @@ final class KeyboardViewController: UIInputViewController {
         proxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
         proxy.unmarkText()
         return draft
+    }
+
+    private func markDraftDropped() {
+        guard var draft = Bridge.read(Draft.self, "draft.json") else { return }
+        draft.dropped = true
+        Bridge.write(draft, "draft.json")
+    }
+
+    /// The live words are the only copy of a take the app never finished, so they stay.
+    private func keepDraft(_ draft: Draft) {
+        guard isActive else { return }
+        Bridge.remove("draft.json")
+        let proxy = textDocumentProxy
+        let before = proxy.documentContextBeforeInput
+        if Self.isMarked(draft, before: before, in: proxy) {
+            // A controller that did not set the mark has to set it before committing it.
+            proxy.setMarkedText(draft.text, selectedRange: NSRange(location: (draft.text as NSString).length, length: 0))
+            proxy.unmarkText()
+            Diagnostics.log("draft_kept", ["how": "committed", "chars": draft.text.count])
+        } else {
+            Diagnostics.log(
+                "draft_kept", ["how": Self.isCommitted(draft, before: before) ? "already" : "elsewhere", "chars": draft.text.count])
+        }
+    }
+
+    /// iOS leaves marked text out of the context, so it stays as it was unless the
+    /// draft got committed or the cursor went elsewhere.
+    private static func isMarked(_ draft: Draft, before: String?, in proxy: UITextDocumentProxy) -> Bool {
+        before == draft.before && proxy.hasText
+    }
+
+    /// Marked text is never in the context, so a context that ends in the draft
+    /// means iOS committed it, which it does to UIKit fields when the keyboard goes away.
+    private static func isCommitted(_ draft: Draft, before: String?) -> Bool {
+        guard let before, before != draft.before else { return false }
+        return endsWith(before, draft.text)
     }
 
     /// The context can be cut to the last few words, so this compares only the end.
@@ -215,14 +292,23 @@ final class KeyboardViewController: UIInputViewController {
         let inserted = Bridge.read(Int64.self, "inserted.json") ?? 0
         guard take.id > inserted else { return }
         Bridge.write(take.id, "inserted.json")
+        guard take.sent != true else {
+            Diagnostics.log("insert_skipped_sent", ["chars": take.text.count])
+            return
+        }
         let age = Date().timeIntervalSince(take.finished)
-        guard age < Bridge.insertWindow else {
+        let before = textDocumentProxy.documentContextBeforeInput
+        let inItsField = Bridge.read(Draft.self, "draft.json").map {
+            Self.isMarked($0, before: before, in: textDocumentProxy) || Self.isCommitted($0, before: before)
+        } ?? false
+        guard age < Bridge.insertWindow || (inItsField && age < Bridge.returnWindow) else {
             Diagnostics.log("insert_stale", ["age_s": age, "chars": take.text.count])
             return
         }
         let draft = takeDraftBack()
         let spacing = draft?.spacing ?? Spacing.prefix(before: textDocumentProxy.documentContextBeforeInput)
-        Diagnostics.log("inserted", ["chars": take.text.count, "age_s": age, "draft": draft != nil])
+        Diagnostics.log(
+            "inserted", ["chars": take.text.count, "age_s": age, "draft": draft != nil, "in_its_field": inItsField])
         textDocumentProxy.insertText(spacing + take.text)
     }
 
@@ -309,6 +395,7 @@ final class KeyboardViewController: UIInputViewController {
 
     @objc private func cancelTapped() {
         Diagnostics.log("cancel_sent", ["phase": state.phase.rawValue])
+        markDraftDropped()
         Signals.post(.cancel)
     }
 

@@ -54,6 +54,10 @@ final class Session: ObservableObject {
     private var takeTask = UIBackgroundTaskIdentifier.invalid
     private var lastPing = Date.distantPast
     private var keyboardWatch: Timer?
+    /// The keyboard hid mid-take on purpose, so its silence is not a crash.
+    private var keyboardAway = false
+    /// The user sent the live words, so the finished take must not be typed again.
+    private var takeSent = false
     /// Tells a tap from this app's own field apart from one that launched or resumed it.
     private var hasBeenInFront = false
     /// For the diagnostics log only.
@@ -63,6 +67,8 @@ final class Session: ObservableObject {
 
     /// A keyboard that stops pinging has gone: the user left, or it was killed.
     private static let keyboardGoneAfter: TimeInterval = 3
+    /// A take the user walked away from ends after this, in case they forgot it.
+    private static let awayLimit: TimeInterval = 5 * 60
 
     init(benching: Bool) {
         readyFor =
@@ -74,6 +80,7 @@ final class Session: ObservableObject {
         publish()
         guard !benching else { return }
         Diagnostics.log("app_launch", ["phase": state.phase.rawValue])
+        Island.endLeftovers()
 
         engine.onStage = { [weak self] stage in
             MainActor.assumeIsolated { self?.stageChanged(stage) }
@@ -93,8 +100,16 @@ final class Session: ObservableObject {
         Signals.observe(.start) { [weak self] in MainActor.assumeIsolated { self?.startTake() } }
         Signals.observe(.stop) { [weak self] in MainActor.assumeIsolated { self?.stopTake() } }
         Signals.observe(.cancel) { [weak self] in MainActor.assumeIsolated { self?.cancelTake() } }
+        Signals.observe(.away) { [weak self] in MainActor.assumeIsolated { self?.keyboardLeft() } }
+        Signals.observe(.sent) { [weak self] in MainActor.assumeIsolated { self?.fieldSent() } }
 
         let center = NotificationCenter.default
+        center.addObserver(forName: .finishFromIsland, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stopTake(by: "island") }
+        }
+        center.addObserver(forName: .turnOffFromIsland, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.turnOff() }
+        }
         center.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -252,6 +267,8 @@ final class Session: ObservableObject {
         }
         disarmAt?.cancel()
         Bridge.remove("words.json")
+        keyboardAway = false
+        takeSent = false
         // iOS can reclaim the memory-mapped weights while the app sits idle. As on
         // the Mac, page them back in during the take rather than after it.
         engine.warm()
@@ -278,6 +295,25 @@ final class Session: ObservableObject {
         guard state.phase == .recording else { return }
         Bridge.write(words, "words.json")
         Signals.post(.words)
+    }
+
+    private func keyboardLeft() {
+        guard state.phase == .recording else { return }
+        Diagnostics.log("keyboard_away")
+        keyboardAway = true
+    }
+
+    private func fieldSent() {
+        Diagnostics.log("field_sent", ["phase": state.phase.rawValue])
+        switch state.phase {
+        case .recording:
+            takeSent = true
+            stopTake(by: "sent")
+        case .transcribing:
+            takeSent = true
+        default:
+            break
+        }
     }
 
     private func stopTake(by cause: String = "keyboard") {
@@ -361,7 +397,8 @@ final class Session: ObservableObject {
                 "transcript_delivered",
                 ["words": trimmed.split(whereSeparator: \.isWhitespace).count, "chars": trimmed.count, "engine_ms": engineMs])
             let now = Date()
-            state.take = Take(id: Int64(now.timeIntervalSince1970 * 1000), text: trimmed, finished: now)
+            state.take = Take(
+                id: Int64(now.timeIntervalSince1970 * 1000), text: trimmed, finished: now, sent: takeSent ? true : nil)
             History.append(trimmed, at: now)
             recent = History.recent(limit: 30)
             settle(problem: nil)
@@ -393,8 +430,11 @@ final class Session: ObservableObject {
         lastPing = Date()
         keyboardWatch = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, Date().timeIntervalSince(self.lastPing) > Self.keyboardGoneAfter else { return }
-                Diagnostics.log("keyboard_gone", ["since_ping_s": Date().timeIntervalSince(self.lastPing)])
+                guard let self else { return }
+                let limit = self.keyboardAway ? Self.awayLimit : Self.keyboardGoneAfter
+                guard Date().timeIntervalSince(self.lastPing) > limit else { return }
+                Diagnostics.log(
+                    "keyboard_gone", ["since_ping_s": Date().timeIntervalSince(self.lastPing), "away": self.keyboardAway])
                 self.stopTake(by: "keyboard_gone")
             }
         }
@@ -452,5 +492,6 @@ final class Session: ObservableObject {
     private func publish() {
         Bridge.write(state, "state.json")
         Signals.post(.changed)
+        Island.show(state)
     }
 }
