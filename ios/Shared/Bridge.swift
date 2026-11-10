@@ -17,6 +17,9 @@ struct Take: Codable, Equatable {
     var id: Int64
     var text: String
     var finished: Date
+    /// The field was sent with the live words in it before this was written, so
+    /// typing it would add the message again.
+    var sent: Bool?
 }
 
 /// What the keyboard leaves behind when it has to open the app. Only the
@@ -34,6 +37,9 @@ struct Draft: Codable {
     var before: String?
     var spacing: String
     var words: String
+    /// The user cancelled or sent the take, so its words must go. Any other end
+    /// without a transcript, such as the app being killed, leaves them in the field.
+    var dropped: Bool?
 
     var text: String { spacing + words }
 }
@@ -41,7 +47,9 @@ struct Draft: Codable {
 /// Darwin notifications carry no payload. The receiver reads `state.json`, or
 /// `words.json` for `words`.
 enum Signal: String {
-    case start, stop, cancel, ping
+    /// `away`: the keyboard hid mid-take with the words still in the field.
+    /// `sent`: the field emptied with the words in it, so the user sent them.
+    case start, stop, cancel, ping, away, sent
     case changed, pong, words
 
     fileprivate var name: CFString { "computer.see.ios.\(rawValue)" as CFString }
@@ -54,6 +62,9 @@ enum Bridge {
     static let handoffWindow: TimeInterval = 15
     /// A finished take older than this is left in History, not typed into whatever is focused now.
     static let insertWindow: TimeInterval = 10
+    /// A take that ended while the keyboard was away still lands in the field it
+    /// started in, when the user comes back within this.
+    static let returnWindow: TimeInterval = 10 * 60
 
     private static var folder: URL? {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group)
