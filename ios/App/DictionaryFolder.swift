@@ -40,6 +40,29 @@ enum DictionaryFolder {
         }
     }
 
+    static func historyDays() -> [WordTally.Day] {
+        guard let bookmark = UserDefaults.standard.data(forKey: bookmarkKey) else {
+            #if targetEnvironment(simulator)
+            let fixture = Paths.documents.appendingPathComponent("mac-history", isDirectory: true)
+            if FileManager.default.fileExists(atPath: fixture.path) { return StatsStore.readDays(in: fixture) }
+            #endif
+            return []
+        }
+        var stale = false
+        guard let folder = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale) else { return [] }
+        let scoped = folder.startAccessingSecurityScopedResource()
+        defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
+        if stale, let fresh = try? folder.bookmarkData() {
+            UserDefaults.standard.set(fresh, forKey: bookmarkKey)
+        }
+        var days: [WordTally.Day] = []
+        var failure: NSError?
+        NSFileCoordinator().coordinate(readingItemAt: folder, options: [], error: &failure) { url in
+            days = StatsStore.readDays(in: url)
+        }
+        return days
+    }
+
     /// The whole file or nothing, so the engine never reads half a dictionary.
     private static func copy(_ source: URL, to destination: URL) {
         var failure: NSError?

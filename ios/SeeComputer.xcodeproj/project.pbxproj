@@ -352,6 +352,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Config/Island-Info.plist";
+				CODE_SIGN_ENTITLEMENTS = Config/Island.entitlements;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
 				PRODUCT_BUNDLE_IDENTIFIER = computer.see.ios.island;
 				PRODUCT_NAME = Island;
@@ -366,6 +367,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Config/Island-Info.plist";
+				CODE_SIGN_ENTITLEMENTS = Config/Island.entitlements;
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
 				PRODUCT_BUNDLE_IDENTIFIER = computer.see.ios.island;
 				PRODUCT_NAME = Island;
