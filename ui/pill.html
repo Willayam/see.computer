@@ -101,11 +101,78 @@
      counts toward the line's width. */
   #ighosts { position: absolute; left: 0; top: 0; }
   .ighost { position: absolute; top: 0; }
+  .medal { position: relative; flex: 0 0 52px; width: 52px; height: 52px; }
+  .medal svg { fill: none; position: absolute; inset: 0; width: 52px; height: 52px; overflow: visible; }
+  .medal .track { stroke: rgba(255, 255, 255, .14); stroke-width: 3; }
+  .medal .ring { stroke: #5ac8fa; stroke-width: 3; stroke-linecap: butt; stroke-dasharray: 100 200; }
+  .medal .mark { stroke: #fff; stroke-width: 1.6; transform-box: fill-box; transform-origin: center; }
+  .medal .ripple { stroke: #5ac8fa; stroke-width: 1.5; opacity: 0; transform-box: fill-box; transform-origin: center; }
+  .medal .rays { stroke: #5ac8fa; stroke-width: 2; stroke-dasharray: 7 30; stroke-dashoffset: -16; opacity: 0; }
+
+  .cel-text { min-width: 0; display: flex; flex-direction: column; }
+  .cel-top { display: flex; align-items: center; gap: 9px; font: 500 11px/14px -apple-system, system-ui; color: rgba(255, 255, 255, .55); letter-spacing: .01em; }
+  .pips { display: flex; gap: 4px; }
+  .pips i { width: 5px; height: 5px; border-radius: 50%; background: rgba(255, 255, 255, .2); }
+  .pips i.on { background: rgba(255, 255, 255, .8); }
+  .pips i.new { background: #5ac8fa; }
+  .cel-name { margin-top: 1px; font: 600 21px/26px -apple-system, system-ui; letter-spacing: -.012em; }
+  .cel-sub { font: 400 12px/16px -apple-system, system-ui; color: rgba(255, 255, 255, .62); white-space: nowrap; }
+  .cel-sub b { font-weight: 500; color: rgba(255, 255, 255, .94); }
+
+
+  #level-card { display: none; align-items: center; gap: 15px; }
+  body.level-card #card { height: 84px; border-radius: 28px; padding: 0 24px 0 16px; }
+  body.level-card #crow { display: none; }
+  body.level-card #level-card { display: flex; }
+  body.level-card #card.on .ring { animation: level-draw .6s cubic-bezier(.4,0,.2,1) .18s both; }
+  body.level-card #card.on .mark { animation: level-stamp .3s cubic-bezier(.2,1.5,.4,1) .76s both; }
+  body.level-card #card.on .ripple { animation: level-ripple .6s ease-out .78s both; }
+  body.level-card #card.on .rays { animation: level-rays .5s ease-out .78s both; }
+  body.level-card #card.on .pips i.on { animation: level-pip .2s ease-out both; }
+  body.level-card #card.on .pips i.new { animation: level-stamp .32s cubic-bezier(.2,1.6,.4,1) .8s both; }
+  body.level-card #card.on .cel-name { animation: level-rise .32s ease-out .8s both; }
+  body.level-card #card.on .cel-sub { animation: level-rise .32s ease-out .98s both; }
+  @keyframes level-pip { from { background: rgba(255,255,255,.2); } }
+  @keyframes level-rise { from { opacity: 0; transform: translateY(5px); } }
+  @keyframes level-draw { from { stroke-dashoffset: 102; } }
+  @keyframes level-stamp { from { opacity: 0; transform: scale(1.6); } }
+  @keyframes level-ripple { from { opacity: .7; transform: scale(1); } to { opacity: 0; transform: scale(1.5); } }
+  @keyframes level-rays { from { opacity: 1; stroke-dashoffset: 7; } 60% { opacity: 1; } to { opacity: 0; stroke-dashoffset: -16; } }
+  @media (prefers-reduced-motion: reduce) {
+    body.level-card #card { transition: opacity .14s ease-out; }
+    body.level-card #card.on .medal *, body.level-card #card.on .pips i,
+    body.level-card #card.on .cel-name, body.level-card #card.on .cel-sub { animation: none; }
+  }
 </style>
 <canvas id="cv" role="img" aria-label="Dictation status"></canvas>
 <div id="pill"><span id="dot"></span><span id="text"></span></div>
 <div id="iwrap" aria-hidden="true"><div id="iclip"><div id="iline"><div id="ighosts"></div></div></div></div>
-<div id="card"><div class="row" id="crow">
+<svg width="0" height="0" aria-hidden="true">
+  <defs>
+    <symbol id="m-letter" viewBox="0 0 24 24"><rect x="6" y="3.5" width="12" height="17" rx="2"/><path d="M9.5 8.5h5M9.5 12h5M9.5 15.5h2.5"/></symbol>
+    <symbol id="m-essay" viewBox="0 0 24 24"><path d="M8 4.5V4a1.5 1.5 0 0 1 1.5-1.5h8A1.5 1.5 0 0 1 19 4v12a1.5 1.5 0 0 1-1.5 1.5H17"/><rect x="5" y="5.5" width="11" height="16" rx="1.8"/><path d="M8 10h5M8 13.5h5M8 17h2.5"/></symbol>
+    <symbol id="m-novella" viewBox="0 0 24 24"><rect x="7.5" y="3" width="9" height="18" rx="1.6"/><path d="M10.5 3v18M13 7.5h1"/></symbol>
+    <symbol id="m-novel" viewBox="0 0 24 24"><path d="M12 6.6C9.9 5.3 7.3 4.9 4 5v13c3.3-.1 5.9.3 8 1.6 2.1-1.3 4.7-1.7 8-1.6V5c-3.3-.1-5.9.3-8 1.6z"/><path d="M12 6.6v13"/></symbol>
+    <symbol id="m-epic" viewBox="0 0 24 24"><rect x="4.5" y="3" width="15" height="18" rx="1.8"/><path d="M8.5 3v18M12 7.5h4M12 11h4"/><path d="M14 21v-4.5l1.5 1.2 1.5-1.2V21"/></symbol>
+    <symbol id="m-saga" viewBox="0 0 24 24"><rect x="3.5" y="6" width="5" height="15" rx="1.2"/><rect x="9.5" y="3" width="5" height="18" rx="1.2"/><rect x="15.5" y="8" width="5" height="13" rx="1.2"/><path d="M5 10h2M11 7h2M17 12h2"/></symbol>
+    <symbol id="m-million" viewBox="0 0 24 24"><path d="M2.5 20.5h19"/><rect x="4" y="6.5" width="3.6" height="14" rx="1"/><rect x="7.6" y="4" width="3.6" height="16.5" rx="1"/><rect x="11.2" y="8" width="3.6" height="12.5" rx="1"/><path d="M16.3 8.3l2.9-.9 3 12.2-2.9.9z"/></symbol>
+  </defs>
+</svg>
+
+<div id="card"><div id="level-card" role="status">      <div class="medal">
+        <svg viewBox="0 0 52 52" aria-hidden="true">
+          <circle class="track" cx="26" cy="26" r="23"/>
+          <circle class="ring" cx="26" cy="26" r="23" pathLength="100" transform="rotate(-90 26 26)"/>
+          <circle class="ripple" cx="26" cy="26" r="23"/>
+          <path class="rays" d="M26 -2v-14M45.8 6.2l9.9-9.9M54 26h14M45.8 45.8l9.9 9.9M26 54v14M6.2 45.8l-9.9 9.9M-2 26h-14M6.2 6.2l-9.9-9.9"/>
+          <use class="mark" id="level-mark" href="#m-letter" x="14" y="14" width="24" height="24"/>
+        </svg>
+      </div>
+      <div class="cel-text">
+        <div class="cel-top"><span id="level-index"></span><span class="pips" id="level-pips"></span></div>
+        <div class="cel-name" id="level-name"></div>
+        <div class="cel-sub"><b id="level-words"></b><span id="level-speed"></span></div>
+      </div></div><div class="row" id="crow">
   <span class="cglyph" id="cglyph"></span><span id="cnote"></span><span id="csaid"></span>
   <button id="ccopy">Copy</button><span id="crule"></span>
   <button id="cx" aria-label="Dismiss"><svg viewBox="0 0 10 10" fill="none" stroke="currentColor"
@@ -220,11 +287,32 @@ function showCard(payload) {
   clearTimeout(fixTimer);
   carded = true;
   cardKind = payload.kind;
+  document.body.classList.toggle('level-card', cardKind === 'level');
   clearText();
   st = 'hidden';
   document.body.classList.add('carded');
   /* A capture gets video.fill, a dictation gets the waveform: the same pair the
      tray uses in its glyph column (DICTATION and CLIP in tray.rs). */
+  if (cardKind === 'level') {
+    document.getElementById('level-index').textContent = `Level ${payload.index}`;
+    document.getElementById('level-name').textContent = payload.name;
+    document.getElementById('level-mark').setAttribute('href', '#m-' + payload.name.toLowerCase());
+    document.getElementById('level-words').textContent = `${payload.at.toLocaleString()} words`;
+    document.getElementById('level-speed').textContent = payload.timesTyping == null ? '' : `, spoken at ${payload.timesTyping}x typing speed`;
+    document.getElementById('level-pips').replaceChildren(...Array.from({length: 7}, (_, i) => {
+      const pip = document.createElement('i');
+      pip.className = i + 1 === payload.index ? 'new' : i < payload.index ? 'on' : '';
+      if (i + 1 < payload.index) pip.style.animationDelay = (0.32 + i * 0.1) + 's';
+      return pip;
+    }));
+    cardEl.className = 'measuring';
+    cardEl.style.width = 'auto';
+    cardWidth = Math.max(372, Math.ceil(cardEl.getBoundingClientRect().width));
+    cardEl.style.width = cardWidth + 'px';
+    window.__TAURI__.event.emit('pill-size', {width: 520, height: 150});
+    fittedTimer = setTimeout(openCard, 400);
+    return;
+  }
   const fixed = cardKind === 'fixed';
   glyphEl.innerHTML = fixed ? ICON_BOOK
     : payload.note ? ICON_VIDEO
@@ -263,7 +351,7 @@ function showCard(payload) {
 }
 cardEl.addEventListener('mouseenter', () => clearTimeout(fixTimer));
 cardEl.addEventListener('mouseleave', () => {
-  if (carded && cardKind === 'fixed') fixTimer = setTimeout(hideCard, FIX_AFTER_HOVER_MS);
+  if (carded && (cardKind === 'fixed' || cardKind === 'level')) fixTimer = setTimeout(hideCard, FIX_AFTER_HOVER_MS);
 });
 /* The chip's own resting width, so the card looks like that chip stretching. */
 const CHIP_W = 46;
@@ -280,6 +368,7 @@ function openCard() {
     if (!carded) return;
     cardEl.className = 'on';
     cardEl.style.width = cardWidth + 'px';
+    if (cardKind === 'level') fixTimer = setTimeout(hideCard, 4000);
   }));
 }
 function hideCard() {
@@ -618,7 +707,7 @@ document.getElementById('cx').addEventListener('click', hideCard);
 window.__TAURI__.event.listen('pill', ({ payload: p }) => {
   if (p.kind === 'preview') { showPreview(p.text); return; }
   clearTimeout(hideTimer);
-  if (p.kind === 'held' || p.kind === 'fixed') { hidePreview(); showCard(p); return; }
+  if (p.kind === 'held' || p.kind === 'fixed' || p.kind === 'level') { hidePreview(); showCard(p); return; }
   if (carded) hideCard();
   if (p.kind === 'hide') { activity = null; st = 'hidden'; clearText(); hidePreview(); return; }
   if (p.kind === 'show') {

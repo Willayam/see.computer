@@ -1033,3 +1033,17 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[tauri::command]
+pub async fn library_words(history: State<'_, History>) -> Result<serde_json::Value, String> {
+    let history = history.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || match history.refresh_words() {
+        Some(tally) if history.enabled() => {
+            serde_json::to_value(crate::tally::summary(&tally, Local::now().date_naive()))
+                .map_err(|e| e.to_string())
+        }
+        _ => Ok(serde_json::json!({"history": false})),
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

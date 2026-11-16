@@ -11,12 +11,15 @@ pub struct History {
     root: Arc<Mutex<PathBuf>>,
     enabled: Arc<AtomicBool>,
     tx: Sender<Request>,
+    words: Arc<Mutex<Option<crate::tally::Tally>>>,
 }
 
 /// The history thread is the only writer of day files, so a fix made in the
 /// Library cannot race the append of the next dictation.
 enum Request {
-    Append(String),
+    Load,
+    Refresh(Sender<()>),
+    Append(String, Option<std::time::Duration>),
     Replace(Fix, Sender<Result<(), String>>),
 }
 
@@ -35,57 +38,211 @@ pub struct Entry {
 }
 
 impl History {
-    pub fn start(enabled: bool) -> History {
+    pub fn start(enabled: bool, pill: Option<Sender<crate::pill::PillEvent>>) -> History {
         let preferred = crate::paths::documents();
         let fallback = crate::paths::history_fallback();
         let seam = std::env::var_os("SEE_COMPUTER_HISTORY_DIR").map(PathBuf::from);
+        let speed = crate::paths::speed_log();
+        let ledger = std::env::var_os("SEE_COMPUTER_LEDGER_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(crate::paths::ledger);
+        Self::start_at(
+            enabled, pill, preferred, fallback, seam, speed, ledger, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_at(
+        enabled: bool,
+        pill: Option<Sender<crate::pill::PillEvent>>,
+        preferred: PathBuf,
+        fallback: PathBuf,
+        seam: Option<PathBuf>,
+        speed: PathBuf,
+        ledger: PathBuf,
+        trails: Option<Vec<PathBuf>>,
+    ) -> History {
         let initial = seam.clone().unwrap_or_else(|| preferred.clone());
         let root = Arc::new(Mutex::new(initial));
         let enabled = Arc::new(AtomicBool::new(enabled));
         let (tx, rx) = mpsc::channel::<Request>();
         let writer_root = root.clone();
+        let words = Arc::new(Mutex::new(None));
+        let writer_words = words.clone();
+        let writer_enabled = enabled.clone();
+        let reload = tx.clone();
         crate::qos::spawn("see-history", crate::qos::Class::Upkeep, move || {
-            let (live, can_fallback) = match seam {
+            let mut backfill_due = !speed.exists();
+            let cutoff = Local::now().timestamp_millis();
+            let can_fallback = seam.is_none();
+            let live = match &seam {
                 Some(path) => {
-                    let _ = std::fs::create_dir_all(&path).and_then(|()| touch_today(&path));
-                    (path, false)
+                    let _ = std::fs::create_dir_all(path).and_then(|()| touch_today(path));
+                    path.clone()
                 }
-                None => (resolve_root(&preferred, &fallback), true),
+                None => resolve_root(&preferred, &fallback),
             };
             set_root(&writer_root, live);
+            let waiter = Arc::new(AtomicBool::new(false));
+            let mut load = || {
+                if !writer_enabled.load(Ordering::Relaxed) {
+                    return;
+                }
+                let live = locked_root(&writer_root);
+                let mut tally = crate::tally::Tally::read(&live, &speed);
+                if !tally.waiting.is_empty() {
+                    // The backfill runs once, so it waits until every day file is
+                    // local; otherwise the evicted days would never be timed.
+                    let waiting = tally.waiting.clone();
+                    if !waiter.swap(true, Ordering::Relaxed) {
+                        let waiter = waiter.clone();
+                        let reload = reload.clone();
+                        std::thread::spawn(move || {
+                            crate::library::download(&waiting);
+                            let deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(600);
+                            let readable = || {
+                                waiting.iter().all(|path| {
+                                    matches!(
+                                        crate::shadow::read(path),
+                                        crate::shadow::Text::Current(_)
+                                            | crate::shadow::Text::Stale(_)
+                                    )
+                                })
+                            };
+                            let mut ready = readable();
+                            while !ready && std::time::Instant::now() < deadline {
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                                ready = readable();
+                            }
+                            waiter.store(false, Ordering::Relaxed);
+                            if ready {
+                                let _ = reload.send(Request::Load);
+                            }
+                        });
+                    }
+                } else if backfill_due {
+                    let trails = trails.clone().unwrap_or_else(|| {
+                        if let Some(path) = std::env::var_os("SEE_COMPUTER_STATE_LOG") {
+                            vec![PathBuf::from(path)]
+                        } else {
+                            std::fs::read_dir(crate::paths::app_support())
+                                .into_iter()
+                                .flatten()
+                                .flatten()
+                                .filter(|entry| {
+                                    entry.file_name() == "events.tsv"
+                                        || entry
+                                            .file_name()
+                                            .to_string_lossy()
+                                            .starts_with("events.tsv.bak-")
+                                })
+                                .map(|entry| entry.path())
+                                .collect()
+                        }
+                    });
+                    if crate::tally::backfill(&live, &speed, &ledger, &trails, cutoff).is_ok() {
+                        backfill_due = false;
+                    }
+                    tally = crate::tally::Tally::read(&live, &speed);
+                }
+                let mut slot = writer_words
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *slot = writer_enabled.load(Ordering::Relaxed).then_some(tally);
+            };
+            load();
             while let Ok(write) = rx.recv() {
-                let text = match write {
-                    Request::Append(text) => text,
+                let (text, spoken) = match write {
+                    Request::Load => {
+                        load();
+                        crate::library::changed();
+                        continue;
+                    }
+                    Request::Refresh(reply) => {
+                        load();
+                        let _ = reply.send(());
+                        continue;
+                    }
+                    Request::Append(text, spoken) => (text, spoken),
                     Request::Replace(fix, reply) => {
                         let result = replace_entry(&locked_root(&writer_root), &fix);
                         if result.is_ok() {
+                            load();
                             crate::library::changed();
                         }
                         let _ = reply.send(result);
                         continue;
                     }
                 };
+                if !writer_enabled.load(Ordering::Relaxed) {
+                    continue;
+                }
                 let at = Local::now();
                 let live = locked_root(&writer_root);
-                if let Err(error) = append_entry(&live, at, &text) {
-                    if can_fallback && error.raw_os_error() == Some(libc::EPERM) {
+                let filed = match append_entry(&live, at, &text) {
+                    Ok(()) => true,
+                    Err(error) if can_fallback && error.raw_os_error() == Some(libc::EPERM) => {
                         let _ = std::fs::create_dir_all(&fallback);
                         set_root(&writer_root, fallback.clone());
-                        if append_entry(&fallback, at, &text).is_ok() {
-                            crate::library::changed();
+                        append_entry(&fallback, at, &text).is_ok()
+                    }
+                    Err(_) => false,
+                };
+                if filed {
+                    if let Some(spoken) = spoken {
+                        let _ =
+                            crate::tally::log_speed(&speed, at, spoken, crate::tally::words(&text));
+                    }
+                    if let Some(tally) = writer_words
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_mut()
+                    {
+                        let before = crate::tally::level(tally.total().words).index;
+                        let words = crate::tally::words(&text);
+                        *tally.days.entry(at.date_naive()).or_default() += crate::tally::Count {
+                            words,
+                            dictations: 1,
+                            timed_words: spoken.map_or(0, |_| words),
+                            spoken_ms: spoken.map_or(0, |d| d.as_millis() as u64),
+                        };
+                        let total = tally.total();
+                        let level = crate::tally::level(total.words);
+                        if tally.waiting.is_empty()
+                            && level.index > before
+                            && writer_enabled.load(Ordering::Relaxed)
+                        {
+                            if let Some(pill) = &pill {
+                                let _ = pill.send(crate::pill::PillEvent::LevelUp(
+                                    crate::pill::LevelUp {
+                                        index: level.index,
+                                        name: level.name.unwrap_or_default(),
+                                        at: level.at,
+                                        total: total.words,
+                                        times_typing: total
+                                            .wpm()
+                                            .map(|n| (n as f64 / 4.0).round() / 10.0),
+                                    },
+                                ));
+                            }
                         }
                     }
-                } else {
                     crate::library::changed();
                 }
             }
         });
-        History { root, enabled, tx }
+        History {
+            root,
+            enabled,
+            tx,
+            words,
+        }
     }
 
-    pub fn record(&self, text: &str) {
+    pub fn record(&self, text: &str, spoken: Option<std::time::Duration>) {
         if self.enabled() {
-            let _ = self.tx.send(Request::Append(text.to_owned()));
+            let _ = self.tx.send(Request::Append(text.to_owned(), spoken));
         }
     }
 
@@ -121,6 +278,35 @@ impl History {
 
     pub fn set_enabled(&self, on: bool) {
         self.enabled.store(on, Ordering::Relaxed);
+        if on {
+            let _ = self.tx.send(Request::Load);
+        } else {
+            *self
+                .words
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            crate::library::changed();
+        }
+    }
+
+    pub fn words(&self) -> Option<crate::tally::Tally> {
+        if !self.enabled() {
+            return None;
+        }
+        self.words
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn refresh_words(&self) -> Option<crate::tally::Tally> {
+        if !self.enabled() {
+            return None;
+        }
+        let (reply, result) = mpsc::channel();
+        self.tx.send(Request::Refresh(reply)).ok()?;
+        result.recv().ok()?;
+        self.words()
     }
 
     #[cfg(test)]
@@ -137,6 +323,7 @@ impl History {
             )),
             enabled: Arc::new(AtomicBool::new(false)),
             tx,
+            words: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -187,7 +374,7 @@ pub(crate) fn day_file_date(stem: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
 }
 
-fn day_files(root: &Path) -> Vec<(NaiveDate, PathBuf)> {
+pub(crate) fn day_files(root: &Path) -> Vec<(NaiveDate, PathBuf)> {
     let mut days = std::fs::read_dir(root)
         .into_iter()
         .flatten()
@@ -264,7 +451,7 @@ fn replaced(content: &str, fix: &Fix) -> Option<String> {
     None
 }
 
-fn parse_day(date: NaiveDate, content: &str) -> Vec<Entry> {
+pub(crate) fn parse_day(date: NaiveDate, content: &str) -> Vec<Entry> {
     let mut headings = Vec::new();
     for (start, _) in content.match_indices("## ") {
         if start > 0 && content.as_bytes().get(start - 1) != Some(&b'\n') {
@@ -381,6 +568,90 @@ mod tests {
         let naive =
             NaiveDateTime::parse_from_str(&format!("{date} {time}"), "%Y-%m-%d %H:%M:%S").unwrap();
         Local.from_local_datetime(&naive).single().unwrap()
+    }
+
+    #[test]
+    fn waiting_day_prevents_level_up() {
+        let root = temp_dir();
+        append_entry(&root, Local::now(), &vec!["word"; 999].join(" ")).unwrap();
+        fs::create_dir(root.join("2020-01-01.md")).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let history = History::start_at(
+            true,
+            Some(tx),
+            root.clone(),
+            root.clone(),
+            Some(root.clone()),
+            root.join("speed.tsv"),
+            root.join("ledger"),
+            Some(vec![]),
+        );
+        let tally = history.refresh_words().unwrap();
+        assert_eq!(tally.total().words, 999);
+        assert_eq!(tally.waiting, vec![root.join("2020-01-01.md")]);
+        history.record("one two", None);
+        assert_eq!(history.refresh_words().unwrap().total().words, 1001);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn live_tally_emits_one_level_up_and_loads_when_enabled() {
+        let root = temp_dir();
+        append_entry(&root, Local::now(), &vec!["word"; 999].join(" ")).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let history = History::start_at(
+            false,
+            Some(tx),
+            root.clone(),
+            root.clone(),
+            Some(root.clone()),
+            root.join("speed.tsv"),
+            root.join("ledger"),
+            Some(vec![]),
+        );
+        assert!(history.words().is_none());
+        assert!(!root.join("speed.tsv").exists());
+        history.set_enabled(true);
+        assert_eq!(history.refresh_words().unwrap().total().words, 999);
+        assert!(rx.try_recv().is_err());
+        history.record(
+            "one two three four five",
+            Some(std::time::Duration::from_secs(60)),
+        );
+        match rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap() {
+            crate::pill::PillEvent::LevelUp(level) => {
+                assert_eq!(level.index, 1);
+                assert_eq!(level.name, "Letter");
+                assert_eq!(level.at, 1000);
+                assert_eq!(level.total, 1004);
+            }
+            event => panic!("unexpected event {event:?}"),
+        }
+        history.record("six seven", None);
+        assert_eq!(history.refresh_words().unwrap().total().words, 1006);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(history.words().unwrap().total().dictations, 3);
+        let entry = history
+            .recent(3)
+            .into_iter()
+            .find(|entry| entry.text == "six seven")
+            .unwrap();
+        history
+            .replace(Fix {
+                file: entry.at.date().to_string(),
+                at: entry.at,
+                original: entry.text,
+                edited: vec!["word"; 5000].join(" "),
+            })
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(history.words().unwrap().total().words, 6004);
+        assert!(rx.try_recv().is_err());
+        history.set_enabled(false);
+        assert!(history.words().is_none());
+        drop(history);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
