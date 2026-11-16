@@ -30,6 +30,7 @@ enum ReadyFor: String, CaseIterable, Identifiable {
 /// reads that file and sends signals. It never decides anything here.
 @MainActor
 final class Session: ObservableObject {
+    let stats = StatsStore()
     @Published private(set) var state = SessionState()
     @Published private(set) var stage: Engine.Stage = .waiting
     @Published private(set) var recent: [History.Entry] = History.recent(limit: 30)
@@ -60,8 +61,8 @@ final class Session: ObservableObject {
     private var takeSent = false
     /// Tells a tap from this app's own field apart from one that launched or resumed it.
     private var hasBeenInFront = false
-    /// For the diagnostics log only.
     private var takeStarted = Date()
+    private var spokenSeconds: Double = 0
     private var takeAudio = CaptureStats()
     private var finishAsked = Date()
 
@@ -79,6 +80,7 @@ final class Session: ObservableObject {
         state = restored
         publish()
         guard !benching else { return }
+        stats.refresh()
         Diagnostics.log("app_launch", ["phase": state.phase.rawValue])
         Island.endLeftovers()
 
@@ -322,6 +324,7 @@ final class Session: ObservableObject {
             return
         }
         let seconds = Date().timeIntervalSince(takeStarted)
+        spokenSeconds = seconds
         stopWatchingKeyboard()
         state.phase = .transcribing
         publish()
@@ -400,6 +403,8 @@ final class Session: ObservableObject {
             state.take = Take(
                 id: Int64(now.timeIntervalSince1970 * 1000), text: trimmed, finished: now, sent: takeSent ? true : nil)
             History.append(trimmed, at: now)
+            StatsStore.logTake(at: now, seconds: spokenSeconds, text: trimmed)
+            stats.refresh()
             recent = History.recent(limit: 30)
             settle(problem: nil)
         case .failure(let failure):

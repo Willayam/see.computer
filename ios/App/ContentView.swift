@@ -16,6 +16,10 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    StatsCell(store: session.stats)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                }
                 Section { status }
                 Section {
                     TextField("Try it. Switch to the see.computer keyboard here.", text: $tryIt, axis: .vertical)
@@ -34,10 +38,12 @@ struct ContentView: View {
             DictionaryFolder.connect(url)
             connected = true
             refreshDictionary()
+            session.stats.refresh()
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             refreshDictionary()
+            session.stats.refresh()
         }
         .onChange(of: session.stage) { _, stage in
             // Auto-lock would suspend the app and kill the download.
@@ -47,7 +53,10 @@ struct ContentView: View {
                 UIApplication.shared.isIdleTimerDisabled = false
             }
         }
-        .task { refreshDictionary() }
+        .task {
+            refreshDictionary()
+            session.stats.refresh()
+        }
     }
 
     private func refreshDictionary() {
@@ -114,6 +123,7 @@ struct ContentView: View {
                 Button("Disconnect the dictionary folder", role: .destructive) {
                     DictionaryFolder.disconnect()
                     connected = false
+                    session.stats.refresh()
                 }
             } else {
                 Button("Use the dictionary from your Mac") { pickingFolder = true }

@@ -7,6 +7,7 @@ import WidgetKit
 struct IslandWidgets: WidgetBundle {
     var body: some Widget {
         TakeLiveActivity()
+        WordStatsWidget()
     }
 }
 
