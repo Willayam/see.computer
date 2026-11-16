@@ -4,6 +4,7 @@ fn main() {
         .flag("-fobjc-arc")
         .compile("seemenu");
     println!("cargo:rustc-link-lib=framework=AppKit");
+    println!("cargo:rustc-link-lib=framework=QuartzCore");
     println!("cargo:rerun-if-changed=native/menu.m");
     cc::Build::new()
         .file("native/frame.m")
@@ -44,6 +45,7 @@ fn main() {
     // no invoke surface at all.
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
+            "library_words",
             "library_items",
             "library_download",
             "library_copy",

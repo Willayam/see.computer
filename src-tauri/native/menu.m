@@ -5,6 +5,7 @@
 // takes mouse events without ever becoming key, so the app the user is
 // dictating into keeps its focus and the synthetic Command+V still lands there.
 #import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>
 
 void see_readback_app_terminated(int pid);
 
@@ -195,6 +196,218 @@ static NSTextField *label_field(NSString *text, NSFont *font, NSColor *color,
     return field;
 }
 
+typedef struct {
+    int present;
+    uint64_t total, previous, delta, today;
+    double wpm, times_typing, hours_saved, progress;
+    int level_index;
+    uint64_t to_go;
+    const char *since, *level_name, *next_name;
+} SeeMenuHeader;
+
+static SeeMenuHeader gHeader;
+static NSString *gSince, *gLevelName, *gNextName;
+static BOOL gOpeningHeader;
+
+void see_menu_set_header(const SeeMenuHeader *header) {
+    gHeader = header ? *header : (SeeMenuHeader){0};
+    gSince = header && header->since ? @(header->since) : @"";
+    gLevelName = header && header->level_name ? @(header->level_name) : @"";
+    gNextName = header && header->next_name ? @(header->next_name) : @"";
+}
+
+static NSString *header_number(uint64_t value) {
+    NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
+    formatter.numberStyle = NSNumberFormatterDecimalStyle;
+    formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US"];
+    return [formatter stringFromNumber:@(value)];
+}
+
+@interface SeeMenuHeaderView : NSView
+@end
+
+@implementation SeeMenuHeaderView
+- (BOOL)isFlipped { return YES; }
+
+- (void)text:(NSString *)text x:(CGFloat)x y:(CGFloat)y width:(CGFloat)width
+        size:(CGFloat)size weight:(NSFontWeight)weight color:(NSColor *)color {
+    NSTextField *field = label_field(text, [NSFont monospacedDigitSystemFontOfSize:size weight:weight], color, 1);
+    field.frame = NSMakeRect(x, y, width, size + 5);
+    [self addSubview:field];
+}
+
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    if (!self.layer) return;
+    [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
+        NSMutableArray<CALayer *> *layers = [NSMutableArray arrayWithObject:self.layer];
+        while (layers.count) {
+            CALayer *layer = layers.lastObject;
+            [layers removeLastObject];
+            if ([layer isKindOfClass:CATextLayer.class]) ((CATextLayer *)layer).foregroundColor = NSColor.labelColor.CGColor;
+            NSColor *background = [layer valueForKey:@"seeBackground"];
+            if (background) layer.backgroundColor = background.CGColor;
+            NSColor *stroke = [layer valueForKey:@"seeStroke"];
+            if (stroke) ((CAShapeLayer *)layer).strokeColor = stroke.CGColor;
+            [layers addObjectsFromArray:layer.sublayers ?: @[]];
+        }
+    }];
+}
+
+- (void)build:(BOOL)opening {
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [self.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
+    self.wantsLayer = YES;
+    self.layer.sublayers = nil;
+    BOOL motion = opening && !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
+    NSColor *accent = [NSColor colorWithName:nil dynamicProvider:^NSColor *(NSAppearance *appearance) {
+        BOOL dark = [[appearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]] isEqualToString:NSAppearanceNameDarkAqua];
+        return dark ? [NSColor colorWithSRGBRed:90/255.0 green:200/255.0 blue:250/255.0 alpha:1] : [NSColor colorWithSRGBRed:26/255.0 green:166/255.0 blue:228/255.0 alpha:1];
+    }];
+    NSColor *accentInk = [NSColor colorWithName:nil dynamicProvider:^NSColor *(NSAppearance *appearance) {
+        BOOL dark = [[appearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]] isEqualToString:NSAppearanceNameDarkAqua];
+        return dark ? accent : [NSColor colorWithSRGBRed:10/255.0 green:127/255.0 blue:180/255.0 alpha:1];
+    }];
+    [self text:gSince.length ? [@"Dictated since " stringByAppendingString:gSince] : @"Words dictated"
+             x:8 y:7 width:160 size:11 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
+    NSString *today = [NSString stringWithFormat:@"%@ today", header_number(gHeader.today)];
+    NSTextField *todayField = label_field(today, [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightMedium], NSColor.labelColor, 1);
+    todayField.alignment = NSTextAlignmentRight;
+    todayField.frame = NSMakeRect(160, 7, 84, 16);
+    [self addSubview:todayField];
+
+    NSString *digits = [NSString stringWithFormat:@"%llu", (unsigned long long)gHeader.total];
+    NSString *gainText = gHeader.delta ? [@"+" stringByAppendingString:header_number(gHeader.delta)] : @"";
+    CGFloat gainWidth = gainText.length ? [gainText sizeWithAttributes:@{NSFontAttributeName:[NSFont monospacedDigitSystemFontOfSize:14 weight:NSFontWeightSemibold]}].width + 4 : 0;
+    CGFloat size = MIN(32, (236 - 51 - gainWidth - ((digits.length - 1) / 3) * 8) / (digits.length * .62));
+    CGFloat h = 38, digitWidth = size * .62, x = 8;
+    uint64_t place = 1;
+    for (NSUInteger i = 1; i < digits.length; i++) place *= 10;
+    for (NSUInteger i = 0; i < digits.length; i++) {
+        if (i && (digits.length - i) % 3 == 0) {
+            [self text:@"," x:x y:25 width:9 size:size weight:NSFontWeightSemibold color:NSColor.labelColor];
+            x += 8;
+        }
+        NSView *wheel = [[NSView alloc] initWithFrame:NSMakeRect(x, 25, digitWidth, h)];
+        wheel.wantsLayer = YES;
+        wheel.layer.masksToBounds = YES;
+        wheel.layer.geometryFlipped = YES;
+        [self addSubview:wheel];
+        // The extra zero makes the 9-to-0 seam identical on either side of a wrap.
+        CALayer *strip = [CALayer layer];
+        strip.frame = CGRectMake(0, 0, digitWidth, h * 11);
+        [wheel.layer addSublayer:strip];
+        NSFont *font = [NSFont monospacedDigitSystemFontOfSize:size weight:NSFontWeightSemibold];
+        for (int n = 0; n <= 10; n++) {
+            CATextLayer *text = [CATextLayer layer];
+            text.frame = CGRectMake(0, n * h, digitWidth, h);
+            text.string = [NSString stringWithFormat:@"%d", n % 10];
+            text.font = (__bridge CFTypeRef)font;
+            text.fontSize = size;
+            [self.effectiveAppearance performAsCurrentDrawingAppearance:^{ text.foregroundColor = NSColor.labelColor.CGColor; }];
+            text.contentsScale = NSScreen.mainScreen.backingScaleFactor;
+            text.alignmentMode = kCAAlignmentCenter;
+            [strip addSublayer:text];
+        }
+        double final = (gHeader.total / place) % 10;
+        strip.transform = CATransform3DMakeTranslation(0, -final * h, 0);
+        if (motion && gHeader.total / place != gHeader.previous / place) {
+            NSMutableArray *values = [NSMutableArray array];
+            for (int frame = 0; frame <= 120; frame++) {
+                double t = frame / 120.0;
+                double value = gHeader.previous + (gHeader.total - gHeader.previous) * (1 - pow(1 - t, 4));
+                double quotient = floor(value / place);
+                double carry = place == 1 ? value - floor(value) : MAX(0, fmod(value, place) - (place - 1));
+                [values addObject:@(-(fmod(quotient, 10) + carry) * h)];
+            }
+            CAKeyframeAnimation *roll = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.y"];
+            roll.values = values;
+            roll.calculationMode = kCAAnimationDiscrete;
+            roll.duration = 1;
+            [strip addAnimation:roll forKey:@"roll"];
+        }
+        x += digitWidth;
+        place /= 10;
+    }
+    [self text:@"words" x:x+4 y:39 width:52 size:14 weight:NSFontWeightMedium color:NSColor.secondaryLabelColor];
+    if (gHeader.delta) {
+        NSString *gain = gainText;
+        NSTextField *field = label_field(gain, [NSFont monospacedDigitSystemFontOfSize:14 weight:NSFontWeightSemibold], accentInk, 1);
+        CGFloat available = MAX(0, 244 - x - 51);
+        field.frame = NSMakeRect(x + 51, 39, available, 19);
+        field.alignment = NSTextAlignmentRight;
+        [self addSubview:field];
+    }
+    double scale = MAX(130, gHeader.wpm);
+    for (int row = 0; row < 2; row++) {
+        CGFloat y = 77 + row * 20;
+        [self text:row ? @"Typing" : @"You" x:8 y:y width:42 size:11 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
+        CALayer *track = [CALayer layer];
+        track.frame = CGRectMake(52, y+4, 132, 8);
+        track.cornerRadius = 4;
+        [track setValue:[NSColor.labelColor colorWithAlphaComponent:.07] forKey:@"seeBackground"];
+        track.backgroundColor = [NSColor.labelColor colorWithAlphaComponent:.07].CGColor;
+        [self.layer addSublayer:track];
+        CALayer *fill = [CALayer layer];
+        fill.anchorPoint = CGPointMake(0, .5);
+        double width = 132 * (row ? 40 : MAX(0, gHeader.wpm)) / scale;
+        fill.bounds = CGRectMake(0, 0, width, 8);
+        fill.position = CGPointMake(0, 4);
+        fill.cornerRadius = 4;
+        [fill setValue:(row ? [NSColor.labelColor colorWithAlphaComponent:.25] : accent) forKey:@"seeBackground"];
+        fill.backgroundColor = (row ? [NSColor.labelColor colorWithAlphaComponent:.25] : accent).CGColor;
+        [track addSublayer:fill];
+        if (!row && motion) {
+            CABasicAnimation *grow = [CABasicAnimation animationWithKeyPath:@"transform.scale.x"];
+            grow.fromValue = @0;
+            grow.toValue = @1;
+            grow.duration = .5;
+            grow.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+            [fill addAnimation:grow forKey:@"grow"];
+        }
+        [self text:row ? @"40 wpm" : (gHeader.wpm < 0 ? @"— wpm" : [NSString stringWithFormat:@"%.0f wpm", gHeader.wpm]) x:188 y:y width:58 size:11 weight:NSFontWeightMedium color:row ? NSColor.secondaryLabelColor : accentInk];
+    }
+    [self text:gHeader.times_typing < 0 ? @"Speed after 1 min of speech" : [NSString stringWithFormat:@"%.1fx faster than typing", gHeader.times_typing] x:8 y:124 width:136 size:11 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
+    NSTextField *saved = label_field(isnan(gHeader.hours_saved) ? @"" : [NSString stringWithFormat:@"%.1f hours saved", gHeader.hours_saved], [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular], NSColor.secondaryLabelColor, 1);
+    saved.alignment = NSTextAlignmentRight;
+    saved.frame = NSMakeRect(140, 124, 106, 16);
+    [self addSubview:saved];
+
+    CGPathRef circle = CGPathCreateWithEllipseInRect(CGRectMake(0, 0, 32, 32), NULL);
+    for (int i = 0; i < 2; i++) {
+        CAShapeLayer *ring = [CAShapeLayer layer];
+        ring.frame = CGRectMake(10, 151, 32, 32);
+        ring.path = circle;
+        ring.fillColor = NSColor.clearColor.CGColor;
+        [ring setValue:(i ? accentInk : [NSColor.labelColor colorWithAlphaComponent:.12]) forKey:@"seeStroke"];
+        ring.strokeColor = (i ? accentInk : [NSColor.labelColor colorWithAlphaComponent:.12]).CGColor;
+        ring.lineWidth = 2.5;
+        ring.strokeEnd = i ? gHeader.progress : 1;
+        // Start progress at twelve o'clock in the flipped header.
+        ring.transform = CATransform3DMakeRotation(-M_PI_2, 0, 0, 1);
+        [self.layer addSublayer:ring];
+    }
+    CGPathRelease(circle);
+    NSArray *symbols = @[@"circle.dotted", @"doc.text", @"doc.on.doc", @"book.closed", @"book", @"book.closed.fill", @"books.vertical", @"books.vertical.fill"];
+    NSImageView *badge = [NSImageView imageViewWithImage:[NSImage imageWithSystemSymbolName:symbols[MIN(7, MAX(0, gHeader.level_index))] accessibilityDescription:nil]];
+    badge.frame = NSMakeRect(17, 158, 18, 18);
+    badge.contentTintColor = NSColor.labelColor;
+    [self addSubview:badge];
+    [self text:gLevelName.length ? gLevelName : @"First words" x:54 y:150 width:185 size:12 weight:NSFontWeightSemibold color:NSColor.labelColor];
+    [self text:gNextName.length ? [NSString stringWithFormat:@"%@ to %@", header_number(gHeader.to_go), gNextName] : @"All word levels reached" x:54 y:168 width:185 size:11 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
+    NSBox *line = [[NSBox alloc] initWithFrame:NSMakeRect(6, 196, 240, 1)];
+    line.boxType = NSBoxSeparator;
+    [self addSubview:line];
+    [self setAccessibilityElement:YES];
+    [self setAccessibilityRole:NSAccessibilityGroupRole];
+    NSString *speed = gHeader.wpm < 0 ? @"Speed available after one minute of speech" : [NSString stringWithFormat:@"%.0f words per minute, %.1f times typing speed", gHeader.wpm, gHeader.times_typing];
+    NSString *next = gNextName.length ? [NSString stringWithFormat:@"%@ to %@", header_number(gHeader.to_go), gNextName] : @"All word levels reached";
+    [self setAccessibilityLabel:[NSString stringWithFormat:@"%@ words. %@ today. %@. %@. %@.", header_number(gHeader.total), header_number(gHeader.today), speed, gLevelName, next]];
+    [CATransaction commit];
+}
+@end
+
 static NSFont *item_font(void) {
     return [NSFont systemFontOfSize:13];
 }
@@ -234,9 +447,27 @@ static CGFloat fill_body(NSView *body, CGFloat width, const SeeMenuRow *rows, in
     CGFloat height = kPadding * 2;
     for (int i = 0; i < count; i++) height += row_height(&rows[i], width);
 
+    BOOL header = body == gBody && gHeader.present;
+    if (header) height += 204;
     body.frame = NSMakeRect(0, 0, width, height);
+    static SeeMenuHeaderView *cachedHeader;
+    static NSString *cachedValues;
+    NSString *values = [NSString stringWithFormat:@"%@/%@/%@/%@/%@/%@/%@/%@", @(gHeader.total), @(gHeader.previous), @(gHeader.delta), @(gHeader.today), gSince, gLevelName, gNextName, @(gHeader.to_go)];
+    values = [values stringByAppendingFormat:@"/%@/%@/%@/%@", @(gHeader.wpm), @(gHeader.times_typing), @(gHeader.hours_saved), @(gHeader.progress)];
+    values = [values stringByAppendingFormat:@"/%d", gHeader.level_index];
+    BOOL reuse = !gOpeningHeader && [cachedValues isEqualToString:values];
     [body.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
     CGFloat y = height - kPadding;
+    if (header) {
+        NSRect headerFrame = NSMakeRect(kPadding, y - 204, width - kPadding * 2, 204);
+        SeeMenuHeaderView *view = reuse ? cachedHeader : [[SeeMenuHeaderView alloc] initWithFrame:headerFrame];
+        view.frame = headerFrame;
+        cachedHeader = view;
+        cachedValues = values;
+        [body addSubview:view];
+        if (!reuse) [view build:gOpeningHeader];
+        y -= 204;
+    }
     for (int i = 0; i < count; i++) {
         const SeeMenuRow *row = &rows[i];
         CGFloat h = row_height(row, width);
@@ -522,9 +753,11 @@ void see_menu_update_submenu(const SeeMenuRow *rows, int count) {
 
 void see_menu_show(const SeeMenuRow *rows, int count) {
     ensure_panel();
+    gOpeningHeader = YES;
     CGFloat height = fill_body(gBody, kPanelWidth, rows, count);
     [gPanel setContentSize:NSMakeSize(kPanelWidth, height)];
 
+    gOpeningHeader = NO;
     NSPoint mouse = NSEvent.mouseLocation;
     NSScreen *screen = NSScreen.mainScreen;
     for (NSScreen *candidate in NSScreen.screens) {

@@ -39,6 +39,9 @@
   let editing = null; // { id, idx, draft, error }
   let target = null; // { id, startMs }: a line opened from the Dictionary
   const dictionary = () => (kind === "dictionary" ? window.seeDictionary : null);
+  // The Words view is pinned above every list but the Dictionary's.
+  const WORDS = "words";
+  const known = (id) => id === WORDS || items.some((item) => item.id === id);
 
   const fmt = {
     day(ms) {
@@ -91,6 +94,10 @@
     const list = $("#list");
     const rows = visible();
     list.innerHTML = "";
+    const pin = document.createElement("div");
+    pin.className = "pin";
+    pin.appendChild(window.seeWords.row(currentId === WORDS));
+    list.appendChild(pin);
     let lastDay = null;
     for (const i of rows) {
       const day = fmt.day(i.at);
@@ -112,12 +119,13 @@
       el.addEventListener("click", () => select(i.id));
       list.appendChild(el);
     }
-    if (!rows.length) list.innerHTML = `<div class="empty">${loaded ? "Nothing matches." : "Loading…"}</div>`;
+    if (!rows.length) list.insertAdjacentHTML("beforeend", `<div class="empty">${loaded ? "Nothing matches." : "Loading…"}</div>`);
     $("#count").textContent = `${rows.length} of ${items.length}`;
   }
 
   function select(id) {
-    if (!items.some((item) => item.id === id)) return;
+    if (!known(id)) return;
+    if (id === WORDS && currentId !== WORDS) window.seeWords.open();
     currentId = id;
     renderList();
     renderDetail();
@@ -265,6 +273,7 @@
   function renderDetail() {
     if (dictionary()) return dictionary().renderDetail();
     const d = $("#detail");
+    if (currentId === WORDS) return window.seeWords.renderDetail(d);
     const i = items.find((x) => x.id === currentId);
     if (!i) { d.innerHTML = `<div class="blank">${loaded ? "Pick something on the left." : "Loading your library…"}</div>`; return; }
     d.innerHTML = `<article class="page">
@@ -383,7 +392,7 @@
     $("#search").placeholder = kind === "dictionary" ? "Search words" : "Search everything";
     if (dictionary()) { dictionary().activate(); return; }
     const rows = visible();
-    if (!rows.some((r) => r.id === currentId)) currentId = rows[0]?.id;
+    if (currentId !== WORDS && !rows.some((r) => r.id === currentId)) currentId = rows[0]?.id;
     renderList(); renderDetail();
     if (leavingDictionary) return reload();
   }
@@ -397,9 +406,9 @@
     if (["INPUT", "TEXTAREA"].includes(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "j" && e.key !== "k") return;
     if (dictionary()) { e.preventDefault(); dictionary().move(e.key === "ArrowDown" || e.key === "j" ? 1 : -1); return; }
-    const rows = visible(); const idx = rows.findIndex((r) => r.id === currentId);
-    const next = rows[idx + (e.key === "ArrowDown" || e.key === "j" ? 1 : -1)];
-    if (next) { e.preventDefault(); select(next.id); $(`.row[data-id="${CSS.escape(next.id)}"]`)?.scrollIntoView({ block: "nearest" }); }
+    const ids = [WORDS, ...visible().map((r) => r.id)];
+    const next = ids[ids.indexOf(currentId) + (e.key === "ArrowDown" || e.key === "j" ? 1 : -1)];
+    if (next) { e.preventDefault(); select(next); $(`.row[data-id="${CSS.escape(next)}"]`)?.scrollIntoView({ block: "nearest" }); }
   });
 
   // Appearance
@@ -423,7 +432,7 @@
       if (version !== loadVersion) return;
       loaded = true;
       items = next.sort((a, b) => b.at - a.at);
-      if (!currentId || !items.some((i) => i.id === currentId)) currentId = items[0]?.id ?? null;
+      if (!currentId || !known(currentId)) currentId = items[0]?.id ?? null;
       if (dictionary()) return;
       renderList();
       // A fix being typed survives a reload unless its line is gone.
@@ -440,6 +449,11 @@
      line, "<item>@<startMs>" to show one, or a bare item id. */
   async function route(path) {
     if (!path) return;
+    if (path === WORDS) {
+      if (kind === "dictionary") setKind("all");
+      select(WORDS);
+      return;
+    }
     if (path === "dictionary" || path.startsWith("dictionary:")) {
       setKind("dictionary");
       if (path.startsWith("dictionary:")) window.seeDictionary.select(path.slice(11));
@@ -475,6 +489,7 @@
   window.seeLibrary = {
     $, esc, fmt, toast, ICON, GLYPH,
     query: () => query,
+    current: () => currentId,
     count: (text) => { $("#count").textContent = text; },
     open: (id, startMs) => route(startMs == null ? id : `${id}@${startMs}`),
   };
@@ -488,12 +503,12 @@
     tauri.event.listen("library-changed", reload);
     tauri.event.listen("library-select", ({ payload }) => route(payload));
     window.addEventListener("focus", reload);
-    // The Dictionary loads on its own, so it opens without waiting for every
-    // dictation, take and meeting to be read.
-    const toDictionary = start === "dictionary" || !!start?.startsWith("dictionary:");
-    if (toDictionary) await route(start);
+    // The Dictionary and Words load on their own, so they open without waiting
+    // for every dictation, take and meeting to be read.
+    const early = start === "dictionary" || !!start?.startsWith("dictionary:") || start === WORDS;
+    if (early) await route(start);
     else { renderList(); renderDetail(); }
     await reload();
-    if (!toDictionary) await route(start);
+    if (!early) await route(start);
   });
 })();

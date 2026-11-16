@@ -73,3 +73,10 @@ pub fn shadow() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| app_support().join("shadow"))
 }
+
+/// Per-dictation audio duration and word count.
+pub fn speed_log() -> PathBuf {
+    std::env::var_os("SEE_COMPUTER_SPEED_LOG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| app_support().join("speed.tsv"))
+}

@@ -16,6 +16,9 @@ pub const PREROLL: Duration = Duration::from_millis(300);
 pub struct Audio16k(Vec<f32>);
 
 impl Audio16k {
+    pub fn duration(&self) -> Duration {
+        Duration::from_secs_f64(self.0.len() as f64 / 16_000.0)
+    }
     pub(crate) fn from_samples(samples: Vec<f32>) -> Self {
         Self(samples)
     }

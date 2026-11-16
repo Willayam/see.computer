@@ -735,13 +735,14 @@ impl Controller {
                         audio,
                         ..
                     }) if !stray_letter(text.as_str()) => {
+                        let spoken = audio.as_ref().map(crate::mic::Audio16k::duration);
                         let id = self.ledger.mint();
                         if let Some(audio) = audio {
                             self.ledger.dictated(&id, text.as_str(), audio);
                         }
                         self.ledger
                             .context(&id, &self.engine.context_used(), text.as_str());
-                        self.history.record(text.as_str());
+                        self.history.record(text.as_str(), spoken);
                         crate::setup::note_dictation();
                         {
                             let held = crate::pill::Held {
@@ -789,7 +790,7 @@ impl Controller {
             ) => {
                 let transcription = result.unwrap_or_else(|_| engine::Transcription::empty());
                 if let Some(text) = &transcription.text {
-                    self.history.record(text.as_str());
+                    self.history.record(text.as_str(), None);
                 }
                 self.spawn_take_package(take, duration_ms, transcription)
             }
@@ -1063,11 +1064,12 @@ impl Controller {
                 audio,
                 ..
             }) if !stray_letter(text.as_str()) => {
+                let spoken = audio.as_ref().map(crate::mic::Audio16k::duration);
                 let id = self.ledger.mint();
                 if let Some(audio) = audio {
                     self.ledger.dictated(&id, text.as_str(), audio);
                 }
-                self.history.record(text.as_str());
+                self.history.record(text.as_str(), spoken);
                 if matches!(self.session, Session::Idle) {
                     let _ = self.pill.send(PillEvent::Held(crate::pill::Held {
                         text: text.as_str().to_owned(),

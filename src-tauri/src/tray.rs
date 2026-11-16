@@ -84,6 +84,7 @@ struct Panel {
     /// thread for 5 s. So the panel draws this copy and pokes `reread`.
     recents: Arc<Mutex<Vec<recents::Recent>>>,
     reread: Sender<()>,
+    header_totals: Arc<Mutex<HeaderTotals>>,
 }
 
 pub struct Wiring {
@@ -133,6 +134,7 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
         learned: Arc::new(Mutex::new(Vec::new())),
         recents: Arc::new(Mutex::new(Vec::new())),
         reread,
+        header_totals: Arc::new(Mutex::new(HeaderTotals::default())),
     };
     let reader = panel.clone();
     crate::qos::spawn("see-recents", crate::qos::Class::Upkeep, move || {
@@ -183,7 +185,14 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
             } = event
             {
                 let _ = panel.reread.send(());
+                if menu::is_open() {
+                    menu::toggle(&[]);
+                    return;
+                }
                 menu::toggle(&panel.main_rows());
+                if menu::is_open() {
+                    panel.remember_total();
+                }
             }
         })
         .build(app)?;
@@ -191,7 +200,39 @@ pub fn install(app: &AppHandle, wiring: Wiring) -> tauri::Result<()> {
 }
 
 impl Panel {
+    fn remember_total(&self) {
+        let mut totals = self
+            .header_totals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        totals.roll_from = totals.shown;
+        totals.shown = totals.prepared;
+    }
+
     fn main_rows(&self) -> Vec<Row> {
+        let tally = self.history.words();
+        let mut totals = self
+            .header_totals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let header = tally.as_ref().map(|tally| {
+            build_header(
+                tally,
+                chrono::Local::now().date_naive(),
+                if menu::is_open() {
+                    totals.roll_from
+                } else {
+                    totals.shown
+                },
+            )
+        });
+        totals.prepared = header.as_ref().map(|h| h.total);
+        if menu::is_open() {
+            totals.shown = totals.prepared;
+        }
+        menu::set_header(header.as_ref());
+
+        drop(totals);
         let mut rows = Vec::new();
         rows.extend(self.problem_rows());
         // Words a slow engine still owes. App Support is local, so counting
@@ -697,6 +738,109 @@ mod dictionary_tests {
                 .filter(|row| matches!(row, Row::Item { checked: true, .. }))
                 .count(),
             8
+        );
+    }
+}
+
+#[derive(Default)]
+struct HeaderTotals {
+    shown: Option<u64>,
+    roll_from: Option<u64>,
+    prepared: Option<u64>,
+}
+
+fn build_header(
+    tally: &crate::tally::Tally,
+    today: chrono::NaiveDate,
+    previous: Option<u64>,
+) -> menu::Header {
+    let summary = crate::tally::summary(tally, today);
+    let level = crate::tally::level(summary.total);
+    let progress = level.next.as_ref().map_or(1.0, |next| {
+        (summary.total - level.at) as f64 / (next.at - level.at) as f64
+    });
+    let previous = previous.unwrap_or(summary.total).min(summary.total);
+    menu::Header {
+        total: summary.total,
+        previous,
+        delta: summary.total - previous,
+        today: tally.on(today).words,
+        wpm: summary.wpm,
+        times_typing: summary.times_typing,
+        hours_saved: summary.hours_saved,
+        since: summary
+            .since
+            .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok())
+            .map_or(String::new(), |d| d.format("%-d %b").to_string()),
+        level_name: level.name.unwrap_or(""),
+        next_name: level.next.as_ref().map_or("", |n| n.name),
+        level_index: level.index,
+        to_go: level.next.as_ref().map_or(0, |n| n.to_go),
+        progress,
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+    use crate::tally::{Count, Tally};
+
+    #[test]
+    fn header_values_and_open_baseline() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 16).unwrap();
+        let tally = Tally {
+            days: std::collections::BTreeMap::from([
+                (
+                    chrono::NaiveDate::from_ymd_opt(2026, 8, 26).unwrap(),
+                    Count {
+                        words: 112_187,
+                        dictations: 1,
+                        timed_words: 1210,
+                        spoken_ms: 600_000,
+                    },
+                ),
+                (
+                    today,
+                    Count {
+                        words: 473,
+                        dictations: 1,
+                        ..Count::default()
+                    },
+                ),
+            ]),
+            ..Tally::default()
+        };
+        let h = build_header(&tally, today, Some(112_622));
+        assert_eq!(
+            (h.total, h.previous, h.delta, h.today),
+            (112_660, 112_622, 38, 473)
+        );
+        assert_eq!(h.wpm, Some(121));
+        assert_eq!(h.times_typing, Some(3.0));
+        assert_eq!(h.hours_saved, Some(31.4));
+        assert_eq!(
+            (h.level_name, h.next_name, h.to_go),
+            ("Novel", "Epic", 137_340)
+        );
+        assert_eq!(h.progress, 0.0844);
+        assert_eq!(h.since, "26 Aug");
+        assert_eq!(build_header(&tally, today, None).delta, 0);
+        assert_eq!(build_header(&tally, today, Some(200_000)).previous, 112_660);
+        let empty = build_header(&Tally::default(), today, None);
+        assert_eq!(
+            (empty.wpm, empty.times_typing, empty.hours_saved),
+            (None, None, None)
+        );
+        assert_eq!(
+            (empty.level_name, empty.next_name, empty.progress),
+            ("", "Letter", 0.0)
+        );
+        let mut million = tally;
+        million.days.get_mut(&today).unwrap().words = 1_000_000;
+        let top = build_header(&million, today, None);
+        assert_eq!(
+            (top.level_name, top.next_name, top.progress),
+            ("Million", "", 1.0)
         );
     }
 }

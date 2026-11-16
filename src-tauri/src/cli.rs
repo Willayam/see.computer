@@ -1,4 +1,4 @@
-//! `see-computer transcribe <wav>`, `clip <mov>`, `meetings`, `notes <meeting-folder>`, and `tap <seconds> <out.wav> [bundle-id]` are CLI commands.
+//! `see-computer transcribe <wav>`, `clip <mov>`, `meetings`, `notes <meeting-folder>`, `words [--days]`, and `tap <seconds> <out.wav> [bundle-id]` are CLI commands.
 //! The first two use the same engine and model root as the app.
 
 use std::path::PathBuf;
@@ -15,6 +15,9 @@ pub enum Cmd {
     /// differ from the one the decoder is boosting, as in a boost-off run.
     Eval(PathBuf, Option<PathBuf>),
     Meetings,
+    Words {
+        days: bool,
+    },
     Notes(PathBuf),
     Tap(u64, PathBuf, Option<String>),
 }
@@ -31,6 +34,11 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
         Some("eval") => args
             .next()
             .map(|manifest| Cmd::Eval(manifest.into(), args.next().map(PathBuf::from))),
+        Some("words") => match args.next().as_deref() {
+            None => Some(Cmd::Words { days: false }),
+            Some("--days") => Some(Cmd::Words { days: true }),
+            _ => None,
+        },
         Some("meetings") => Some(Cmd::Meetings),
         Some("notes") => args.next().map(PathBuf::from).map(Cmd::Notes),
         Some("tap") => {
@@ -50,6 +58,7 @@ pub fn run(cmd: Cmd) -> i32 {
         Cmd::Clip(path) => clip(path),
         Cmd::Eval(path, terms) => eval(path, terms),
         Cmd::Meetings => meetings(),
+        Cmd::Words { days } => words(days),
         Cmd::Notes(folder) => match crate::meeting::notes::transcribe(&folder) {
             Ok(path) => {
                 println!("{}", path.display());
@@ -505,4 +514,67 @@ fn print_text(result: Result<Transcription, EngineError>) -> i32 {
             1
         }
     }
+}
+
+fn words(days: bool) -> i32 {
+    let root = std::env::var_os("SEE_COMPUTER_HISTORY_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(crate::paths::documents);
+    let mut tally = crate::tally::Tally::read(&root, &crate::paths::speed_log());
+    if !tally.waiting.is_empty() {
+        crate::library::download(&tally.waiting);
+        let started = Instant::now();
+        while tally
+            .waiting
+            .iter()
+            .any(|path| crate::shadow::evicted(path))
+            && started.elapsed() < Duration::from_secs(120)
+        {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        tally = crate::tally::Tally::read(&root, &crate::paths::speed_log());
+    }
+    if days {
+        for (date, count) in &tally.days {
+            println!(
+                "{date}\t{}\t{}\t{}",
+                count.words,
+                count.dictations,
+                count
+                    .wpm()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "-".into())
+            );
+        }
+    } else {
+        let today = chrono::Local::now().date_naive();
+        let total = tally.total();
+        println!("words        {}", total.words);
+        println!("dictations   {}", total.dictations);
+        println!("today        {}", tally.on(today).words);
+        println!(
+            "last 7 days  {}",
+            tally.since(today - chrono::Days::new(6)).words
+        );
+        println!(
+            "speed        {}",
+            total
+                .wpm()
+                .map(|n| format!("{n} wpm"))
+                .unwrap_or_else(|| "not timed yet".into())
+        );
+        println!(
+            "first day    {}",
+            tally
+                .days
+                .keys()
+                .next()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "none".into())
+        );
+    }
+    if !tally.waiting.is_empty() {
+        println!("in iCloud   {} day files not counted", tally.waiting.len());
+    }
+    0
 }

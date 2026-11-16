@@ -24,9 +24,20 @@ pub enum PillEvent {
     /// Read-back recorded a fix to a word the learner can use. Waits for the
     /// pill to be idle, so it never covers a dictation.
     Fixed(Fix),
+    LevelUp(LevelUp),
     /// What the take reads as so far, shown in the chip beside the bars.
     Preview(String),
     Hide,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LevelUp {
+    pub index: usize,
+    pub name: &'static str,
+    pub at: u64,
+    pub total: u64,
+    pub times_typing: Option<f64>,
 }
 
 /// A spelling the user fixed in place, as the card shows it.
@@ -43,6 +54,12 @@ pub struct Fix {
 enum Card {
     Held(Held),
     Fixed(Fix),
+    LevelUp(LevelUp),
+}
+
+fn queue_fixed(pending: &mut std::collections::VecDeque<Card>, next: Fix) {
+    pending.retain(|card| !matches!(card, Card::Fixed(_)));
+    pending.push_back(Card::Fixed(next));
 }
 
 /// What the stretched pill shows. `note` mirrors the tray's glyph column: a
@@ -162,6 +179,7 @@ enum Wire {
         ends: bool,
     },
     Held(Held),
+    Level(LevelUp),
     Fixed {
         text: String,
         note: &'static str,
@@ -202,20 +220,25 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
     crate::qos::spawn("see-pill", crate::qos::Class::Upkeep, move || {
         let mut current = None;
         let mut cancel_armed = false;
-        let mut fix: Option<Fix> = None;
+        let mut pending = std::collections::VecDeque::<Card>::new();
         let mut last_wire = std::time::Instant::now();
         loop {
-            let event = if fix.is_some() {
+            let event = if !pending.is_empty() {
                 match rx.recv_timeout(FIX_DELAY.saturating_sub(last_wire.elapsed())) {
                     Ok(event) => event,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         let showing = card.lock().map(|slot| slot.is_some()).unwrap_or(true);
                         if current.is_none() && !showing {
-                            if let Some(fix) = fix.take() {
+                            if let Some(next) = pending.pop_front() {
                                 if let Ok(mut slot) = card.lock() {
-                                    *slot = Some(Card::Fixed(fix.clone()));
+                                    *slot = Some(next.clone());
                                 }
-                                let _ = app.emit_to("pill", "pill", Wire::fixed(&fix));
+                                let wire = match next {
+                                    Card::Fixed(fix) => Wire::fixed(&fix),
+                                    Card::LevelUp(level) => Wire::Level(level),
+                                    Card::Held(held) => Wire::Held(held),
+                                };
+                                let _ = app.emit_to("pill", "pill", wire);
                             }
                         }
                         last_wire = std::time::Instant::now();
@@ -230,7 +253,11 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                 }
             };
             if let PillEvent::Fixed(next) = event {
-                fix = Some(next);
+                queue_fixed(&mut pending, next);
+                continue;
+            }
+            if let PillEvent::LevelUp(next) = event {
+                pending.push_back(Card::LevelUp(next));
                 continue;
             }
             if let PillEvent::Preview(text) = event {
@@ -248,6 +275,7 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                 PillEvent::Finish(_) | PillEvent::Hide | PillEvent::Held(_) => current = None,
                 PillEvent::Shot
                 | PillEvent::Flash(_)
+                | PillEvent::LevelUp(_)
                 | PillEvent::Fixed(_)
                 | PillEvent::Preview(_) => {}
             }
@@ -271,7 +299,7 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                     Wire::Held(held)
                 }
                 PillEvent::Hide => Wire::Hide,
-                PillEvent::Fixed(_) | PillEvent::Preview(_) => continue,
+                PillEvent::Fixed(_) | PillEvent::LevelUp(_) | PillEvent::Preview(_) => continue,
             };
             if starts_activity {
                 let dispatcher = app.clone();
@@ -438,11 +466,12 @@ fn attach_card_listeners(
             // dismissed, so the window shrinks after the animation not during.
             // Names the card it closes, so a dismissal that arrives after
             // the next card was stored leaves that card up.
-            dismiss @ ("dismiss-held" | "dismiss-fixed") => {
+            dismiss @ ("dismiss-held" | "dismiss-fixed" | "dismiss-level") => {
                 if let Ok(mut slot) = card.lock() {
                     let same = match slot.as_ref() {
                         Some(Card::Held(_)) => dismiss == "dismiss-held",
                         Some(Card::Fixed(_)) => dismiss == "dismiss-fixed",
+                        Some(Card::LevelUp(_)) => dismiss == "dismiss-level",
                         None => true,
                     };
                     if !same {
@@ -651,7 +680,54 @@ fn place(window: &WebviewWindow, logical: (f64, f64)) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fixed_coalesces_without_dropping_level() {
+        use super::*;
+        let mut pending = std::collections::VecDeque::new();
+        queue_fixed(&mut pending, Fix::default());
+        queue_fixed(
+            &mut pending,
+            Fix {
+                wrote: "second".into(),
+                ..Fix::default()
+            },
+        );
+        assert_eq!(pending.len(), 1);
+        pending.push_back(Card::LevelUp(LevelUp {
+            index: 1,
+            name: "Letter",
+            at: 1000,
+            total: 1001,
+            times_typing: None,
+        }));
+        queue_fixed(
+            &mut pending,
+            Fix {
+                wrote: "third".into(),
+                ..Fix::default()
+            },
+        );
+        assert_eq!(pending.len(), 2);
+        assert!(matches!(pending[0], Card::LevelUp(_)));
+        assert!(matches!(&pending[1], Card::Fixed(fix) if fix.wrote == "third"));
+    }
+
     use super::*;
+
+    #[test]
+    fn level_wire_matches_library_contract() {
+        let wire = Wire::Level(LevelUp {
+            index: 1,
+            name: "Letter",
+            at: 1000,
+            total: 1004,
+            times_typing: Some(3.0),
+        });
+        assert_eq!(
+            serde_json::to_value(wire).unwrap(),
+            serde_json::json!({"kind":"level","index":1,"name":"Letter","at":1000,"total":1004,"timesTyping":3.0})
+        );
+    }
 
     /// The loudest band per 100 ms window of `fixtures/en.wav`, attenuated
     /// by `gain_db`, after the running reference has scaled it.
