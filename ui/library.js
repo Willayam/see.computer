@@ -201,7 +201,7 @@
   }
 
   function notice(i) {
-    if (i.state === "recording") return `<div class="notice rec">${ICON.rec}<div><strong>Recording this call.</strong> New lines appear during the call. The transcript and audio appear here when processing finishes.</div></div>`;
+    if (i.state === "recording") return `<div class="notice rec">${ICON.rec}<div><strong>Recording this call.</strong> Lines appear a few seconds after they are said. A cleaner transcript and the audio replace them when the call ends.</div></div>`;
     if (i.state === "transcribing") return `<div class="notice">${ICON.spin}<div><strong>Transcribing ${fmt.dur(i.durationMs)} of audio.</strong> The transcript will appear here when it is ready.</div></div>`;
     if (i.state === "cloud") return `<div class="notice">${ICON.spin}<div><strong>Downloading from iCloud.</strong> macOS moved this file to iCloud to free up space on this Mac. It appears here once it downloads.</div></div>`;
     // A meeting with no end time was cut off mid-recording and has nothing to transcribe again.
@@ -439,7 +439,11 @@
       const fix = $(".fix");
       const kept = editing && items.find((i) => i.id === editing.id)?.lines[editing.idx];
       if (editing && !kept) editing = null;
+      const detail = $("#detail");
+      const atBottom = detail.scrollHeight - detail.scrollTop - detail.clientHeight < 40;
+      const stickToBottom = atBottom && items.find((i) => i.id === currentId)?.state === "recording";
       if (!(fix && kept && !editing.error && document.activeElement === fix)) renderDetail();
+      if (stickToBottom) detail.scrollTop = detail.scrollHeight;
       $("#list").scrollTop = scroll;
     } catch (error) { toast(`Library could not load: ${error}`); }
   }

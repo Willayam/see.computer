@@ -49,13 +49,18 @@ impl Models {
         }
     }
 
-    pub fn ensure(&self, on: &mut dyn FnMut(Progress)) -> Result<ModelFiles, EngineError> {
+    /// The prepared model, if it is already on disk. Never downloads.
+    pub fn ready(&self) -> Option<ModelFiles> {
         let prepared = self.root.with_file_name(PREPARED_DIR);
-        if prepared.join("ready").exists() {
-            return Ok(ModelFiles {
-                dir: prepared,
-                prepared: true,
-            });
+        prepared.join("ready").exists().then_some(ModelFiles {
+            dir: prepared,
+            prepared: true,
+        })
+    }
+
+    pub fn ensure(&self, on: &mut dyn FnMut(Progress)) -> Result<ModelFiles, EngineError> {
+        if let Some(files) = self.ready() {
+            return Ok(files);
         }
         fs::create_dir_all(&self.root).map_err(download_error)?;
         let total = CATALOG.iter().map(|file| file.bytes).sum();

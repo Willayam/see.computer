@@ -175,7 +175,7 @@ impl Utterance {
 /// A cut mid-word makes the model mangle that word twice, so prefer the first
 /// real pause after the target; the quietest window anywhere past it is the
 /// last resort once the chunk hits its maximum.
-fn chunk_cut(pending: &[f32]) -> Option<usize> {
+pub(crate) fn chunk_cut(pending: &[f32]) -> Option<usize> {
     if pending.len() < CHUNK_TARGET {
         return None;
     }

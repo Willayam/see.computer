@@ -8,6 +8,7 @@ use crate::meeting::{holders, processes_of, MeetingApp};
 use crate::mic::{meeting_sink, Block, StreamingResampler};
 use crate::qos::{self, Class};
 
+use super::live::{self, Live};
 use super::tap::{self, SystemTap};
 
 pub struct Recording {
@@ -15,6 +16,7 @@ pub struct Recording {
     manifest: Manifest,
     mic: Option<JoinHandle<io::Result<()>>>,
     tap: Option<SystemTap>,
+    live: Option<Live>,
 }
 
 pub fn start(
@@ -40,12 +42,14 @@ pub fn start(
         Ok(tap) => (Some(tap), None),
         Err(error) => (None, Some(error.to_string())),
     };
+    let live = live::start(folder.clone(), manifest.clone());
     Ok((
         Recording {
             folder,
             manifest,
             mic: Some(mic),
             tap,
+            live: Some(live),
         },
         warning,
     ))
@@ -53,6 +57,9 @@ pub fn start(
 
 impl Recording {
     pub fn stop(mut self, now_ms: i64) -> io::Result<PathBuf> {
+        if let Some(live) = self.live.take() {
+            live.stop_and_wait();
+        }
         *meeting_sink()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
