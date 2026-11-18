@@ -113,13 +113,22 @@ jobs:
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
           args: --target aarch64-apple-darwin
-      - name: Attach the website installer to the draft
+      - name: Notarize and verify the downloadable disk image
         env:
           GH_TOKEN: ${{ github.token }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           version=${GITHUB_REF_NAME#v}
           installer="$RUNNER_TEMP/see.computer.dmg"
           gh release download "$GITHUB_REF_NAME" --pattern "see.computer_${version}_aarch64.dmg" --output "$installer"
+          credentials=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+          xcrun notarytool submit "$installer" "${credentials[@]}" --wait --output-format json > "$RUNNER_TEMP/notarization.json"
+          jq -e '.status == "Accepted"' "$RUNNER_TEMP/notarization.json"
+          xcrun stapler staple "$installer"
+          xcrun stapler validate "$installer"
+          spctl --assess --type open --context context:primary-signature "$installer"
           mountpoint=$(mktemp -d)
           hdiutil attach -readonly -nobrowse -mountpoint "$mountpoint" "$installer"
           trap 'hdiutil detach "$mountpoint"' EXIT
@@ -127,4 +136,6 @@ jobs:
           app="$mountpoint/see.computer.app"
           test "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" = "$version"
           spctl --assess --type execute "$app"
-          gh release upload "$GITHUB_REF_NAME" "$installer" --clobber
+          versioned="$RUNNER_TEMP/see.computer_${version}_aarch64.dmg"
+          cp "$installer" "$versioned"
+          gh release upload "$GITHUB_REF_NAME" "$installer" "$versioned" --clobber
