@@ -14,6 +14,7 @@ name: Release
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 
 on:
+  workflow_dispatch:
   push:
     tags: ["v*"]
 
@@ -21,13 +22,44 @@ permissions:
   contents: write
 
 jobs:
+  preview:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-26
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - uses: tauri-apps/tauri-action@v1
+        with:
+          projectPath: src-tauri
+          args: >-
+            --target aarch64-apple-darwin --bundles dmg
+            --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-preview-${{ github.sha }}
+          path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
   build:
+    if: github.event_name == 'push'
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
+      - name: Check the tag matches the app version
+        run: |
+          version=$(jq -r .version src-tauri/tauri.conf.json)
+          test "$GITHUB_REF_NAME" = "v$version"
+          test "$(cargo metadata --manifest-path src-tauri/Cargo.toml --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "see-computer") | .version')" = "$version"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -81,3 +113,18 @@ jobs:
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
           args: --target aarch64-apple-darwin
+      - name: Attach the website installer to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          installer="$RUNNER_TEMP/see.computer.dmg"
+          gh release download "$GITHUB_REF_NAME" --pattern "see.computer_${version}_aarch64.dmg" --output "$installer"
+          mountpoint=$(mktemp -d)
+          hdiutil attach -readonly -nobrowse -mountpoint "$mountpoint" "$installer"
+          trap 'hdiutil detach "$mountpoint"' EXIT
+          test "$(readlink "$mountpoint/Applications")" = /Applications
+          app="$mountpoint/see.computer.app"
+          test "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" = "$version"
+          spctl --assess --type execute "$app"
+          gh release upload "$GITHUB_REF_NAME" "$installer" --clobber

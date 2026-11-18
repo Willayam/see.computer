@@ -6,7 +6,7 @@ The same dictation engine also runs as a keyboard on iPhone. See [ios/README.md]
 
 ## Install
 
-Download the DMG from the [latest release](https://github.com/Willayam/see.computer/releases/latest), drag see.computer into Applications, and open it. It needs macOS 14 or later on Apple Silicon.
+[Download the Mac installer](https://see.computer/download/mac), open the DMG, drag see.computer into Applications, and open it. It needs macOS 14 or later on Apple Silicon.
 
 The app lives in the menu bar. On first launch it downloads the 670 MB speech model, and the pill at the bottom of the screen shows the percentage. macOS then asks for permissions, each the first time the feature that needs it runs. Microphone and Input Monitoring make hold-to-talk work. Accessibility lets the app paste for you. Screen Recording is only asked for the first time you hold the trigger with Shift. The tray menu has a shortcut to each pane, and the [Permissions](#permissions) section below says what each one is for.
 

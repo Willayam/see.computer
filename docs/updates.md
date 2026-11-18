@@ -47,6 +47,6 @@ The workflow stops before the build if any required secret is missing. The insta
 
 Push a version tag only after the Cargo package version and Tauri configuration version match the tag. The workflow builds Apple Silicon `.app` and `.dmg` bundles. Tauri also creates the `.app.tar.gz` updater archive and its `.sig` file. `tauri-action` writes `latest.json` with a `darwin-aarch64` entry, the archive URL, and the literal signature text.
 
-The workflow creates a draft release and never publishes it. Before publishing, confirm that the draft contains the DMG, updater archive, signature, and `latest.json`. Check that the manifest version matches the tag and that its updater URL names the uploaded `.app.tar.gz` file.
+The workflow creates a draft release and never publishes it. The workflow mounts the DMG, checks its Applications link and app version, and asks Gatekeeper to assess the app. It uploads the same DMG as `see.computer.dmg` for the website. Before publishing, confirm that the draft contains the DMG, updater archive, signature, and `latest.json`. Check that the manifest version matches the tag and that its updater URL names the uploaded `.app.tar.gz` file.
 
 The configured endpoint uses GitHub's `/releases/latest/download/latest.json` route. Drafts and prereleases do not appear at that route. The endpoint starts serving the manifest only after someone publishes the draft as a regular release.
