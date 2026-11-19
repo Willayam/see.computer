@@ -1,6 +1,7 @@
 pub mod controller;
 pub mod folder;
 pub mod holders;
+pub mod live;
 pub mod notes;
 pub mod recorder;
 pub mod tap;
