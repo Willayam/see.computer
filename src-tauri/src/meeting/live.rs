@@ -15,6 +15,9 @@ use super::{notes, transcript};
 const RATE: usize = 16_000;
 const TICK: Duration = Duration::from_secs(2);
 const IDLE_PER_BUSY: u32 = 3;
+/// A loaded Mac can take 8 s over one pass, and three times that left lines
+/// half a minute behind the call.
+const MAX_WAIT: Duration = Duration::from_secs(6);
 const GUESS_MIN: usize = RATE / 2;
 /// ExtAudioFile puts a filler chunk before the samples, which start at byte 4096.
 const HEADER_MAX: u64 = 8192;
@@ -61,7 +64,7 @@ pub fn start(folder: PathBuf, manifest: Manifest) -> Live {
                 notes::log(&folder, &format!("live lines stopped: {error}"));
                 return;
             }
-            wait = TICK.max(started.elapsed() * IDLE_PER_BUSY);
+            wait = (started.elapsed() * IDLE_PER_BUSY).clamp(TICK, MAX_WAIT);
         }
     });
     Live { stop, thread }
