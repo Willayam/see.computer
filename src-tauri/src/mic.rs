@@ -1,4 +1,6 @@
 //! Microphone capture, pre-opened at launch so a hotkey press costs nothing.
+//! A Bluetooth headset is the exception: holding its mic keeps it in call mode,
+//! which also drops its playback to call quality, so it opens per use instead.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
@@ -6,6 +8,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use crate::coreaudio::{self, fourcc, SYSTEM_OBJECT};
 
 pub const RATE: u32 = 16_000;
 /// Always-live ring copied to the head of every capture, so the syllable spoken
@@ -88,6 +92,7 @@ enum Inner {
         device_rate: u32,
         channels: u16,
         liveness_timeout_ms: u64,
+        bluetooth: bool,
     },
     /// The file plays out at the speed it was recorded, so a replayed take
     /// feeds the engine during the hold the way a live microphone does.
@@ -156,6 +161,16 @@ impl Mic {
                 )
             }
         }
+    }
+
+    pub fn is_bluetooth(&self) -> bool {
+        matches!(
+            self.inner,
+            Inner::Live {
+                bluetooth: true,
+                ..
+            }
+        )
     }
 
     /// Whether the armed capture carried any signal. A live microphone never
@@ -251,7 +266,20 @@ impl Mic {
     }
 }
 
+pub fn default_input_is_bluetooth() -> bool {
+    const DEFAULT_INPUT: u32 = fourcc(b"dIn ");
+    const TRANSPORT: u32 = fourcc(b"tran");
+    let Ok(device) = coreaudio::read::<u32>(SYSTEM_OBJECT, DEFAULT_INPUT) else {
+        return false;
+    };
+    matches!(
+        coreaudio::read::<u32>(device, TRANSPORT),
+        Ok(transport) if transport == fourcc(b"blue") || transport == fourcc(b"blea")
+    )
+}
+
 fn open_live() -> Result<(Inner, StreamingResampler), MicError> {
+    let bluetooth = default_input_is_bluetooth();
     let host = cpal::default_host();
     let device = host.default_input_device().ok_or(MicError::NoInputDevice)?;
     let config = device
@@ -329,6 +357,7 @@ fn open_live() -> Result<(Inner, StreamingResampler), MicError> {
             device_rate,
             channels,
             liveness_timeout_ms,
+            bluetooth,
         },
         StreamingResampler::new(device_rate, RATE),
     ))

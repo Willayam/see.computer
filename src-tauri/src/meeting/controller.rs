@@ -206,7 +206,11 @@ fn sweep(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     pending
 }
 
-pub fn spawn(pill: Sender<PillEvent>, autostart: Arc<AtomicBool>) -> (Meetings, JoinHandle<()>) {
+pub fn spawn(
+    pill: Sender<PillEvent>,
+    autostart: Arc<AtomicBool>,
+    session: Sender<crate::session::Msg>,
+) -> (Meetings, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel();
     let (notes_tx, notes_rx) = mpsc::channel::<PathBuf>();
     let status = Arc::new(Mutex::new(Status::Idle));
@@ -272,6 +276,7 @@ pub fn spawn(pill: Sender<PillEvent>, autostart: Arc<AtomicBool>) -> (Meetings, 
                         match recorder::start(&crate::paths::documents(), app, now) {
                             Ok((started, warning)) => {
                                 recording = Some(started);
+                                let _ = session.send(crate::session::Msg::MeetingMic(true));
                                 if let Some(warning) = warning {
                                     flash(&pill, format!("Recording your side only: {warning}"));
                                 }
@@ -285,7 +290,9 @@ pub fn spawn(pill: Sender<PillEvent>, autostart: Arc<AtomicBool>) -> (Meetings, 
                     }
                     Effect::Stop => {
                         if let Some(started) = recording.take() {
-                            match started.stop(now) {
+                            let stopped = started.stop(now);
+                            let _ = session.send(crate::session::Msg::MeetingMic(false));
+                            match stopped {
                                 Ok(folder) => {
                                     notes::log(&folder, "queued after recording");
                                     let _ = notes_tx.send(folder);

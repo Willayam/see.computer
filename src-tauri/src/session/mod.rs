@@ -139,6 +139,9 @@ pub enum Msg {
     RetrySaved,
     PrepareUpdate(Sender<bool>),
     UpdateAborted,
+    /// A meeting started or stopped recording. Its "You" track listens to this
+    /// session's mic, so the mic stays open while it records.
+    MeetingMic(bool),
     Engine(engine::Event),
     Packaged(Turn, Result<Packaged, String>),
     Paste(Turn, paste::Outcome),
@@ -191,6 +194,7 @@ struct Controller {
     readiness: Readiness,
     mic: Option<Mic>,
     mic_source: mic::Source,
+    meeting_mic: bool,
     engine: engine::Worker,
     engine_loader: engine::Loader,
     recorder: Recorder,
@@ -225,6 +229,7 @@ impl Controller {
         // The first press opens it instead, or the setup window asks first.
         let mic = match wiring.mic {
             mic::Source::Default if !crate::setup::microphone_granted() => None,
+            mic::Source::Default if mic::default_input_is_bluetooth() => None,
             source => Mic::open(source).ok(),
         };
         let engine_loader = wiring.engine.clone();
@@ -238,6 +243,7 @@ impl Controller {
             }),
             mic,
             mic_source,
+            meeting_mic: false,
             engine,
             engine_loader,
             recorder: wiring.recorder,
@@ -334,6 +340,16 @@ impl Controller {
                 }
             }
             Msg::UpdateAborted => self.updating = false,
+            Msg::MeetingMic(recording) => {
+                self.meeting_mic = recording;
+                let consent = !matches!(self.mic_source, mic::Source::Default)
+                    || crate::setup::microphone_granted();
+                if recording && consent {
+                    if let Err(error) = self.open_mic() {
+                        self.trail.note(from, "MicUnavailable", &error.to_string());
+                    }
+                }
+            }
             Msg::Engine(engine::Event::Done(job, result))
                 if self.late.iter().any(|(late, _)| *late == job) =>
             {
@@ -400,8 +416,41 @@ impl Controller {
         if message == "MainPressed" && !matches!(self.session, Session::Dictating { .. }) {
             self.gesture.request_unlock();
         }
+        self.release_idle_bluetooth_mic();
         let to = session_label(&self.session);
         self.trail.record(from, message, to);
+    }
+
+    /// Opens the mic if it is closed or its stream died.
+    fn open_mic(&mut self) -> Result<(), mic::MicError> {
+        if self.mic.as_ref().is_some_and(Mic::is_live) {
+            return Ok(());
+        }
+        let started = Instant::now();
+        match self.mic.as_mut() {
+            Some(mic) => mic.ensure_live()?,
+            None => self.mic = Some(Mic::open(self.mic_source.clone())?),
+        }
+        let detail = format!(
+            "bluetooth={} open_ms={}",
+            self.mic.as_ref().is_some_and(Mic::is_bluetooth),
+            started.elapsed().as_millis()
+        );
+        self.trail
+            .note(session_label(&self.session), "MicOpened", &detail);
+        Ok(())
+    }
+
+    fn release_idle_bluetooth_mic(&mut self) {
+        let in_use = self.meeting_mic || matches!(self.session, Session::Dictating { .. });
+        if !in_use && self.mic.as_ref().is_some_and(Mic::is_bluetooth) {
+            self.mic = None;
+            self.trail.note(
+                session_label(&self.session),
+                "MicReleased",
+                "bluetooth=true",
+            );
+        }
     }
 
     fn step_session(&mut self, msg: Msg) {
@@ -422,21 +471,12 @@ impl Controller {
                     Session::Idle
                 }
                 Readiness::Ready => {
-                    if self.mic.is_none() {
-                        match Mic::open(self.mic_source.clone()) {
-                            Ok(mic) => self.mic = Some(mic),
-                            Err(error) => {
-                                self.finish(Notice::MicUnavailable(error.to_string()));
-                                return;
-                            }
-                        }
+                    if let Err(error) = self.open_mic() {
+                        self.finish(Notice::MicUnavailable(error.to_string()));
+                        return;
                     }
                     match self.mic.as_mut() {
                         Some(mic) => {
-                            if let Err(error) = mic.ensure_live() {
-                                self.finish(Notice::MicUnavailable(error.to_string()));
-                                return;
-                            }
                             let armed = mic.arm();
                             self.heard.clear();
                             self.share_take = self.sharing.enabled();
@@ -1433,6 +1473,8 @@ pub fn msg_label(message: &Msg) -> &'static str {
         Msg::RetrySaved => "RetrySaved",
         Msg::PrepareUpdate(_) => "PrepareUpdate",
         Msg::UpdateAborted => "UpdateAborted",
+        Msg::MeetingMic(true) => "MeetingStarted",
+        Msg::MeetingMic(false) => "MeetingStopped",
         Msg::Engine(engine::Event::Progress(_)) => "EngineProgress",
         Msg::Engine(engine::Event::Ready(_)) => "EngineReady",
         Msg::Engine(engine::Event::Preview(..)) => "EnginePreview",

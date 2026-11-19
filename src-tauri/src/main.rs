@@ -6,6 +6,7 @@ mod cli;
 mod clip;
 mod config;
 mod context;
+mod coreaudio;
 mod dictionary;
 mod engine;
 mod eval;
@@ -92,7 +93,7 @@ fn main() {
     let meeting_autostart =
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(config.meeting_autostart));
     let (meetings, meetings_thread) =
-        meeting::controller::spawn(pill_tx.clone(), meeting_autostart.clone());
+        meeting::controller::spawn(pill_tx.clone(), meeting_autostart.clone(), tx.clone());
     let updater = updater::Updater::new(tx.clone(), pill_tx.clone());
     let status = std::sync::Arc::new(std::sync::Mutex::new(session::EngineStatus::Loading {
         phase: engine::Phase::Downloading,
