@@ -271,12 +271,12 @@ impl Panel {
 
         let recents = self.recents.lock().unwrap_or_else(PoisonError::into_inner);
         if recents.is_empty() {
-            // Two hint rows so the whole sentence fits the panel width.
-            rows.push(Row::Hint(format!(
-                "Hold {} and speak —",
-                current_trigger(&self.trigger).label()
-            )));
-            rows.push(Row::Hint("dictations appear here".to_owned()));
+            // The native panel draws the globe as the SF Symbol on the key.
+            let key = match current_trigger(&self.trigger) {
+                Trigger::Fn => "🌐",
+                other => other.label(),
+            };
+            rows.push(Row::Hint(format!("Hold {key} to dictate")));
         }
         let mut payloads = Vec::with_capacity(recents.len());
         for (index, recent) in recents.iter().enumerate() {

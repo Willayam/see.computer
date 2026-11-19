@@ -54,6 +54,9 @@ static const CGFloat kPanelWidth = 268.0;
 static const CGFloat kSubmenuWidth = 210.0;
 static const CGFloat kItemHeight = 28.0;
 static const CGFloat kHintHeight = 22.0;
+/// The stats header, and the speed bars inside it that wait for a wpm.
+static const CGFloat kHeaderHeight = 204.0;
+static const CGFloat kHeaderSpeedHeight = 74.0;
 static const CGFloat kSeparatorHeight = 11.0;
 static const CGFloat kPadding = 8.0;
 // One label column for every row, checked or not, so the left edge of the
@@ -339,8 +342,11 @@ static NSString *header_number(uint64_t value) {
         field.alignment = NSTextAlignmentRight;
         [self addSubview:field];
     }
+    // Until a minute of speech gives a speed, the level row moves up into its place.
+    BOOL hasSpeed = gHeader.wpm >= 0;
+    CGFloat top = hasSpeed ? 0 : kHeaderSpeedHeight;
     double scale = MAX(130, gHeader.wpm);
-    for (int row = 0; row < 2; row++) {
+    for (int row = 0; hasSpeed && row < 2; row++) {
         CGFloat y = 77 + row * 20;
         [self text:row ? @"Typing" : @"You" x:8 y:y width:42 size:11 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
         CALayer *track = [CALayer layer];
@@ -366,18 +372,20 @@ static NSString *header_number(uint64_t value) {
             grow.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
             [fill addAnimation:grow forKey:@"grow"];
         }
-        [self text:row ? @"40 wpm" : (gHeader.wpm < 0 ? @"— wpm" : [NSString stringWithFormat:@"%.0f wpm", gHeader.wpm]) x:188 y:y width:58 size:11 weight:NSFontWeightMedium color:row ? NSColor.secondaryLabelColor : accentInk];
+        [self text:row ? @"40 wpm" : [NSString stringWithFormat:@"%.0f wpm", gHeader.wpm] x:188 y:y width:58 size:11 weight:NSFontWeightMedium color:row ? NSColor.secondaryLabelColor : accentInk];
     }
-    [self text:gHeader.times_typing < 0 ? @"Speed after 1 min of speech" : [NSString stringWithFormat:@"%.1fx faster than typing", gHeader.times_typing] x:8 y:124 width:136 size:11 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
-    NSTextField *saved = label_field(isnan(gHeader.hours_saved) ? @"" : [NSString stringWithFormat:@"%.1f hours saved", gHeader.hours_saved], [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular], NSColor.secondaryLabelColor, 1);
-    saved.alignment = NSTextAlignmentRight;
-    saved.frame = NSMakeRect(140, 124, 106, 16);
-    [self addSubview:saved];
+    if (hasSpeed) {
+        [self text:[NSString stringWithFormat:@"%.1fx faster than typing", gHeader.times_typing] x:8 y:124 width:136 size:11 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
+        NSTextField *saved = label_field(isnan(gHeader.hours_saved) ? @"" : [NSString stringWithFormat:@"%.1f hours saved", gHeader.hours_saved], [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular], NSColor.secondaryLabelColor, 1);
+        saved.alignment = NSTextAlignmentRight;
+        saved.frame = NSMakeRect(140, 124, 106, 16);
+        [self addSubview:saved];
+    }
 
     CGPathRef circle = CGPathCreateWithEllipseInRect(CGRectMake(0, 0, 32, 32), NULL);
     for (int i = 0; i < 2; i++) {
         CAShapeLayer *ring = [CAShapeLayer layer];
-        ring.frame = CGRectMake(10, 151, 32, 32);
+        ring.frame = CGRectMake(10, 151 - top, 32, 32);
         ring.path = circle;
         ring.fillColor = NSColor.clearColor.CGColor;
         [ring setValue:(i ? accentInk : [NSColor.labelColor colorWithAlphaComponent:.12]) forKey:@"seeStroke"];
@@ -391,19 +399,19 @@ static NSString *header_number(uint64_t value) {
     CGPathRelease(circle);
     NSArray *symbols = @[@"circle.dotted", @"doc.text", @"doc.on.doc", @"book.closed", @"book", @"book.closed.fill", @"books.vertical", @"books.vertical.fill"];
     NSImageView *badge = [NSImageView imageViewWithImage:[NSImage imageWithSystemSymbolName:symbols[MIN(7, MAX(0, gHeader.level_index))] accessibilityDescription:nil]];
-    badge.frame = NSMakeRect(17, 158, 18, 18);
+    badge.frame = NSMakeRect(17, 158 - top, 18, 18);
     badge.contentTintColor = NSColor.labelColor;
     [self addSubview:badge];
-    [self text:gLevelName.length ? gLevelName : @"First words" x:54 y:150 width:185 size:12 weight:NSFontWeightSemibold color:NSColor.labelColor];
-    [self text:gNextName.length ? [NSString stringWithFormat:@"%@ to %@", header_number(gHeader.to_go), gNextName] : @"All word levels reached" x:54 y:168 width:185 size:11 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
-    NSBox *line = [[NSBox alloc] initWithFrame:NSMakeRect(6, 196, 240, 1)];
+    [self text:gLevelName.length ? gLevelName : @"First words" x:54 y:150 - top width:185 size:12 weight:NSFontWeightSemibold color:NSColor.labelColor];
+    [self text:gNextName.length ? [NSString stringWithFormat:@"%@ to %@", header_number(gHeader.to_go), gNextName] : @"All word levels reached" x:54 y:168 - top width:185 size:11 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
+    NSBox *line = [[NSBox alloc] initWithFrame:NSMakeRect(6, 196 - top, 240, 1)];
     line.boxType = NSBoxSeparator;
     [self addSubview:line];
     [self setAccessibilityElement:YES];
     [self setAccessibilityRole:NSAccessibilityGroupRole];
-    NSString *speed = gHeader.wpm < 0 ? @"Speed available after one minute of speech" : [NSString stringWithFormat:@"%.0f words per minute, %.1f times typing speed", gHeader.wpm, gHeader.times_typing];
+    NSString *speed = hasSpeed ? [NSString stringWithFormat:@" %.0f words per minute, %.1f times typing speed.", gHeader.wpm, gHeader.times_typing] : @"";
     NSString *next = gNextName.length ? [NSString stringWithFormat:@"%@ to %@", header_number(gHeader.to_go), gNextName] : @"All word levels reached";
-    [self setAccessibilityLabel:[NSString stringWithFormat:@"%@ words. %@ today. %@. %@. %@.", header_number(gHeader.total), header_number(gHeader.today), speed, gLevelName, next]];
+    [self setAccessibilityLabel:[NSString stringWithFormat:@"%@ words. %@ today.%@ %@. %@.", header_number(gHeader.total), header_number(gHeader.today), speed, gLevelName, next]];
     [CATransaction commit];
 }
 @end
@@ -448,7 +456,8 @@ static CGFloat fill_body(NSView *body, CGFloat width, const SeeMenuRow *rows, in
     for (int i = 0; i < count; i++) height += row_height(&rows[i], width);
 
     BOOL header = body == gBody && gHeader.present;
-    if (header) height += 204;
+    CGFloat headerHeight = gHeader.wpm >= 0 ? kHeaderHeight : kHeaderHeight - kHeaderSpeedHeight;
+    if (header) height += headerHeight;
     body.frame = NSMakeRect(0, 0, width, height);
     static SeeMenuHeaderView *cachedHeader;
     static NSString *cachedValues;
@@ -459,14 +468,14 @@ static CGFloat fill_body(NSView *body, CGFloat width, const SeeMenuRow *rows, in
     [body.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
     CGFloat y = height - kPadding;
     if (header) {
-        NSRect headerFrame = NSMakeRect(kPadding, y - 204, width - kPadding * 2, 204);
+        NSRect headerFrame = NSMakeRect(kPadding, y - headerHeight, width - kPadding * 2, headerHeight);
         SeeMenuHeaderView *view = reuse ? cachedHeader : [[SeeMenuHeaderView alloc] initWithFrame:headerFrame];
         view.frame = headerFrame;
         cachedHeader = view;
         cachedValues = values;
         [body addSubview:view];
         if (!reuse) [view build:gOpeningHeader];
-        y -= 204;
+        y -= headerHeight;
     }
     for (int i = 0; i < count; i++) {
         const SeeMenuRow *row = &rows[i];
@@ -491,9 +500,25 @@ static CGFloat fill_body(NSView *body, CGFloat width, const SeeMenuRow *rows, in
         NSTextField *field;
         BOOL wraps = row->kind == SeeRowItem;
         if (row->kind == SeeRowHint) {
-            field = label_field(text,
-                                [NSFont systemFontOfSize:11 weight:NSFontWeightRegular],
-                                NSColor.tertiaryLabelColor, 1);
+            NSFont *font = [NSFont systemFontOfSize:11 weight:NSFontWeightRegular];
+            field = label_field(text, font, NSColor.tertiaryLabelColor, 1);
+            NSRange globe = [text rangeOfString:@"🌐"];
+            if (globe.location != NSNotFound) {
+                NSImageSymbolConfiguration *config = [[NSImageSymbolConfiguration
+                    configurationWithPointSize:11 weight:NSFontWeightRegular]
+                    configurationByApplyingConfiguration:[NSImageSymbolConfiguration
+                        configurationWithPaletteColors:@[NSColor.secondaryLabelColor]]];
+                NSTextAttachment *key = [[NSTextAttachment alloc] init];
+                key.image = [[NSImage imageWithSystemSymbolName:@"globe" accessibilityDescription:@"Globe"]
+                    imageWithSymbolConfiguration:config];
+                NSMutableAttributedString *styled = [[NSMutableAttributedString alloc]
+                    initWithString:text
+                        attributes:@{NSFontAttributeName : font,
+                                     NSForegroundColorAttributeName : NSColor.tertiaryLabelColor}];
+                [styled replaceCharactersInRange:globe
+                            withAttributedString:[NSAttributedString attributedStringWithAttachment:key]];
+                field.attributedStringValue = styled;
+            }
         } else {
             field = label_field(text, item_font(), NSColor.labelColor,
                                 row->kind == SeeRowLine ? 1 : kMaxItemLines);
