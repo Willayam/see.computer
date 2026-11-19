@@ -46,10 +46,13 @@ struct StatsPanel: View, Animatable {
             }
             .padding(.top, compact ? 0 : 14)
             .padding(.bottom, compact ? 11 : 14)
-            Divider()
-            StatsBars(wpm: speed, fraction: fraction, compact: compact)
-                .padding(.top, compact ? 8 : 12)
-                .padding(.bottom, compact ? 0 : 8)
+            // The speed bars wait for a minute of dictation to have a number.
+            if speed != nil {
+                Divider()
+                StatsBars(wpm: speed, fraction: fraction, compact: compact)
+                    .padding(.top, compact ? 8 : 12)
+                    .padding(.bottom, compact ? 0 : 8)
+            }
             if !compact {
                 Divider()
                 footer
@@ -97,15 +100,10 @@ struct StatsPanel: View, Animatable {
         HStack(alignment: .top, spacing: 0) {
             if let times = value.timesTyping {
                 figure(String(format: "%.1fx", times * fraction), unit: "", caption: "typing speed")
-            } else {
-                Text("Speed after a minute of dictation")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 10).padding(.trailing, 6)
+                Divider()
             }
-            Divider()
             figure(value.hoursSaved.map { String(format: "%.1f", $0 * fraction) } ?? "–", unit: "hours", caption: "saved so far")
-                .padding(.leading, 12)
+                .padding(.leading, value.timesTyping == nil ? 0 : 12)
             Divider()
             figure(Int((Double(value.today) * fraction).rounded()).formatted(), unit: "today",
                    caption: value.todayWpm.map { "at \(Int((Double($0) * fraction).rounded())) wpm" } ?? "")
