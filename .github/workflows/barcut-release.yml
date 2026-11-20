@@ -1,0 +1,53 @@
+name: BarCut v1.2.0
+
+on:
+  push:
+    branches: ["release/barcut-v1.2.0"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: Willayam/barcut
+          ref: 6d5fb9b74a8438b9f5916c54ce0e11788b79ba51
+          persist-credentials: false
+      - name: Import Developer ID Application certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          : "${APPLE_CERTIFICATE:?Missing signing certificate}"
+          : "${APPLE_CERTIFICATE_PASSWORD:?Missing certificate password}"
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          password=$(openssl rand -hex 32)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          cert="$RUNNER_TEMP/certificate.p12"
+          trap 'rm -f "$cert"' EXIT
+          umask 077
+          printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$cert"
+          security import "$cert" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -k "$keychain"
+          security find-certificate -c "Apple Root CA" -p /System/Library/Keychains/SystemRootCertificates.keychain > "$RUNNER_TEMP/apple-root.pem"
+          security add-certificates -k "$keychain" "$RUNNER_TEMP/apple-root.pem"
+          security list-keychains -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+      - name: Build, notarize and package
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        run: ./scripts/package-release.sh
+      - name: Save verified release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: BarCut-1.2.0
+          path: release/
+          if-no-files-found: error
+          retention-days: 3
