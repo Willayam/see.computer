@@ -22,7 +22,7 @@ private final class Field: NSObject, UITextDocumentProxy {
 enum TypingVocabularyChecks {
     @MainActor static func main() async {
         let vocabulary = TypingVocabulary()
-        vocabulary.configure(.bilingual)
+        vocabulary.configure(.bilingual, dictionaries: UITextChecker.availableLanguages)
         await withCheckedContinuation { continuation in vocabulary.load { continuation.resume() } }
         let field = Field()
         func suggestions(_ text: String) -> WordSuggestions {
@@ -55,6 +55,11 @@ enum TypingVocabularyChecks {
         field.autocorrectionType = .default
         field.keyboardType = .URL
         precondition(suggestions("teh").titles.isEmpty)
+        field.keyboardType = .default
+        vocabulary.configure(.bilingual, dictionaries: ["en_US"])
+        precondition(suggestions("Vi ses imorg").titles.contains("imorgon"))
+        precondition(suggestions("Jag ").titles.contains("har"))
+        precondition(suggestions("Vi ses itne").automatic == nil)
         print("English and Swedish typing checks passed")
     }
 }

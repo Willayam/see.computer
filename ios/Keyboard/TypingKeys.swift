@@ -110,7 +110,6 @@ final class TypingKeys: UIStackView {
             let controls = characters.map { typingKey(String($0)) }
             let row = addRow()
             let cluster = UIStackView(arrangedSubviews: controls)
-            cluster.spacing = 0
             cluster.distribution = .fillEqually
             let columns = page == .letters && swedish ? 11 : 10
             if page == .letters { letterKeys += controls }
@@ -144,7 +143,7 @@ final class TypingKeys: UIStackView {
                 row.addArrangedSubview(UIView())
             }
             let fraction: CGFloat = page != .letters && index == 2 ? 0.70 : CGFloat(controls.count) / CGFloat(columns)
-            cluster.widthAnchor.constraint(equalTo: row.widthAnchor, multiplier: fraction, constant: 0).isActive = true
+            cluster.widthAnchor.constraint(equalTo: row.widthAnchor, multiplier: fraction).isActive = true
         }
         let mode = Key(title: page == .letters ? "123" : "ABC")
         mode.addTarget(self, action: #selector(changePage), for: .touchUpInside)
@@ -166,7 +165,6 @@ final class TypingKeys: UIStackView {
         trackpad.minimumPressDuration = 0.35
         space.addGestureRecognizer(trackpad)
         let bottom = addRow()
-        bottom.spacing = 0
         let bottomKeys = [mode, globe, space, enter]
         bottomKeys.forEach(bottom.addArrangedSubview)
         for key in [mode, globe] {
@@ -199,8 +197,8 @@ final class TypingKeys: UIStackView {
         return row
     }
 
-    private func typingKey(_ title: String, output: String? = nil) -> Key {
-        let key = Key(title: title, output: output)
+    private func typingKey(_ title: String) -> Key {
+        let key = Key(title: title)
         key.addTarget(self, action: #selector(typed(_:)), for: .touchUpInside)
         return key
     }

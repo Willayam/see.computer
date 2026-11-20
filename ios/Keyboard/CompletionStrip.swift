@@ -39,7 +39,7 @@ final class CompletionStrip: UIStackView {
     required init(coder: NSCoder) { fatalError("not used") }
 
     func configure(_ preference: TypingLanguages) {
-        vocabulary.configure(preference)
+        vocabulary.configure(preference, dictionaries: UITextChecker.availableLanguages)
         refresh()
     }
 

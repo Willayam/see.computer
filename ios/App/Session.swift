@@ -99,7 +99,13 @@ final class Session: ObservableObject {
             MainActor.assumeIsolated { self?.lastPing = Date() }
             Signals.post(.pong)
         }
-        Signals.observe(.start) { [weak self] in MainActor.assumeIsolated { self?.startTake() } }
+        Signals.observe(.start) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let start = Bridge.read(DictationStart.self, "start.json") else { return }
+                Bridge.remove("start.json")
+                self?.startTake(start)
+            }
+        }
         Signals.observe(.stop) { [weak self] in MainActor.assumeIsolated { self?.stopTake() } }
         Signals.observe(.cancel) { [weak self] in MainActor.assumeIsolated { self?.cancelTake() } }
         Signals.observe(.away) { [weak self] in MainActor.assumeIsolated { self?.keyboardLeft() } }
@@ -227,13 +233,14 @@ final class Session: ObservableObject {
                 Diagnostics.log("handoff_not_ready", ["mic": micIsOn, "model": Engine.isModelPrepared])
                 return
             }
-            if wasInFront {
+            let handoff = Bridge.read(Handoff.self, "handoff.json")
+            if wasInFront, let start = handoff?.start {
                 Diagnostics.log("handoff_in_front")
                 Bridge.remove("handoff.json")
-                startTake()
+                startTake(start)
                 return
             }
-            let host = Bridge.read(Handoff.self, "handoff.json")?.host
+            let host = handoff?.host
             if let host, HostReturn.open(bundle: host) {
                 Diagnostics.log("host_return", ["host": host])
                 return
@@ -256,11 +263,12 @@ final class Session: ObservableObject {
 
     // MARK: Takes
 
-    private func startTake() {
+    private func startTake(_ start: DictationStart) {
         guard state.phase == .armed else {
             Diagnostics.log("start_ignored", ["phase": state.phase.rawValue])
             return
         }
+        guard Date().timeIntervalSince(start.asked) < Bridge.handoffWindow else { return }
         if case .failed(let message) = stage {
             Diagnostics.log("start_refused", ["error": message])
             state.problem = message
@@ -286,7 +294,8 @@ final class Session: ObservableObject {
         }
         state.phase = .recording
         state.problem = nil
-        state.since = Date()
+        state.since = takeStarted
+        state.start = start
         publish()
         watchKeyboard()
     }
@@ -294,8 +303,8 @@ final class Session: ObservableObject {
     /// The take so far, for the keyboard to show. A late pass changes nothing once
     /// the take has ended.
     private func previewed(_ words: String) {
-        guard state.phase == .recording else { return }
-        Bridge.write(words, "words.json")
+        guard state.phase == .recording, let start = state.start else { return }
+        Bridge.write(DictationPreview(startID: start.id, words: words), "words.json")
         Signals.post(.words)
     }
 
@@ -401,7 +410,8 @@ final class Session: ObservableObject {
                 ["words": trimmed.split(whereSeparator: \.isWhitespace).count, "chars": trimmed.count, "engine_ms": engineMs])
             let now = Date()
             state.take = Take(
-                id: Int64(now.timeIntervalSince1970 * 1000), text: trimmed, finished: now, sent: takeSent ? true : nil)
+                id: Int64(now.timeIntervalSince1970 * 1000), text: trimmed, finished: now,
+                sent: takeSent ? true : nil, start: state.start)
             History.append(trimmed, at: now)
             StatsStore.logTake(at: now, seconds: spokenSeconds, text: trimmed)
             stats.refresh()

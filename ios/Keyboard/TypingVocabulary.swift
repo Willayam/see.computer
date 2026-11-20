@@ -1,7 +1,5 @@
 import UIKit
 
-/// The extension only keeps counts of public words. Text from the field is used
-/// to choose a language and suggestions for this edit, and is never stored.
 private struct WordTable {
     var counts: [String: Int] = [:]
     var following: [String: [String]] = [:]
@@ -85,7 +83,8 @@ final class TypingVocabulary {
     private nonisolated static let tables = ["en": WordTable(language: "en"), "sv": WordTable(language: "sv")]
     private var tables: [String: WordTable] = [:]
     private let checker = UITextChecker()
-    private var languages: [(code: String, dictionary: String)] = []
+    private typealias Language = (code: String, dictionary: String?)
+    private var languages: [Language] = []
     private var shortcuts: [String: String] = [:]
     private var protectedWords = Set<String>()
 
@@ -99,19 +98,17 @@ final class TypingVocabulary {
         }
     }
 
-    func configure(_ preference: TypingLanguages) {
+    func configure(_ preference: TypingLanguages, dictionaries: [String]) {
         let preferred = Locale.preferredLanguages.map { Locale(identifier: $0) }
-        let bilingual = preference != .swedish && preference.usesSwedishKeys
-        var codes = bilingual ? ["en", "sv"] : [preference.usesSwedishKeys ? "sv" : "en"]
-        if bilingual, preferred.first(where: { ["sv","en"].contains($0.language.languageCode?.identifier ?? "") })?.language.languageCode?.identifier == "sv" {
-            codes.reverse()
-        }
-        let available = UITextChecker.availableLanguages
-        languages = codes.compactMap { code in
+        let swedish = preference.usesSwedishKeys
+        var codes = swedish && preference != .swedish ? ["en", "sv"] : [swedish ? "sv" : "en"]
+        let firstPreferred = preferred.compactMap { $0.language.languageCode?.identifier }.first(where: codes.contains)
+        if firstPreferred == "sv" { codes.reverse() }
+        languages = codes.map { code in
             let region = preferred.first { $0.language.languageCode?.identifier == code }?.region?.identifier
             let regional = code + "_" + (region ?? (code == "en" ? "US" : "SE"))
-            guard let dictionary = available.first(where: { $0 == regional }) ??
-                available.first(where: { Locale(identifier: $0).language.languageCode?.identifier == code }) else { return nil }
+            let dictionary = dictionaries.first(where: { $0 == regional }) ??
+                dictionaries.first(where: { Locale(identifier: $0).language.languageCode?.identifier == code })
             return (code, dictionary)
         }
     }
@@ -128,7 +125,7 @@ final class TypingVocabulary {
         }
     }
 
-    private func orderedLanguages(for input: WordInput) -> [(code: String, dictionary: String)] {
+    private func orderedLanguages(for input: WordInput) -> [Language] {
         guard languages.count == 2, !input.previous.isEmpty else { return languages }
         // Recent words carry the most weight when the user changes languages mid-message.
         let evidence = input.previous.reduce(0.0) { score, word in
@@ -170,15 +167,17 @@ final class TypingVocabulary {
         }
 
         let range = NSRange(word.startIndex..., in: word)
-        let misspelled = word.count >= 3 && !protectedWords.contains(word) && !ordered.isEmpty && ordered.allSatisfy {
-            checker.rangeOfMisspelledWord(in: word, range: range, startingAt: 0, wrap: false, language: $0.dictionary).location != NSNotFound
+        let misspelled = word.count >= 3 && !protectedWords.contains(word) && ordered.allSatisfy { language in
+            guard let dictionary = language.dictionary else { return false }
+            return checker.rangeOfMisspelledWord(in: word, range: range, startingAt: 0, wrap: false, language: dictionary).location != NSNotFound
         }
         var guesses: [String: Double] = [:]
         if misspelled {
             let repeated = Self.removingRepeatedLetters(in: word)
             for (index, language) in ordered.enumerated() {
+                guard let dictionary = language.dictionary else { continue }
                 let table = tables[language.code]
-                let spellings = checker.guesses(forWordRange: range, in: word, language: language.dictionary) ?? []
+                let spellings = checker.guesses(forWordRange: range, in: word, language: dictionary) ?? []
                 let repeatedCandidates = repeated.filter { table?.counts[$0] != nil }
                 let list = repeatedCandidates + spellings.prefix(6)
                 for (rank, candidate) in list.enumerated() where candidate.allSatisfy(WordInput.wordCharacter) {
@@ -186,7 +185,11 @@ final class TypingVocabulary {
                     let frequency = (table?.frequency(lower) ?? 0) * 100_000
                     let contextBonus = input.previous.last.flatMap { table?.following[$0] }?.contains(lower) == true ? 1.5 : 0
                     let distanceBonus: Double
-                    if repeatedCandidates.contains(lower) { distanceBonus = 4 } else { distanceBonus = Self.transposed(word, lower) ? 2.5 : 0 }
+                    if repeatedCandidates.contains(lower) {
+                        distanceBonus = 4
+                    } else {
+                        distanceBonus = Self.transposed(word, lower) ? 2.5 : 0
+                    }
                     let score = log1p(frequency) + contextBonus + distanceBonus - Double(rank) * 0.35 - Double(index) * 1.2
                     let title = display(candidate, language: language.code)
                     guesses[title] = max(guesses[title] ?? -.infinity, score)
