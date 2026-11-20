@@ -26,7 +26,7 @@ To use your Mac dictionary, tap **Use the dictionary from your Mac** in the app 
 
 ## Using it
 
-Tap the mic beside **123**, talk, then tap **Done**. Or hold the mic, talk, and let go. While you talk, the keys go faint and a tap on them also finishes. The X cancels. When the transcript lands, select a word in the host app and type its replacement on the same keyboard. Tap the mic again to continue speaking.
+Tap **Dictate** above the letters, talk, then tap **Done** in the same spot. Or hold Dictate, talk, and let go. You can type while the mic keeps recording. The live speech preview then moves into the top row. Done inserts the transcript at the cursor. If you already edited the live preview itself, the full take stays in History so it cannot overwrite your edit. The X cancels. When the transcript lands, select a word in the host app and type its replacement on the same keyboard. Tap Dictate again to continue speaking.
 
 **Typing languages** in the see.computer app follows the iPhone’s preferred languages by default. Choose **English & Svenska** once to keep Å, Ä and Ö on the letter rows in every app. Shift changes case, a double tap locks capitals, and **123** opens numbers and symbols. Hold and slide the space bar to position the cursor. Double-tap a word in the host app to use its Copy and Paste menu. Tap a completion above the keys to finish the current word.
 

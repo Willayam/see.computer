@@ -15,7 +15,6 @@ final class TypingKeys: UIStackView {
     private var swedish = false
     private let globe = Key(symbol: "globe", label: "Next keyboard")
 
-    let mic = Key(symbol: "mic", label: "Start dictation", usesGlass: true)
     var moveCursor: ((Int) -> Void)?
     private var trackpadX: CGFloat = 0
     var insert: ((String) -> Void)?
@@ -165,8 +164,8 @@ final class TypingKeys: UIStackView {
         space.addGestureRecognizer(trackpad)
         let bottom = addRow()
         bottom.spacing = 6
-        [mode, globe, mic, space, enter].forEach(bottom.addArrangedSubview)
-        for key in [mode, globe, mic] {
+        [mode, globe, space, enter].forEach(bottom.addArrangedSubview)
+        for key in [mode, globe] {
             let width = key.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.111)
             width.priority = .defaultHigh
             width.isActive = true
