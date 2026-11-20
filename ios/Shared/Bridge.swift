@@ -57,8 +57,9 @@ struct DictationTarget: Codable, Equatable {
             && after == current.after && selected == current.selected
     }
 
-    func matches(_ current: Self) -> Bool {
-        matchesPosition(current) && hasText == current.hasText
+    func matches(_ current: Self?) -> Bool {
+        guard let current else { return false }
+        return matchesPosition(current) && hasText == current.hasText
     }
 
     fileprivate static func fingerprint(_ text: String) -> Data {
@@ -111,8 +112,8 @@ struct Draft: Codable {
         }
     }
 
-    func placement(at current: DictationTarget, ownsMark: Bool) -> Placement? {
-        guard let target = start?.target, target.isReadable, target.field == current.field,
+    func placement(at current: DictationTarget?, ownsMark: Bool) -> Placement? {
+        guard let current, let target = start?.target, target.isReadable, target.field == current.field,
             target.selected == nil, current.selected == nil, target.after == current.after, current.hasText
         else { return nil }
         if let committedBefore, current.before == committedBefore {

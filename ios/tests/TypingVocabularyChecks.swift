@@ -25,6 +25,8 @@ enum TypingVocabularyChecks {
         vocabulary.configure(.bilingual, dictionaries: UITextChecker.availableLanguages)
         await withCheckedContinuation { continuation in vocabulary.load { continuation.resume() } }
         let field = Field()
+        precondition(SeeDocumentIdentifier(field) == field.documentIdentifier)
+        precondition(SeeDocumentIdentifier(UIInputViewController().textDocumentProxy) == nil)
         func suggestions(_ text: String) -> WordSuggestions {
             field.documentContextBeforeInput = text
             return WordInput(field).map(vocabulary.suggestions) ?? WordSuggestions()

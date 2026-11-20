@@ -15,6 +15,8 @@ enum DraftChecks {
         let full = "hello" + draft.text
         let committed = target(full)
 
+        precondition(!origin.matches(nil))
+        precondition(draft.placement(at: nil, ownsMark: true) == nil)
         precondition(origin.matches(target("hello")))
         precondition(!origin.matches(target("hello", field: other)))
         precondition(!origin.matches(target("hello", selected: "next")))

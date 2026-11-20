@@ -68,7 +68,8 @@ struct WordInput: Equatable {
         previous = sentenceStart ? [] : (sentence?.split(whereSeparator: { !Self.wordCharacter($0) }).suffix(4).map {
             $0.lowercased().replacingOccurrences(of: "’", with: "'")
         } ?? [])
-        field = proxy.documentIdentifier
+        guard let identifier = SeeDocumentIdentifier(proxy) else { return nil }
+        field = identifier
         smartQuotes = proxy.smartQuotesType != .no
     }
 }

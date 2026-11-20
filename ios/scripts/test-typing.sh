@@ -8,6 +8,7 @@ trap 'rm -rf "$scratch"' EXIT
 cp "$root"/Keyboard/words-*.tsv "$scratch/"
 xcrun --sdk iphonesimulator swiftc -target "$(uname -m)-apple-ios17.0-simulator" \
     -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
+    -import-objc-header "$root/Keyboard/DocumentIdentifier.h" \
     "$root/Shared/Bridge.swift" "$root/Shared/TypingLanguages.swift" \
     "$root/Keyboard/TypingVocabulary.swift" "$root/tests/TypingVocabularyChecks.swift" \
     -o "$scratch/check"

@@ -36,7 +36,8 @@ final class KeyboardViewController: UIInputViewController {
 
         init?(_ proxy: UITextDocumentProxy) {
             guard proxy.selectedText?.isEmpty != false, let before = proxy.documentContextBeforeInput else { return nil }
-            field = proxy.documentIdentifier
+            guard let identifier = SeeDocumentIdentifier(proxy) else { return nil }
+            field = identifier
             self.before = before
             after = proxy.documentContextAfterInput
         }
@@ -52,9 +53,10 @@ final class KeyboardViewController: UIInputViewController {
     private var wordsInField = true
     /// The field was sent mid-take, so hiding next is not the user walking away.
     private var takeWasSent = false
-    private var currentTarget: DictationTarget {
+    private var currentTarget: DictationTarget? {
         let proxy = textDocumentProxy
-        return DictationTarget(field: proxy.documentIdentifier, before: proxy.documentContextBeforeInput,
+        guard let field = SeeDocumentIdentifier(proxy) else { return nil }
+        return DictationTarget(field: field, before: proxy.documentContextBeforeInput,
                                after: proxy.documentContextAfterInput, selected: proxy.selectedText, hasText: proxy.hasText)
     }
 
@@ -203,7 +205,7 @@ final class KeyboardViewController: UIInputViewController {
         guard state.phase == .recording || state.phase == .transcribing, wordsInField, !takeWasSent,
             let draft = Bridge.read(Draft.self, "draft.json"), let start = state.start,
             draft.start?.id == start.id, markWasVisible, ownsMark(draft),
-            proxy.documentIdentifier == start.target.field, !proxy.hasText,
+            SeeDocumentIdentifier(proxy) == start.target.field, !proxy.hasText,
             proxy.selectedText?.isEmpty != false, proxy.documentContextBeforeInput?.isEmpty != false,
             proxy.documentContextAfterInput?.isEmpty != false
         else { return false }
@@ -252,8 +254,9 @@ final class KeyboardViewController: UIInputViewController {
                 ["from": previous.rawValue, "to": state.phase.rawValue, "problem": state.problem ?? "none"])
         }
         pendingInsert = state.take.map {
-            $0.sent != true && $0.start?.target.field == textDocumentProxy.documentIdentifier
-                && $0.id > (Bridge.read(Int64.self, "inserted.json") ?? 0)
+            guard $0.sent != true, $0.id > (Bridge.read(Int64.self, "inserted.json") ?? 0),
+                  let field = $0.start?.target.field else { return false }
+            return field == SeeDocumentIdentifier(textDocumentProxy)
         } ?? false
         settleField()
         showWords()
@@ -280,7 +283,7 @@ final class KeyboardViewController: UIInputViewController {
         // A take that ended with no transcript has no words to replace these with.
         if state.phase != .recording, state.phase != .transcribing,
             let draft = Bridge.read(Draft.self, "draft.json"), let start = draft.start,
-            start.id != state.take?.start?.id, start.target.field == textDocumentProxy.documentIdentifier
+            start.id != state.take?.start?.id, start.target.field == SeeDocumentIdentifier(textDocumentProxy)
         {
             if draft.dropped == true { _ = takeDraftBack(draft) }
             else if draft.placement(at: currentTarget, ownsMark: ownsMark(draft)) == .marked {
@@ -371,8 +374,8 @@ final class KeyboardViewController: UIInputViewController {
 
     private func checkForFinishedTake() {
         guard isActive, fieldHasSettled, state.phase != .recording, state.phase != .transcribing,
-            let take = state.take,
-            take.start?.target.field == textDocumentProxy.documentIdentifier,
+            let take = state.take, let field = take.start?.target.field,
+            field == SeeDocumentIdentifier(textDocumentProxy),
             take.id > (Bridge.read(Int64.self, "inserted.json") ?? 0) else { return }
         DispatchQueue.main.async { [weak self] in self?.settleField() }
     }
@@ -389,7 +392,7 @@ final class KeyboardViewController: UIInputViewController {
         let draft = Bridge.read(Draft.self, "draft.json").flatMap { $0.start?.id == start.id ? $0 : nil }
         let edit = Bridge.read(ManualEdit.self, "manual-edit.json").flatMap { $0.startID == start.id ? $0 : nil }
         let now = Date()
-        let current = currentTarget
+        guard let current = currentTarget else { return }
         let delivery = take.delivery(to: current.field, at: now, hasDraft: draft != nil)
         guard delivery != .waitForField else { return }
         Bridge.write(take.id, "inserted.json")
@@ -474,7 +477,8 @@ final class KeyboardViewController: UIInputViewController {
             openSettings()
             return
         }
-        let start = DictationStart(id: UUID(), asked: Date(), target: currentTarget)
+        guard let target = currentTarget else { return }
+        let start = DictationStart(id: UUID(), asked: Date(), target: target)
         // Asking first would only delay the app opening when the mic is known to be off.
         guard state.phase != .off else {
             Diagnostics.log("tap_app_off")
@@ -555,11 +559,11 @@ final class KeyboardViewController: UIInputViewController {
 
     private func prepareForManualEdit() {
         guard state.phase == .recording || state.phase == .transcribing, let start = state.start,
-            start.target.field == textDocumentProxy.documentIdentifier else { return }
+            let current = currentTarget, start.target.field == current.field else { return }
         wordsInField = false
         let target: DictationTarget?
         if let edit = manualEdit {
-            target = edit.target(for: start, at: currentTarget)
+            target = edit.target(for: start, at: current)
         } else if let draft = Bridge.read(Draft.self, "draft.json"), draft.start?.id == start.id {
             if takeDraftBack(draft) {
                 Bridge.remove("draft.json")
@@ -568,7 +572,6 @@ final class KeyboardViewController: UIInputViewController {
                 target = nil
             }
         } else {
-            let current = currentTarget
             target = start.target.matches(current) ? current : nil
         }
         let edit = ManualEdit(startID: start.id, target: target)
@@ -580,8 +583,7 @@ final class KeyboardViewController: UIInputViewController {
     private func rememberEditedField() {
         guard state.phase == .recording || state.phase == .transcribing,
             var edit = manualEdit, let target = edit.target else { return }
-        let current = currentTarget
-        guard target.field == current.field else { return }
+        guard let current = currentTarget, target.field == current.field else { return }
         edit.target = current
         manualEdit = edit
         Bridge.write(edit, "manual-edit.json")
