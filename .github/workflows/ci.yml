@@ -56,6 +56,20 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --target aarch64-apple-ios -- -D warnings
 
+      - name: Build the iOS keyboard for distribution
+        working-directory: .
+        run: |
+          xcodebuild -project ios/SeeComputer.xcodeproj -target Keyboard -sdk iphonesimulator \
+            -configuration Release CODE_SIGNING_ALLOWED=NO \
+            SWIFT_ACTIVE_COMPILATION_CONDITIONS=STORE GCC_PREPROCESSOR_DEFINITIONS=STORE=1 build
+      - name: Check draft ownership and bilingual typing
+        working-directory: .
+        run: |
+          ios/scripts/test-draft.sh
+          device=$(xcrun simctl list devices available --json | jq -er '[.devices[][] | select(.name | startswith("iPhone"))][0].udid')
+          xcrun simctl bootstatus "$device" -b
+          ios/scripts/test-typing.sh "$device"
+
   sharing:
     name: Sharing service tests
     runs-on: ubuntu-latest

@@ -16,27 +16,71 @@ final class KeyboardViewController: UIInputViewController {
     private var note: String?
 
     private let bar = StartBar()
-    private let page = LivePage()
+    private let completions = CompletionStrip()
+    private let status = UILabel()
+    private let meter = Meter()
+    private let statusRow = UIStackView()
+    private var liveWords = ""
+    /// Saved across keyboard-controller replacement. A partial transcript that
+    /// was already edited must never be overwritten by the final transcript.
+    private var manualEdit: ManualEdit?
+    private var markedDraft: Draft?
+    private var markWasVisible = false
     private let cancel = CloseButton()
-    private let keys = UIStackView()
-    private let globe = Key(symbol: "globe", label: "Next keyboard")
-    /// Covers the faint keys during a take, so a tap there finishes it too.
-    private let finishArea = UIControl()
+    private let keys = TypingKeys()
+    /// Destructive edits require the same field, selection and surrounding text.
+    private struct Caret: Equatable {
+        let field: UUID
+        let before: String
+        let after: String?
+
+        init?(_ proxy: UITextDocumentProxy) {
+            guard proxy.selectedText?.isEmpty != false, let before = proxy.documentContextBeforeInput else { return nil }
+            guard let identifier = SeeDocumentIdentifier(proxy) else { return nil }
+            field = identifier
+            self.before = before
+            after = proxy.documentContextAfterInput
+        }
+    }
+    private var lastSpace: (time: TimeInterval, caret: Caret)?
+    private var lastLetter: Caret?
+    private var suggestionSpace: Caret?
+    private var lastCorrection: (caret: Caret, inserted: String, original: String)?
     private var deleteRepeat: Timer?
+    private var pendingInsert = false
     private var activatedAt = Date.distantPast
     /// False once the field has failed to hold the words, for the rest of the take.
     private var wordsInField = true
     /// The field was sent mid-take, so hiding next is not the user walking away.
     private var takeWasSent = false
+    private var currentTarget: DictationTarget? {
+        let proxy = textDocumentProxy
+        guard let field = SeeDocumentIdentifier(proxy) else { return nil }
+        return DictationTarget(field: field, before: proxy.documentContextBeforeInput,
+                               after: proxy.documentContextAfterInput, selected: proxy.selectedText, hasText: proxy.hasText)
+    }
 
     /// For the label only. A slow answer must not read as the app having died,
     /// so this is looser than the check a tap makes.
     private var looksAlive: Bool { Date().timeIntervalSince(lastPong) < 5 }
     private static let fieldSettles: TimeInterval = 0.6
 
+    override init(nibName nibNameOrNil: String?, bundle nibBundleOrNil: Bundle?) {
+        super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
+        hasDictationKey = true
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        hasDictationKey = true
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         layout()
+        requestSupplementaryLexicon { [weak self] lexicon in
+            DispatchQueue.main.async { self?.completions.use(lexicon) }
+        }
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -47,6 +91,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        hasDictationKey = true
         activate()
     }
 
@@ -61,6 +106,7 @@ final class KeyboardViewController: UIInputViewController {
         super.viewWillDisappear(animated)
         hasLeft = true
         isActive = false
+        forgetTypingPosition()
         Diagnostics.log(
             "keyboard_hidden",
             [
@@ -73,16 +119,20 @@ final class KeyboardViewController: UIInputViewController {
             Diagnostics.log("away_sent")
             Signals.post(.away)
         }
+        markedDraft = nil
         heartbeat?.invalidate()
         heartbeat = nil
         deleteUp()
-        bar.stop()
-        page.stop()
+        meter.stop()
     }
 
     private func activate() {
         guard !isActive else { return }
         isActive = true
+        hasDictationKey = true
+        keys.reset()
+        configureTypingKeys()
+        Signals.observe(.typingLanguagesChanged) { [weak self] in self?.configureTypingKeys() }
         activatedAt = Date()
         // Registered here, because the signals go to whichever controller registered last.
         Signals.observe(.changed) { [weak self] in self?.reload() }
@@ -106,7 +156,27 @@ final class KeyboardViewController: UIInputViewController {
         RunLoop.main.add(beat, forMode: .common)
         heartbeat = beat
         switchAwayFromFieldsThatNeedTheirOwnKeys()
-        startAfterReturningFromTheApp()
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.fieldSettles) { [weak self] in
+            self?.startAfterReturningFromTheApp()
+        }
+    }
+
+    private func configureTypingKeys() {
+        let preference = TypingLanguages.current
+        keys.configure(swedish: preference.usesSwedishKeys, needsGlobe: needsInputModeSwitchKey)
+        completions.configure(preference)
+        updateTypingContext()
+    }
+
+    private func updateTypingContext() {
+        keys.updateCase(for: textDocumentProxy)
+        completions.update(for: textDocumentProxy, canCorrect: lastLetter != nil && lastLetter == Caret(textDocumentProxy))
+    }
+
+    override func selectionDidChange(_ textInput: UITextInput?) {
+        checkMark()
+        checkForFinishedTake()
+        updateTypingContext()
     }
 
     override func textWillChange(_ textInput: UITextInput?) {}
@@ -114,22 +184,37 @@ final class KeyboardViewController: UIInputViewController {
     override func textDidChange(_ textInput: UITextInput?) {
         switchAwayFromFieldsThatNeedTheirOwnKeys()
         _ = endTakeIfFieldWasSent()
+        checkMark()
+        checkForFinishedTake()
+        updateTypingContext()
+    }
+
+    private func checkMark() {
+        guard let draft = markedDraft else { return }
+        if draft.placement(at: currentTarget, ownsMark: true) == .marked {
+            markWasVisible = true
+        } else {
+            markedDraft = nil
+        }
     }
 
     /// A chat app empties its field when it sends, live words included. Only the
     /// field can say so, because a keyboard never sees the send button.
     private func endTakeIfFieldWasSent() -> Bool {
+        let proxy = textDocumentProxy
         guard state.phase == .recording || state.phase == .transcribing, wordsInField, !takeWasSent,
-            let draft = Bridge.read(Draft.self, "draft.json"), !textDocumentProxy.hasText
+            let draft = Bridge.read(Draft.self, "draft.json"), let start = state.start,
+            draft.start?.id == start.id, markWasVisible, ownsMark(draft),
+            SeeDocumentIdentifier(proxy) == start.target.field, !proxy.hasText,
+            proxy.selectedText?.isEmpty != false, proxy.documentContextBeforeInput?.isEmpty != false,
+            proxy.documentContextAfterInput?.isEmpty != false
         else { return false }
         Diagnostics.log("sent_seen", ["phase": state.phase.rawValue, "chars": draft.text.count, "active": isActive])
         takeWasSent = true
-        // The host can empty the field and still draw the words as marked. Once the
-        // keyboard has gone it cannot clear them, so the draft stays for its return.
+        markedDraft = nil
         if isActive {
-            _ = takeDraftBack()
-        } else {
-            markDraftDropped()
+            proxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+            proxy.unmarkText()
         }
         Signals.post(.sent)
         return true
@@ -151,13 +236,28 @@ final class KeyboardViewController: UIInputViewController {
         let read = Bridge.read(SessionState.self, "state.json")
         if read == nil { Diagnostics.log("state_unreadable") }
         let previous = state.phase
+        let previousStart = state.start?.id
         state = read ?? SessionState()
+        if state.phase == .recording && state.start?.id != previousStart {
+            wordsInField = true
+            takeWasSent = false
+        }
+        if let id = state.start?.id, let edit = Bridge.read(ManualEdit.self, "manual-edit.json"), edit.startID == id {
+            manualEdit = edit
+            wordsInField = false
+        } else {
+            manualEdit = nil
+        }
         if state.phase != previous {
-            if state.phase == .recording { takeWasSent = false }
             Diagnostics.log(
                 "phase_seen",
                 ["from": previous.rawValue, "to": state.phase.rawValue, "problem": state.problem ?? "none"])
         }
+        pendingInsert = state.take.map {
+            guard $0.sent != true, $0.id > (Bridge.read(Int64.self, "inserted.json") ?? 0),
+                  let field = $0.start?.target.field else { return false }
+            return field == SeeDocumentIdentifier(textDocumentProxy)
+        } ?? false
         settleField()
         showWords()
         render()
@@ -165,19 +265,36 @@ final class KeyboardViewController: UIInputViewController {
 
     /// Calls made right after coming back can be lost, with the field left as it was.
     private func settleField() {
+        guard isActive else { return }
         let wait = Self.fieldSettles - Date().timeIntervalSince(activatedAt)
         guard wait <= 0 else {
             DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.settleField() }
             return
         }
         insertFinishedTake()
+        pendingInsert = false
+        if state.phase != .recording, state.phase != .transcribing,
+            let edit = Bridge.read(ManualEdit.self, "manual-edit.json"),
+            edit.startID == nil || edit.startID != state.take?.start?.id
+        {
+            manualEdit = nil
+            Bridge.remove("manual-edit.json")
+        }
         // A take that ended with no transcript has no words to replace these with.
         if state.phase != .recording, state.phase != .transcribing,
-            let draft = Bridge.read(Draft.self, "draft.json")
+            let draft = Bridge.read(Draft.self, "draft.json"), let start = draft.start,
+            start.id != state.take?.start?.id, start.target.field == SeeDocumentIdentifier(textDocumentProxy)
         {
-            if draft.dropped == true { _ = takeDraftBack() } else { keepDraft(draft) }
+            if draft.dropped == true { _ = takeDraftBack(draft) }
+            else if draft.placement(at: currentTarget, ownsMark: ownsMark(draft)) == .marked {
+                textDocumentProxy.unmarkText()
+            }
+            markedDraft = nil
+            Bridge.remove("draft.json")
         }
         showWords()
+        updateTypingContext()
+        render()
     }
 
     private var fieldHasSettled: Bool { Date().timeIntervalSince(activatedAt) >= Self.fieldSettles }
@@ -188,10 +305,11 @@ final class KeyboardViewController: UIInputViewController {
     private func showWords() {
         guard state.phase == .recording || state.phase == .transcribing else {
             wordsInField = true
-            page.show(words: "")
+            liveWords = ""
             return
         }
-        let words = Bridge.read(String.self, "words.json") ?? ""
+        let preview = Bridge.read(DictationPreview.self, "words.json")
+        let words = preview?.startID == state.start?.id ? preview?.words ?? "" : ""
         if wordsInField, state.phase == .recording, !takeWasSent, isActive, fieldHasSettled, !words.isEmpty,
             !putInField(words)
         {
@@ -199,136 +317,134 @@ final class KeyboardViewController: UIInputViewController {
             wordsInField = false
             render()
         }
-        page.show(words: wordsInField ? "" : words)
+        liveWords = wordsInField ? "" : words
+        if !wordsInField { render() }
     }
 
     private func putInField(_ words: String) -> Bool {
+        guard let start = state.start, start.target.selected == nil else { return false }
         let proxy = textDocumentProxy
-        let before = proxy.documentContextBeforeInput
-        let last = Bridge.read(Draft.self, "draft.json")
-        if let last {
+        let current = currentTarget
+        var before = proxy.documentContextBeforeInput
+        if let last = Bridge.read(Draft.self, "draft.json"), last.start?.id == start.id {
+            guard let placement = last.placement(at: current, ownsMark: ownsMark(last)) else { return false }
             guard last.words != words else { return true }
-            if !Self.isMarked(last, before: before, in: proxy) {
-                guard Self.isCommitted(last, before: before) else {
-                    _ = takeDraftBack()
-                    return false
-                }
-                // iOS committed the words when the keyboard went away mid-take.
-                Diagnostics.log("draft_remarked", ["chars": last.text.count])
+            if placement == .committed {
+                guard let full = before else { return false }
+                before = start.target.before == nil ? nil : String(full.dropLast(last.text.count))
+                markedDraft = nil
                 for _ in last.text { proxy.deleteBackward() }
             }
+        } else {
+            guard start.target.matches(current) else { return false }
         }
-        let draft = Draft(
-            before: last?.before ?? before, spacing: last?.spacing ?? Spacing.prefix(before: before), words: words,
-            dropped: last?.dropped)
+        let draft = Draft(start: start, before: before, spacing: Spacing.prefix(before: before), words: words)
         Bridge.write(draft, "draft.json")
+        markedDraft = nil
         proxy.setMarkedText(draft.text, selectedRange: NSRange(location: (draft.text as NSString).length, length: 0))
+        markedDraft = draft
+        markWasVisible = draft.placement(at: currentTarget, ownsMark: true) != nil
         return true
     }
 
-    private func takeDraftBack() -> Draft? {
-        guard isActive, let draft = Bridge.read(Draft.self, "draft.json") else { return nil }
-        Bridge.remove("draft.json")
+    private func takeDraftBack(_ draft: Draft) -> Bool {
+        guard isActive, let placement = draft.placement(at: currentTarget, ownsMark: ownsMark(draft)) else { return false }
+        markedDraft = nil
         let proxy = textDocumentProxy
-        if Self.isCommitted(draft, before: proxy.documentContextBeforeInput) {
-            // It would stay behind the real take.
-            Diagnostics.log("draft_cleared", ["how": "deleted", "chars": draft.text.count])
+        switch placement {
+        case .committed:
             for _ in draft.text { proxy.deleteBackward() }
-            return draft
+        case .marked:
+            proxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+            proxy.unmarkText()
         }
-        Diagnostics.log("draft_cleared", ["how": "unmarked", "chars": draft.text.count])
-        // A controller that did not set the mark cannot clear it with an empty one.
-        proxy.setMarkedText(" ", selectedRange: NSRange(location: 1, length: 0))
-        proxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
-        proxy.unmarkText()
-        return draft
+        return true
+    }
+
+    private func ownsMark(_ draft: Draft) -> Bool {
+        markedDraft?.start?.id == draft.start?.id && markedDraft?.text == draft.text
     }
 
     private func markDraftDropped() {
-        guard var draft = Bridge.read(Draft.self, "draft.json") else { return }
+        guard var draft = Bridge.read(Draft.self, "draft.json"), let start = state.start,
+            draft.start?.id == start.id else { return }
         draft.dropped = true
         Bridge.write(draft, "draft.json")
     }
 
-    /// The live words are the only copy of a take the app never finished, so they stay.
-    private func keepDraft(_ draft: Draft) {
-        guard isActive else { return }
-        Bridge.remove("draft.json")
-        let proxy = textDocumentProxy
-        let before = proxy.documentContextBeforeInput
-        if Self.isMarked(draft, before: before, in: proxy) {
-            // A controller that did not set the mark has to set it before committing it.
-            proxy.setMarkedText(draft.text, selectedRange: NSRange(location: (draft.text as NSString).length, length: 0))
-            proxy.unmarkText()
-            Diagnostics.log("draft_kept", ["how": "committed", "chars": draft.text.count])
-        } else {
-            Diagnostics.log(
-                "draft_kept", ["how": Self.isCommitted(draft, before: before) ? "already" : "elsewhere", "chars": draft.text.count])
-        }
-    }
-
-    /// iOS leaves marked text out of the context, so it stays as it was unless the
-    /// draft got committed or the cursor went elsewhere.
-    private static func isMarked(_ draft: Draft, before: String?, in proxy: UITextDocumentProxy) -> Bool {
-        before == draft.before && proxy.hasText
-    }
-
-    /// Marked text is never in the context, so a context that ends in the draft
-    /// means iOS committed it, which it does to UIKit fields when the keyboard goes away.
-    private static func isCommitted(_ draft: Draft, before: String?) -> Bool {
-        guard let before, before != draft.before else { return false }
-        return endsWith(before, draft.text)
-    }
-
-    /// The context can be cut to the last few words, so this compares only the end.
-    private static func endsWith(_ context: String, _ text: String) -> Bool {
-        let length = min(context.count, text.count, 12)
-        return length > 0 && context.suffix(length) == text.suffix(length)
+    private func checkForFinishedTake() {
+        guard isActive, fieldHasSettled, state.phase != .recording, state.phase != .transcribing,
+            let take = state.take, let field = take.start?.target.field,
+            field == SeeDocumentIdentifier(textDocumentProxy),
+            take.id > (Bridge.read(Int64.self, "inserted.json") ?? 0) else { return }
+        DispatchQueue.main.async { [weak self] in self?.settleField() }
     }
 
     /// Once per take, because the bookmark survives this process being replaced.
     private func insertFinishedTake() {
-        guard isActive, let take = state.take else { return }
+        guard isActive, state.phase != .recording, state.phase != .transcribing, let take = state.take else { return }
         let inserted = Bridge.read(Int64.self, "inserted.json") ?? 0
         guard take.id > inserted else { return }
+        guard let start = take.start else {
+            Bridge.write(take.id, "inserted.json")
+            return
+        }
+        let draft = Bridge.read(Draft.self, "draft.json").flatMap { $0.start?.id == start.id ? $0 : nil }
+        let edit = Bridge.read(ManualEdit.self, "manual-edit.json").flatMap { $0.startID == start.id ? $0 : nil }
+        let now = Date()
+        guard let current = currentTarget else { return }
+        let delivery = take.delivery(to: current.field, at: now, hasDraft: draft != nil)
+        guard delivery != .waitForField else { return }
         Bridge.write(take.id, "inserted.json")
-        guard take.sent != true else {
-            Diagnostics.log("insert_skipped_sent", ["chars": take.text.count])
-            return
+        defer {
+            if draft != nil { Bridge.remove("draft.json") }
+            if edit != nil { Bridge.remove("manual-edit.json") }
         }
-        let age = Date().timeIntervalSince(take.finished)
-        let before = textDocumentProxy.documentContextBeforeInput
-        let inItsField = Bridge.read(Draft.self, "draft.json").map {
-            Self.isMarked($0, before: before, in: textDocumentProxy) || Self.isCommitted($0, before: before)
-        } ?? false
-        guard age < Bridge.insertWindow || (inItsField && age < Bridge.returnWindow) else {
-            Diagnostics.log("insert_stale", ["age_s": age, "chars": take.text.count])
-            return
+        guard delivery == .verifyTarget else { return }
+        let proxy = textDocumentProxy
+        if let draft {
+            guard edit == nil, let placement = draft.placement(at: current, ownsMark: ownsMark(draft)) else { return }
+            let text = draft.spacing + take.text
+            if placement == .marked {
+                markedDraft = nil
+                proxy.setMarkedText(text, selectedRange: NSRange(location: (text as NSString).length, length: 0))
+                proxy.unmarkText()
+            } else {
+                guard takeDraftBack(draft) else { return }
+                proxy.insertText(text)
+            }
+        } else {
+            if let edit {
+                guard edit.target(for: start, at: current) != nil else { return }
+            } else {
+                guard start.target.matches(current) else { return }
+            }
+            let spacing = current.selected == nil ? Spacing.prefix(before: proxy.documentContextBeforeInput) : ""
+            proxy.insertText(spacing + take.text)
         }
-        let draft = takeDraftBack()
-        let spacing = draft?.spacing ?? Spacing.prefix(before: textDocumentProxy.documentContextBeforeInput)
-        Diagnostics.log(
-            "inserted", ["chars": take.text.count, "age_s": age, "draft": draft != nil, "in_its_field": inItsField])
-        textDocumentProxy.insertText(spacing + take.text)
+        Diagnostics.log("inserted", ["chars": take.text.count, "age_s": now.timeIntervalSince(take.finished), "draft": draft != nil])
     }
 
     private func startAfterReturningFromTheApp() {
-        guard let handoff = Bridge.read(Handoff.self, "handoff.json") else { return }
-        Bridge.remove("handoff.json")
-        let age = Date().timeIntervalSince(handoff.asked)
-        guard age < Bridge.handoffWindow else {
-            Diagnostics.log("handoff_expired", ["age_s": age])
+        guard isActive, let handoff = Bridge.read(Handoff.self, "handoff.json") else { return }
+        guard let start = handoff.start, Date().timeIntervalSince(handoff.asked) < Bridge.handoffWindow else {
+            Bridge.remove("handoff.json")
             return
         }
+        guard start.target.matches(currentTarget) else { return }
         whenAlive { [weak self] alive in
-            guard alive, self?.state.phase == .armed else {
-                Diagnostics.log(
-                    "handoff_start_failed", ["alive": alive, "phase": self?.state.phase.rawValue ?? "none"])
-                return
-            }
-            Diagnostics.log("start_sent", ["by": "handoff", "age_s": age])
-            Signals.post(.start)
+            guard let self, alive, self.isActive, self.state.phase == .armed,
+                Bridge.read(Handoff.self, "handoff.json")?.start?.id == start.id,
+                start.target.matches(self.currentTarget) else { return }
+            Bridge.remove("handoff.json")
+            self.startTake(start)
         }
+    }
+
+    private func startTake(_ start: DictationStart) {
+        forgetTypingPosition()
+        Bridge.write(start, "start.json")
+        Signals.post(.start)
     }
 
     /// Answers from the last heartbeat when it can. Otherwise it asks and waits.
@@ -361,23 +477,25 @@ final class KeyboardViewController: UIInputViewController {
             openSettings()
             return
         }
+        guard let target = currentTarget else { return }
+        let start = DictationStart(id: UUID(), asked: Date(), target: target)
         // Asking first would only delay the app opening when the mic is known to be off.
         guard state.phase != .off else {
             Diagnostics.log("tap_app_off")
-            openApp()
+            openApp(start)
             return
         }
         whenAlive { [weak self] alive in
-            guard let self else { return }
+            guard let self, self.isActive, start.target.matches(self.currentTarget) else { return }
             guard alive else {
                 Diagnostics.log("tap_app_dead", ["phase": self.state.phase.rawValue])
-                self.openApp()
+                self.openApp(start)
                 return
             }
             if self.state.phase == .armed {
                 Diagnostics.log("start_sent", ["by": "tap"])
                 self.pressStartedTake = true
-                Signals.post(.start)
+                self.startTake(start)
             } else if self.state.phase != .recording {
                 Diagnostics.log("tap_not_armed", ["phase": self.state.phase.rawValue])
             }
@@ -399,8 +517,9 @@ final class KeyboardViewController: UIInputViewController {
         Signals.post(.cancel)
     }
 
-    private func openApp() {
-        Bridge.write(Handoff(asked: Date(), host: HostCapture.host), "handoff.json")
+    private func openApp(_ start: DictationStart) {
+        #if !STORE
+        Bridge.write(Handoff(asked: start.asked, host: HostCapture.host, start: start), "handoff.json")
         Diagnostics.log("open_app", ["host": HostCapture.host != nil])
         // A keyboard has no public way to open a URL. The app's object sits on its
         // responder chain and accepts the call.
@@ -418,11 +537,13 @@ final class KeyboardViewController: UIInputViewController {
             responder = current.next
         }
         Diagnostics.log("open_app_unreachable")
+        #endif
         note = "Open see.computer to turn on the mic"
         render()
     }
 
     @objc private func openSettings() {
+        #if !STORE
         var responder: UIResponder? = self
         while let current = responder {
             if let application = current as? UIApplication {
@@ -431,23 +552,130 @@ final class KeyboardViewController: UIInputViewController {
             }
             responder = current.next
         }
+        #endif
     }
 
     // MARK: Typing
 
-    @objc private func typed(_ key: Key) {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        let straight = key.output == "\u{2019}" && textDocumentProxy.smartQuotesType == .no
-        textDocumentProxy.insertText(straight ? "'" : key.output)
+    private func prepareForManualEdit() {
+        guard state.phase == .recording || state.phase == .transcribing, let start = state.start,
+            let current = currentTarget, start.target.field == current.field else { return }
+        wordsInField = false
+        let target: DictationTarget?
+        if let edit = manualEdit {
+            target = edit.target(for: start, at: current)
+        } else if let draft = Bridge.read(Draft.self, "draft.json"), draft.start?.id == start.id {
+            if takeDraftBack(draft) {
+                Bridge.remove("draft.json")
+                target = currentTarget
+            } else {
+                target = nil
+            }
+        } else {
+            target = start.target.matches(current) ? current : nil
+        }
+        let edit = ManualEdit(startID: start.id, target: target)
+        manualEdit = edit
+        Bridge.write(edit, "manual-edit.json")
+        showWords()
     }
 
-    @objc private func deleteDown() {
+    private func rememberEditedField() {
+        guard state.phase == .recording || state.phase == .transcribing,
+            var edit = manualEdit, let target = edit.target else { return }
+        guard let current = currentTarget, target.field == current.field else { return }
+        edit.target = current
+        manualEdit = edit
+        Bridge.write(edit, "manual-edit.json")
+    }
+
+    private func forgetTypingPosition() {
+        lastSpace = nil
+        lastLetter = nil
+        lastCorrection = nil
+        suggestionSpace = nil
+    }
+
+    private func replaceSuffix(_ original: String, with replacement: String) {
+        let shared = zip(original, replacement).prefix { $0.0 == $0.1 }.count
+        for _ in original.dropFirst(shared) { textDocumentProxy.deleteBackward() }
+        let tail = String(replacement.dropFirst(shared))
+        if !tail.isEmpty { textDocumentProxy.insertText(tail) }
+    }
+
+    private func chooseSuggestion(_ input: WordInput, _ candidate: String) {
+        guard isActive, keys.isUserInteractionEnabled, WordInput(textDocumentProxy) == input else { return }
+        prepareForManualEdit()
+        let proxy = textDocumentProxy
+        guard WordInput(proxy) == input else { return }
+        forgetTypingPosition()
+        let next = proxy.documentContextAfterInput?.first
+        let addSpace = next == nil || next.map { !$0.isWhitespace && !".,!?;:)]}".contains($0) } == true
+        replaceSuffix(input.word, with: candidate + (addSpace ? " " : ""))
+        if next == " " { proxy.adjustTextPosition(byCharacterOffset: 1) }
+        if addSpace || next == " " { suggestionSpace = Caret(proxy) }
+        rememberEditedField()
+        updateTypingContext()
+    }
+
+    private func typed(_ output: String) {
+        guard isActive, keys.isUserInteractionEnabled else { return }
+        prepareForManualEdit()
+        let proxy = textDocumentProxy
+        let caret = Caret(proxy)
+        let previousSpace = lastSpace
+        let followsLetter = caret != nil && caret == lastLetter
+        let punctuation = output.count == 1 && ".,!?;:".contains(output)
+        let removeSpace = punctuation && caret != nil && caret == suggestionSpace && caret?.before.last == " "
+        forgetTypingPosition()
+        let now = ProcessInfo.processInfo.systemUptime
+        if output == " ", let previousSpace, now - previousSpace.time < 0.45, caret == previousSpace.caret {
+            replaceSuffix(" ", with: ". ")
+        } else {
+            if removeSpace { proxy.deleteBackward() }
+            if followsLetter, output == " " || punctuation,
+               let input = WordInput(proxy), !input.word.isEmpty, let correction = completions.suggestions(for: input).automatic {
+                let inserted = correction + output
+                replaceSuffix(input.word, with: inserted)
+                if let end = Caret(proxy), end.before.hasSuffix(inserted) {
+                    lastCorrection = (end, inserted, input.word)
+                }
+            } else {
+                proxy.insertText(output == "’" && proxy.smartQuotesType == .no ? "'" : output)
+            }
+            if output.count == 1, output.first?.isLetter == true {
+                lastLetter = Caret(proxy)
+            } else if output == " ", let prior = caret?.before.last, prior.isLetter || prior.isNumber,
+                      let end = Caret(proxy), end.before.last == " " {
+                lastSpace = (now, end)
+            }
+        }
+        rememberEditedField()
+        updateTypingContext()
+    }
+
+    private func deleteCharacter() {
+        guard isActive, keys.isUserInteractionEnabled else { return }
+        prepareForManualEdit()
+        let correction = lastCorrection
+        forgetTypingPosition()
+        if let correction, correction.caret == Caret(textDocumentProxy) {
+            replaceSuffix(correction.inserted, with: correction.original)
+        } else {
+            textDocumentProxy.deleteBackward()
+        }
+        rememberEditedField()
+        updateTypingContext()
+    }
+
+    private func deleteDown() {
+        guard isActive, keys.isUserInteractionEnabled else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        textDocumentProxy.deleteBackward()
+        deleteCharacter()
         deleteRepeat?.invalidate()
         deleteRepeat = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self] _ in
-            self?.deleteRepeat = Timer.scheduledTimer(withTimeInterval: 0.09, repeats: true) { _ in
-                self?.textDocumentProxy.deleteBackward()
+            self?.deleteRepeat = Timer.scheduledTimer(withTimeInterval: 0.09, repeats: true) { [weak self] _ in
+                self?.deleteCharacter()
             }
         }
     }
@@ -460,83 +688,78 @@ final class KeyboardViewController: UIInputViewController {
     // MARK: Drawing
 
     private func render() {
-        let phase: SessionState.Phase = looksAlive ? state.phase : .off
+        let phase: SessionState.Phase = looksAlive || !fieldHasSettled ? state.phase : .off
         let talking = phase == .recording || phase == .transcribing
         let message = hasFullAccess ? note ?? state.problem : "Allow Full Access"
-        bar.show(phase, message: message, since: state.since)
+        bar.show(phase)
+        let preview = !wordsInField && !liveWords.isEmpty
+        let elapsed = max(0, Int(Date().timeIntervalSince(state.since ?? Date())))
+        status.text = talking ? (preview ? liveWords : String(format: "%d:%02d", elapsed / 60, elapsed % 60)) : message
+        status.font = preview || !talking ? .systemFont(ofSize: 15) : .monospacedDigitSystemFont(ofSize: 15, weight: .medium)
+        statusRow.isHidden = !talking && message == nil
+        completions.isHidden = !statusRow.isHidden || textDocumentProxy.autocorrectionType == .no
+        meter.isHidden = phase != .recording || preview
+        if meter.isHidden { meter.stop() } else { meter.start() }
         cancel.isHidden = phase != .recording
-        finishArea.isHidden = !talking
-        let wordsHere = talking && !wordsInField
-        page.isHidden = !wordsHere
-        keys.isHidden = wordsHere
-        keys.alpha = talking ? 0.35 : 1
-        globe.isHidden = !needsInputModeSwitchKey
-        page.show(phase)
+        keys.isUserInteractionEnabled = !pendingInsert
+        keys.accessibilityElementsHidden = pendingInsert
+        if !keys.isUserInteractionEnabled { deleteUp() }
     }
 
     private func layout() {
         guard let root = view else { return }
-        let height = root.heightAnchor.constraint(equalToConstant: 262)
+        let height = root.heightAnchor.constraint(equalToConstant: 254)
         height.priority = .defaultHigh
         height.isActive = true
-
-        for control in [bar, finishArea] as [UIControl] {
-            control.addTarget(self, action: #selector(micDown), for: .touchDown)
-            control.addTarget(self, action: #selector(micUp), for: [.touchUpInside, .touchUpOutside, .touchCancel])
-        }
+        root.clipsToBounds = true
+        bar.addTarget(self, action: #selector(micDown), for: .touchDown)
+        bar.addTarget(self, action: #selector(micUp), for: [.touchUpInside, .touchUpOutside, .touchCancel])
+        statusRow.alignment = .center
+        statusRow.spacing = 8
+        status.lineBreakMode = .byTruncatingHead
+        status.textColor = .secondaryLabel
+        statusRow.addArrangedSubview(meter)
+        statusRow.addArrangedSubview(status)
         cancel.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
-        globe.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
-
-        let marks = [".", ",", "?", "!", "\u{2019}"].map { Key(title: $0) }
-        let delete = Key(symbol: "delete.left", label: "Delete")
-        let space = Key(label: "Space", output: " ")
-        let enter = Key(symbol: "return.left", label: "Return", output: "\n")
-        for key in marks + [space, enter] { key.addTarget(self, action: #selector(typed(_:)), for: .touchUpInside) }
-        delete.addTarget(self, action: #selector(deleteDown), for: .touchDown)
-        delete.addTarget(self, action: #selector(deleteUp), for: [.touchUpInside, .touchUpOutside, .touchCancel])
-
-        let upper = UIStackView(arrangedSubviews: marks + [delete])
-        upper.distribution = .fillEqually
-        let lower = UIStackView(arrangedSubviews: [globe, space, enter])
-        for row in [upper, lower] {
-            row.spacing = 6
-            row.heightAnchor.constraint(equalToConstant: 46).isActive = true
-            keys.addArrangedSubview(row)
+        keys.connectGlobe(to: self)
+        keys.moveCursor = { [weak self] offset in
+            self?.prepareForManualEdit()
+            self?.forgetTypingPosition()
+            self?.textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
+            self?.rememberEditedField()
+            self?.updateTypingContext()
         }
-        keys.axis = .vertical
-        keys.spacing = 8
+        completions.accept = { [weak self] input, candidate in self?.chooseSuggestion(input, candidate) }
+        keys.insert = { [weak self] in self?.typed($0) }
+        keys.startDelete = { [weak self] in self?.deleteDown() }
+        keys.endDelete = { [weak self] in self?.deleteUp() }
 
-        // The finish area lies over the faint keys, so a tap there ends the take too.
-        for child in [bar, keys, finishArea, page, cancel] as [UIView] {
+        let controls = UIStackView(arrangedSubviews: [cancel, bar])
+        controls.spacing = 4
+        let cancelWidth = cancel.widthAnchor.constraint(equalToConstant: 44)
+        cancelWidth.priority = .defaultHigh
+        cancelWidth.isActive = true
+        for child in [completions, statusRow, controls, keys] {
             child.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(child)
         }
         NSLayoutConstraint.activate([
-            bar.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
-            bar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
-            bar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            controls.topAnchor.constraint(equalTo: root.topAnchor, constant: 5),
+            controls.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            controls.heightAnchor.constraint(equalToConstant: 44),
 
-            keys.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 8),
-            keys.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
-            keys.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
-            keys.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
-            globe.widthAnchor.constraint(equalToConstant: 46),
-            enter.widthAnchor.constraint(equalToConstant: 116),
-
-            finishArea.topAnchor.constraint(equalTo: keys.topAnchor),
-            finishArea.leadingAnchor.constraint(equalTo: keys.leadingAnchor),
-            finishArea.trailingAnchor.constraint(equalTo: keys.trailingAnchor),
-            finishArea.bottomAnchor.constraint(equalTo: keys.bottomAnchor),
-
-            page.topAnchor.constraint(equalTo: keys.topAnchor),
-            page.leadingAnchor.constraint(equalTo: keys.leadingAnchor),
-            page.trailingAnchor.constraint(equalTo: keys.trailingAnchor),
-            page.bottomAnchor.constraint(equalTo: keys.bottomAnchor),
-
-            cancel.topAnchor.constraint(equalTo: bar.topAnchor, constant: 3),
-            cancel.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 3),
-            cancel.widthAnchor.constraint(equalToConstant: 44),
-            cancel.heightAnchor.constraint(equalToConstant: 44),
+            bar.widthAnchor.constraint(equalToConstant: 108),
+            completions.topAnchor.constraint(equalTo: controls.topAnchor),
+            completions.bottomAnchor.constraint(equalTo: controls.bottomAnchor),
+            completions.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 7),
+            completions.trailingAnchor.constraint(equalTo: controls.leadingAnchor, constant: -6),
+            statusRow.centerYAnchor.constraint(equalTo: controls.centerYAnchor),
+            statusRow.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
+            statusRow.trailingAnchor.constraint(lessThanOrEqualTo: controls.leadingAnchor, constant: -6),
+            keys.topAnchor.constraint(equalTo: controls.bottomAnchor),
+            keys.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 4),
+            keys.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -4),
+            keys.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: 5)
         ])
     }
 }
@@ -546,365 +769,5 @@ enum Spacing {
     static func prefix(before: String?) -> String {
         guard let last = before?.last else { return "" }
         return last.isWhitespace || "([{\"'/-\u{201C}\u{2018}".contains(last) ? "" : " "
-    }
-}
-
-/// The system keyboard's own key colours, so the bar and the keys read as one keyboard.
-private enum Ink {
-    static let key = UIColor {
-        $0.userInterfaceStyle == .dark ? UIColor(red: 0.345, green: 0.345, blue: 0.357, alpha: 1) : .white
-    }
-    static let keyDown = UIColor {
-        $0.userInterfaceStyle == .dark ? UIColor(white: 0.24, alpha: 1) : UIColor(red: 0.7, green: 0.72, blue: 0.76, alpha: 1)
-    }
-    static let edge = UIColor { UIColor(white: 0, alpha: $0.userInterfaceStyle == .dark ? 0.4 : 0.16) }
-    static let mark = UIColor { $0.userInterfaceStyle == .dark ? .white : UIColor(white: 0.11, alpha: 1) }
-    static let markDim = mark.withAlphaComponent(0.6)
-}
-
-/// A rounded face with the one-point lower edge that system keys have.
-private func keyFace(radius: CGFloat, in control: UIControl) -> UIView {
-    let edge = UIView()
-    let face = UIView()
-    for (view, color) in [(edge, Ink.edge), (face, Ink.key)] {
-        view.backgroundColor = color
-        view.layer.cornerRadius = radius
-        view.layer.cornerCurve = .continuous
-        view.isUserInteractionEnabled = false
-        view.translatesAutoresizingMaskIntoConstraints = false
-        control.addSubview(view)
-        NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: control.leadingAnchor),
-            view.trailingAnchor.constraint(equalTo: control.trailingAnchor),
-            view.topAnchor.constraint(equalTo: control.topAnchor, constant: view === edge ? 1 : 0),
-            view.bottomAnchor.constraint(equalTo: control.bottomAnchor, constant: view === edge ? 1 : 0),
-        ])
-    }
-    return face
-}
-
-/// Start, then Done. It keeps its place and colour through a take, so what
-/// changes is what it says, the clock in its corner, and the keys going faint.
-final class StartBar: UIControl {
-    private var face: UIView!
-    private let middle = UIStackView()
-    private let glyph = UIImageView()
-    private let label = UILabel()
-    private let spinner = UIActivityIndicatorView(style: .medium)
-    private let corner = UIStackView()
-    private let clock = UILabel()
-    private let meter = Meter()
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        face = keyFace(radius: 16, in: self)
-        glyph.tintColor = Ink.mark
-        glyph.contentMode = .scaleAspectFit
-        label.textColor = Ink.mark
-        label.numberOfLines = 2
-        label.textAlignment = .center
-        clock.textColor = Ink.mark
-        clock.font = .monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
-        spinner.color = Ink.mark
-        spinner.hidesWhenStopped = true
-        middle.axis = .horizontal
-        middle.alignment = .center
-        middle.spacing = 8
-        [glyph, label].forEach(middle.addArrangedSubview)
-        corner.axis = .horizontal
-        corner.alignment = .center
-        corner.spacing = 8
-        [clock, meter].forEach(corner.addArrangedSubview)
-        for child in [middle, spinner, corner] as [UIView] {
-            child.translatesAutoresizingMaskIntoConstraints = false
-            child.isUserInteractionEnabled = false
-            addSubview(child)
-        }
-        NSLayoutConstraint.activate([
-            middle.centerXAnchor.constraint(equalTo: centerXAnchor),
-            middle.centerYAnchor.constraint(equalTo: centerYAnchor),
-            middle.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
-            spinner.centerXAnchor.constraint(equalTo: centerXAnchor),
-            spinner.centerYAnchor.constraint(equalTo: centerYAnchor),
-            corner.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            corner.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            corner.heightAnchor.constraint(equalToConstant: 28),
-        ])
-        isAccessibilityElement = true
-        accessibilityTraits = .button
-    }
-
-    required init?(coder: NSCoder) { fatalError("not used") }
-
-    /// `message` is for what a tap alone will not fix. Everything else goes unsaid.
-    func show(_ phase: SessionState.Phase, message: String?, since: Date?) {
-        middle.isHidden = phase == .transcribing
-        corner.isHidden = phase != .recording
-        if phase == .transcribing { spinner.startAnimating() } else { spinner.stopAnimating() }
-        var font = UIFont.systemFont(ofSize: 20, weight: .semibold)
-        switch phase {
-        case .off, .armed:
-            glyph.image = UIImage(systemName: message == nil ? "mic.fill" : "mic.slash")
-            label.text = message ?? "Start"
-            if message != nil { font = .systemFont(ofSize: 15, weight: .medium) }
-            accessibilityLabel = message ?? "Start dictation"
-        case .recording:
-            glyph.image = UIImage(systemName: "checkmark")
-            label.text = "Done"
-            accessibilityLabel = "Finish"
-        case .transcribing:
-            accessibilityLabel = "Writing"
-        }
-        label.font = font
-        glyph.preferredSymbolConfiguration = .init(pointSize: 20, weight: .semibold)
-        if phase == .recording {
-            let seconds = max(0, Int(Date().timeIntervalSince(since ?? Date())))
-            clock.text = String(format: "%d:%02d", seconds / 60, seconds % 60)
-            meter.start()
-        } else {
-            meter.stop()
-        }
-    }
-
-    func stop() {
-        meter.stop()
-    }
-
-    override var isHighlighted: Bool {
-        didSet { face.backgroundColor = isHighlighted ? Ink.keyDown : Ink.key }
-    }
-}
-
-/// A punctuation, space, return, delete or globe key.
-final class Key: UIControl {
-    let output: String
-    private var face: UIView!
-
-    init(title: String? = nil, symbol: String? = nil, label: String? = nil, output: String? = nil) {
-        self.output = output ?? title ?? ""
-        super.init(frame: .zero)
-        face = keyFace(radius: 10, in: self)
-        let content: UIView
-        if let symbol {
-            let image = UIImageView(image: UIImage(systemName: symbol))
-            image.tintColor = Ink.mark
-            image.preferredSymbolConfiguration = .init(pointSize: 19, weight: .regular)
-            content = image
-        } else {
-            let text = UILabel()
-            text.text = title
-            text.textColor = Ink.mark
-            text.font = .systemFont(ofSize: 24)
-            content = text
-        }
-        content.translatesAutoresizingMaskIntoConstraints = false
-        content.isUserInteractionEnabled = false
-        addSubview(content)
-        content.centerXAnchor.constraint(equalTo: centerXAnchor).isActive = true
-        content.centerYAnchor.constraint(equalTo: centerYAnchor).isActive = true
-        isAccessibilityElement = true
-        accessibilityTraits = .keyboardKey
-        accessibilityLabel = label ?? title
-    }
-
-    required init?(coder: NSCoder) { fatalError("not used") }
-
-    override var isHighlighted: Bool {
-        didSet { face.backgroundColor = isHighlighted ? Ink.keyDown : Ink.key }
-    }
-
-    // Half the gap on each side, so a tap between two keys still lands on one.
-    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        bounds.insetBy(dx: -3, dy: -4).contains(point)
-    }
-}
-
-/// How loud the microphone hears you, from the level the app writes.
-final class Meter: UIStackView {
-    private var heights: [NSLayoutConstraint] = []
-    private var levels = [Float](repeating: 0, count: 7)
-    private var link: CADisplayLink?
-    private var frames = 0
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        axis = .horizontal
-        alignment = .center
-        spacing = 3
-        for _ in levels {
-            let bar = UIView()
-            bar.layer.cornerRadius = 1.5
-            bar.backgroundColor = Ink.mark.withAlphaComponent(0.75)
-            bar.translatesAutoresizingMaskIntoConstraints = false
-            bar.widthAnchor.constraint(equalToConstant: 3).isActive = true
-            let height = bar.heightAnchor.constraint(equalToConstant: 3)
-            height.isActive = true
-            heights.append(height)
-            addArrangedSubview(bar)
-        }
-        heightAnchor.constraint(equalToConstant: 24).isActive = true
-    }
-
-    required init(coder: NSCoder) { fatalError("not used") }
-
-    func start() {
-        guard link == nil else { return }
-        let link = CADisplayLink(target: self, selector: #selector(tick))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
-        link.add(to: .main, forMode: .common)
-        self.link = link
-    }
-
-    func stop() {
-        link?.invalidate()
-        link = nil
-        levels = [Float](repeating: 0, count: levels.count)
-        heights.forEach { $0.constant = 3 }
-    }
-
-    @objc private func tick() {
-        frames += 1
-        guard frames % 2 == 0 else { return }
-        levels.removeFirst()
-        levels.append(Bridge.readLevel())
-        for (index, height) in heights.enumerated() {
-            height.constant = 3 + CGFloat(levels[index]) * 19
-        }
-    }
-}
-
-/// The words so far, over the faint keys, when the field cannot hold them. It
-/// takes no touches, so they reach the finish area below.
-final class LivePage: UIView {
-    private let clip = UIView()
-    private let words = UILabel()
-    private let fade = CAGradientLayer()
-    private var link: CADisplayLink?
-    private var shown = ""
-    /// UTF-16 length of the part that has not changed since the last preview.
-    private var settled = 0
-    private var fadeStarted: CFTimeInterval?
-    private var writing = false
-
-    private static let fadeTime: CFTimeInterval = 0.25
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isUserInteractionEnabled = false
-        clip.clipsToBounds = true
-        fade.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
-        fade.locations = [0, 1]
-        clip.layer.mask = fade
-        words.numberOfLines = 0
-        clip.translatesAutoresizingMaskIntoConstraints = false
-        words.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(clip)
-        clip.addSubview(words)
-        NSLayoutConstraint.activate([
-            clip.topAnchor.constraint(equalTo: topAnchor),
-            clip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            clip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            clip.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
-            words.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
-            words.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
-            words.bottomAnchor.constraint(equalTo: clip.bottomAnchor),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError("not used") }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        fade.frame = clip.bounds
-        fade.endPoint = CGPoint(x: 0.5, y: min(1, 10 / max(clip.bounds.height, 1)))
-        fade.startPoint = CGPoint(x: 0.5, y: 0)
-    }
-
-    func show(_ phase: SessionState.Phase) {
-        writing = phase == .transcribing
-        if phase == .recording || writing { start() } else { stop() }
-        paint()
-    }
-
-    func show(words new: String) {
-        guard new != shown else { return }
-        settled = Self.settledLength(from: shown, to: new)
-        shown = new
-        fadeStarted = CACurrentMediaTime()
-        paint()
-    }
-
-    /// The whole words that stayed the same, so only new or rewritten ones fade in.
-    private static func settledLength(from old: String, to new: String) -> Int {
-        var same = old.commonPrefix(with: new)
-        let wholeWord = same == old && new.dropFirst(same.count).first == " "
-        if !wholeWord {
-            guard let space = same.lastIndex(of: " ") else { return 0 }
-            same = String(same[..<space])
-        }
-        return (same as NSString).length
-    }
-
-    private func paint() {
-        let font = UIFont.systemFont(ofSize: 17)
-        let ink = Ink.mark
-        let base = ink.withAlphaComponent(writing ? 0.5 : 1)
-        let text = NSMutableAttributedString(string: shown, attributes: [.font: font, .foregroundColor: base])
-        if let started = fadeStarted {
-            let progress = (CACurrentMediaTime() - started) / Self.fadeTime
-            if progress >= 1 {
-                fadeStarted = nil
-            } else {
-                let range = NSRange(location: settled, length: (shown as NSString).length - settled)
-                text.addAttribute(.foregroundColor, value: ink.withAlphaComponent(0.2 + 0.8 * progress), range: range)
-            }
-        }
-        words.attributedText = text
-    }
-
-    private func start() {
-        guard link == nil else { return }
-        let link = CADisplayLink(target: self, selector: #selector(tick))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
-        link.add(to: .main, forMode: .common)
-        self.link = link
-    }
-
-    func stop() {
-        link?.invalidate()
-        link = nil
-    }
-
-    @objc private func tick() {
-        if fadeStarted != nil { paint() }
-    }
-}
-
-final class CloseButton: UIControl {
-    private let glyph = UIImageView(image: UIImage(systemName: "xmark"))
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        glyph.tintColor = Ink.markDim
-        glyph.preferredSymbolConfiguration = .init(pointSize: 15, weight: .bold)
-        glyph.translatesAutoresizingMaskIntoConstraints = false
-        glyph.isUserInteractionEnabled = false
-        addSubview(glyph)
-        glyph.centerXAnchor.constraint(equalTo: centerXAnchor).isActive = true
-        glyph.centerYAnchor.constraint(equalTo: centerYAnchor).isActive = true
-        accessibilityLabel = "Cancel"
-        isAccessibilityElement = true
-        accessibilityTraits = .button
-    }
-
-    required init?(coder: NSCoder) { fatalError("not used") }
-
-    override var isHighlighted: Bool {
-        didSet { glyph.alpha = isHighlighted ? 0.5 : 1 }
-    }
-
-    // A cancel target this small needs some room around it.
-    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        bounds.insetBy(dx: -6, dy: -6).contains(point)
     }
 }

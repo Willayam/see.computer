@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// What the app tells the keyboard. Only the app writes it.
@@ -11,6 +12,7 @@ struct SessionState: Codable, Equatable {
     var problem: String?
     /// When the take being recorded started, for the keyboard's clock.
     var since: Date?
+    var start: DictationStart?
 }
 
 struct Take: Codable, Equatable {
@@ -20,6 +22,60 @@ struct Take: Codable, Equatable {
     /// The field was sent with the live words in it before this was written, so
     /// typing it would add the message again.
     var sent: Bool?
+    var start: DictationStart?
+
+    enum Delivery {
+        case waitForField, verifyTarget, historyOnly
+    }
+
+    func delivery(to field: UUID, at now: Date, hasDraft: Bool) -> Delivery {
+        let window = hasDraft ? Bridge.returnWindow : Bridge.insertWindow
+        guard sent != true, let start, now.timeIntervalSince(finished) < window else { return .historyOnly }
+        return start.target.field == field ? .verifyTarget : .waitForField
+    }
+}
+
+struct DictationTarget: Codable, Equatable {
+    let field: UUID
+    let before: Data?
+    let after: Data?
+    let selected: Data?
+    let hasText: Bool
+
+    init(field: UUID, before: String?, after: String?, selected: String?, hasText: Bool) {
+        self.field = field
+        self.before = before.map(Self.fingerprint)
+        self.after = after.map(Self.fingerprint)
+        self.selected = selected.flatMap { $0.isEmpty ? nil : Self.fingerprint($0) }
+        self.hasText = hasText
+    }
+
+    var isReadable: Bool { !hasText || before != nil || after != nil || selected != nil }
+
+    func matchesPosition(_ current: Self) -> Bool {
+        isReadable && field == current.field && before == current.before
+            && after == current.after && selected == current.selected
+    }
+
+    func matches(_ current: Self?) -> Bool {
+        guard let current else { return false }
+        return matchesPosition(current) && hasText == current.hasText
+    }
+
+    fileprivate static func fingerprint(_ text: String) -> Data {
+        Data(SHA256.hash(data: Data(text.precomposedStringWithCanonicalMapping.utf8)))
+    }
+}
+
+struct DictationStart: Codable, Equatable {
+    let id: UUID
+    let asked: Date
+    let target: DictationTarget
+}
+
+struct DictationPreview: Codable {
+    let startID: UUID
+    let words: String
 }
 
 /// What the keyboard leaves behind when it has to open the app. Only the
@@ -27,21 +83,60 @@ struct Take: Codable, Equatable {
 struct Handoff: Codable {
     var asked: Date
     var host: String?
+    var start: DictationStart?
 }
 
 /// The take so far, as it stands in the text field. Saved because the keyboard can
 /// go away mid-take, and it has to replace these words when it comes back. Only the
 /// keyboard writes it.
 struct Draft: Codable {
-    /// What the field held before the words, for telling whether they are still marked.
-    var before: String?
     var spacing: String
     var words: String
     /// The user cancelled or sent the take, so its words must go. Any other end
     /// without a transcript, such as the app being killed, leaves them in the field.
     var dropped: Bool?
+    var start: DictationStart?
+    var committedBefore: Data?
 
     var text: String { spacing + words }
+
+    init(start: DictationStart, before: String?, spacing: String, words: String) {
+        self.start = start
+        self.spacing = spacing
+        self.words = words
+        let prefix = before ?? ""
+        let committed = prefix + text
+        if before.map(DictationTarget.fingerprint) == start.target.before,
+            committed.count == prefix.count + text.count {
+            committedBefore = DictationTarget.fingerprint(committed)
+        }
+    }
+
+    func placement(at current: DictationTarget?, ownsMark: Bool) -> Placement? {
+        guard let current, let target = start?.target, target.isReadable, target.field == current.field,
+            target.selected == nil, current.selected == nil, target.after == current.after, current.hasText
+        else { return nil }
+        if let committedBefore, current.before == committedBefore {
+            return .committed
+        }
+        if ownsMark, target.matchesPosition(current) { return .marked }
+        return nil
+    }
+
+    enum Placement {
+        case marked, committed
+    }
+}
+
+struct ManualEdit: Codable {
+    let startID: UUID?
+    var target: DictationTarget?
+
+    func target(for start: DictationStart, at current: DictationTarget) -> DictationTarget? {
+        guard startID == start.id, let target, target.field == start.target.field,
+            target.selected == nil, target.matches(current) else { return nil }
+        return target
+    }
 }
 
 /// Darwin notifications carry no payload. The receiver reads `state.json`, or
@@ -50,7 +145,7 @@ enum Signal: String {
     /// `away`: the keyboard hid mid-take with the words still in the field.
     /// `sent`: the field emptied with the words in it, so the user sent them.
     case start, stop, cancel, ping, away, sent
-    case changed, pong, words
+    case changed, pong, words, typingLanguagesChanged
 
     fileprivate var name: CFString { "computer.see.ios.\(rawValue)" as CFString }
 }
