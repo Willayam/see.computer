@@ -16,6 +16,9 @@ final class KeyboardViewController: UIInputViewController {
     private var note: String?
 
     private let bar = StartBar()
+    private let completions = CompletionStrip()
+    private var inputHeight: NSLayoutConstraint?
+    private var stripHeight: NSLayoutConstraint?
     private let page = LivePage()
     private let cancel = CloseButton()
     private let keys = TypingKeys()
@@ -28,6 +31,21 @@ final class KeyboardViewController: UIInputViewController {
     private var wordsInField = true
     /// The field was sent mid-take, so hiding next is not the user walking away.
     private var takeWasSent = false
+    private struct Selection: Equatable {
+        let text: String
+        let before: String?
+        let after: String?
+        let field: UUID
+
+        init?(_ proxy: UITextDocumentProxy) {
+            guard let text = proxy.selectedText, !text.isEmpty else { return nil }
+            self.text = text
+            before = proxy.documentContextBeforeInput
+            after = proxy.documentContextAfterInput
+            field = proxy.documentIdentifier
+        }
+    }
+    private var selectionAtStart: Selection?
 
     /// For the label only. A slow answer must not read as the app having died,
     /// so this is looser than the check a tap makes.
@@ -86,7 +104,7 @@ final class KeyboardViewController: UIInputViewController {
         isActive = true
         keys.reset()
         configureTypingKeys()
-        keys.updateCase(for: textDocumentProxy)
+        updateTypingContext()
         Signals.observe(.typingLanguagesChanged) { [weak self] in self?.configureTypingKeys() }
         activatedAt = Date()
         // Registered here, because the signals go to whichever controller registered last.
@@ -115,11 +133,19 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func configureTypingKeys() {
-        keys.configure(swedish: TypingLanguages.current.usesSwedishKeys, needsGlobe: needsInputModeSwitchKey)
+        let preference = TypingLanguages.current
+        keys.configure(swedish: preference.usesSwedishKeys, needsGlobe: needsInputModeSwitchKey)
+        completions.configure(preference)
+        updateTypingContext()
+    }
+
+    private func updateTypingContext() {
+        keys.updateCase(for: textDocumentProxy)
+        completions.update(for: textDocumentProxy)
     }
 
     override func selectionDidChange(_ textInput: UITextInput?) {
-        keys.updateCase(for: textDocumentProxy)
+        updateTypingContext()
     }
 
     override func textWillChange(_ textInput: UITextInput?) {}
@@ -127,7 +153,7 @@ final class KeyboardViewController: UIInputViewController {
     override func textDidChange(_ textInput: UITextInput?) {
         switchAwayFromFieldsThatNeedTheirOwnKeys()
         _ = endTakeIfFieldWasSent()
-        keys.updateCase(for: textDocumentProxy)
+        updateTypingContext()
     }
 
     /// A chat app empties its field when it sends, live words included. Only the
@@ -194,7 +220,7 @@ final class KeyboardViewController: UIInputViewController {
             if draft.dropped == true { _ = takeDraftBack() } else { keepDraft(draft) }
         }
         showWords()
-        keys.updateCase(for: textDocumentProxy)
+        updateTypingContext()
         render()
     }
 
@@ -223,12 +249,12 @@ final class KeyboardViewController: UIInputViewController {
     private func putInField(_ words: String) -> Bool {
         let proxy = textDocumentProxy
         let before = proxy.documentContextBeforeInput
+        guard proxy.selectedText?.isEmpty != false else { return false }
         let last = Bridge.read(Draft.self, "draft.json")
         if let last {
             guard last.words != words else { return true }
             if !Self.isMarked(last, before: before, in: proxy) {
                 guard Self.isCommitted(last, before: before) else {
-                    _ = takeDraftBack()
                     return false
                 }
                 // iOS committed the words when the keyboard went away mid-take.
@@ -248,12 +274,14 @@ final class KeyboardViewController: UIInputViewController {
         guard isActive, let draft = Bridge.read(Draft.self, "draft.json") else { return nil }
         Bridge.remove("draft.json")
         let proxy = textDocumentProxy
+        guard proxy.selectedText?.isEmpty != false else { return nil }
         if Self.isCommitted(draft, before: proxy.documentContextBeforeInput) {
             // It would stay behind the real take.
             Diagnostics.log("draft_cleared", ["how": "deleted", "chars": draft.text.count])
             for _ in draft.text { proxy.deleteBackward() }
             return draft
         }
+        guard Self.isMarked(draft, before: proxy.documentContextBeforeInput, in: proxy) else { return nil }
         Diagnostics.log("draft_cleared", ["how": "unmarked", "chars": draft.text.count])
         // A controller that did not set the mark cannot clear it with an empty one.
         proxy.setMarkedText(" ", selectedRange: NSRange(location: 1, length: 0))
@@ -288,7 +316,7 @@ final class KeyboardViewController: UIInputViewController {
     /// iOS leaves marked text out of the context, so it stays as it was unless the
     /// draft got committed or the cursor went elsewhere.
     private static func isMarked(_ draft: Draft, before: String?, in proxy: UITextDocumentProxy) -> Bool {
-        before == draft.before && proxy.hasText
+        proxy.selectedText?.isEmpty != false && before == draft.before && proxy.hasText
     }
 
     /// Marked text is never in the context, so a context that ends in the draft
@@ -323,11 +351,18 @@ final class KeyboardViewController: UIInputViewController {
             Diagnostics.log("insert_stale", ["age_s": age, "chars": take.text.count])
             return
         }
+        // A selection made while the take was finishing belongs to the host.
+        // A delayed result stays in History instead of replacing that selection.
+        let selection = Selection(textDocumentProxy)
+        guard selection == nil || selection == selectionAtStart else {
+            Bridge.remove("draft.json")
+            return
+        }
         let draft = takeDraftBack()
         let spacing = draft?.spacing ?? Spacing.prefix(before: textDocumentProxy.documentContextBeforeInput)
         Diagnostics.log(
             "inserted", ["chars": take.text.count, "age_s": age, "draft": draft != nil, "in_its_field": inItsField])
-        textDocumentProxy.insertText(spacing + take.text)
+        textDocumentProxy.insertText(selection == nil ? spacing + take.text : take.text)
     }
 
     private func startAfterReturningFromTheApp() {
@@ -345,8 +380,13 @@ final class KeyboardViewController: UIInputViewController {
                 return
             }
             Diagnostics.log("start_sent", ["by": "handoff", "age_s": age])
-            Signals.post(.start)
+            self?.startTake()
         }
+    }
+
+    private func startTake() {
+        selectionAtStart = Selection(textDocumentProxy)
+        Signals.post(.start)
     }
 
     /// Answers from the last heartbeat when it can. Otherwise it asks and waits.
@@ -395,7 +435,7 @@ final class KeyboardViewController: UIInputViewController {
             if self.state.phase == .armed {
                 Diagnostics.log("start_sent", ["by": "tap"])
                 self.pressStartedTake = true
-                Signals.post(.start)
+                self.startTake()
             } else if self.state.phase != .recording {
                 Diagnostics.log("tap_not_armed", ["phase": self.state.phase.rawValue])
             }
@@ -455,16 +495,15 @@ final class KeyboardViewController: UIInputViewController {
 
     private func typed(_ output: String) {
         guard isActive, keys.isUserInteractionEnabled else { return }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         let straight = output == "’" && textDocumentProxy.smartQuotesType == .no
         textDocumentProxy.insertText(straight ? "'" : output)
-        keys.updateCase(for: textDocumentProxy)
+        updateTypingContext()
     }
 
     private func deleteCharacter() {
         guard isActive, keys.isUserInteractionEnabled else { return }
         textDocumentProxy.deleteBackward()
-        keys.updateCase(for: textDocumentProxy)
+        updateTypingContext()
     }
 
     private func deleteDown() {
@@ -490,6 +529,11 @@ final class KeyboardViewController: UIInputViewController {
         let phase: SessionState.Phase = looksAlive || !fieldHasSettled ? state.phase : .off
         let talking = phase == .recording || phase == .transcribing
         let message = hasFullAccess ? note ?? state.problem : "Allow Full Access"
+        bar.isHidden = !talking && message == nil
+        let compact = bar.isHidden && textDocumentProxy.autocorrectionType == .no
+        completions.isHidden = !bar.isHidden || compact
+        stripHeight?.constant = compact ? 19 : 46
+        inputHeight?.constant = compact ? 227 : 254
         bar.show(phase, message: message, since: state.since)
         cancel.isHidden = phase != .recording
         finishArea.isHidden = !talking
@@ -506,35 +550,51 @@ final class KeyboardViewController: UIInputViewController {
 
     private func layout() {
         guard let root = view else { return }
-        let height = root.heightAnchor.constraint(equalToConstant: 262)
+        let height = root.heightAnchor.constraint(equalToConstant: 254)
         height.priority = .defaultHigh
         height.isActive = true
+        inputHeight = height
+        let strip = bar.heightAnchor.constraint(equalToConstant: 46)
+        stripHeight = strip
 
-        for control in [bar, finishArea] as [UIControl] {
+        for control in [keys.mic, bar, finishArea] as [UIControl] {
             control.addTarget(self, action: #selector(micDown), for: .touchDown)
             control.addTarget(self, action: #selector(micUp), for: [.touchUpInside, .touchUpOutside, .touchCancel])
         }
         cancel.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
         keys.connectGlobe(to: self)
+        keys.moveCursor = { [weak self] offset in
+            self?.textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
+        }
+        completions.accept = { [weak self] prefix, suffix in
+            guard let self,
+                CompletionStrip.word(in: self.textDocumentProxy) == prefix else { return }
+            let trailingSpace = self.textDocumentProxy.documentContextAfterInput?.first?.isWhitespace == true ? "" : " "
+            self.typed(suffix + trailingSpace)
+        }
         keys.insert = { [weak self] in self?.typed($0) }
         keys.startDelete = { [weak self] in self?.deleteDown() }
         keys.endDelete = { [weak self] in self?.deleteUp() }
 
         // The finish area lies over the faint keys, so a tap there ends the take too.
-        for child in [bar, keys, finishArea, page, cancel] as [UIView] {
+        for child in [completions, bar, keys, finishArea, page, cancel] as [UIView] {
             child.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(child)
         }
         NSLayoutConstraint.activate([
-            bar.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
-            bar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
-            bar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            bar.topAnchor.constraint(equalTo: root.topAnchor),
+            bar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 7),
+            bar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -7),
 
-            keys.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 8),
+            keys.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 7),
             keys.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
             keys.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
-            keys.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
-            bar.heightAnchor.constraint(equalToConstant: 46),
+            keys.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            strip,
+            completions.topAnchor.constraint(equalTo: bar.topAnchor),
+            completions.bottomAnchor.constraint(equalTo: bar.bottomAnchor),
+            completions.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            completions.trailingAnchor.constraint(equalTo: root.trailingAnchor),
 
             finishArea.topAnchor.constraint(equalTo: keys.topAnchor),
             finishArea.leadingAnchor.constraint(equalTo: keys.leadingAnchor),
@@ -565,34 +625,39 @@ enum Spacing {
 /// The system keyboard's own key colours, so the bar and the keys read as one keyboard.
 private enum Ink {
     static let key = UIColor {
-        $0.userInterfaceStyle == .dark ? UIColor(red: 0.345, green: 0.345, blue: 0.357, alpha: 1) : .white
+        $0.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.165) : .white
     }
     static let keyDown = UIColor {
         $0.userInterfaceStyle == .dark ? UIColor(white: 0.24, alpha: 1) : UIColor(red: 0.7, green: 0.72, blue: 0.76, alpha: 1)
     }
-    static let edge = UIColor { UIColor(white: 0, alpha: $0.userInterfaceStyle == .dark ? 0.4 : 0.16) }
     static let mark = UIColor { $0.userInterfaceStyle == .dark ? .white : UIColor(white: 0.11, alpha: 1) }
     static let markDim = mark.withAlphaComponent(0.6)
 }
 
-/// A rounded face with the one-point lower edge that system keys have.
-private func keyFace(radius: CGFloat, in control: UIControl) -> UIView {
-    let edge = UIView()
-    let face = UIView()
-    for (view, color) in [(edge, Ink.edge), (face, Ink.key)] {
-        view.backgroundColor = color
-        view.layer.cornerRadius = radius
-        view.layer.cornerCurve = .continuous
-        view.isUserInteractionEnabled = false
-        view.translatesAutoresizingMaskIntoConstraints = false
-        control.addSubview(view)
-        NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: control.leadingAnchor),
-            view.trailingAnchor.constraint(equalTo: control.trailingAnchor),
-            view.topAnchor.constraint(equalTo: control.topAnchor, constant: view === edge ? 1 : 0),
-            view.bottomAnchor.constraint(equalTo: control.bottomAnchor, constant: view === edge ? 1 : 0),
-        ])
+/// Flat keycap above the system keyboard material.
+private func keyFace(radius: CGFloat, in control: UIControl, usesGlass: Bool = false) -> UIView {
+    let face: UIView
+    if #available(iOS 26, *), usesGlass {
+        let glass = UIGlassEffect(style: .regular)
+        glass.isInteractive = true
+        let effectView = UIVisualEffectView(effect: glass)
+        effectView.cornerConfiguration = .corners(radius: .fixed(radius))
+        face = effectView
+    } else {
+        face = UIView()
+        face.backgroundColor = Ink.key
     }
+    face.layer.cornerRadius = radius
+    face.layer.cornerCurve = .continuous
+    face.isUserInteractionEnabled = false
+    face.translatesAutoresizingMaskIntoConstraints = false
+    control.addSubview(face)
+    NSLayoutConstraint.activate([
+        face.leadingAnchor.constraint(equalTo: control.leadingAnchor),
+        face.trailingAnchor.constraint(equalTo: control.trailingAnchor),
+        face.topAnchor.constraint(equalTo: control.topAnchor),
+        face.bottomAnchor.constraint(equalTo: control.bottomAnchor)
+    ])
     return face
 }
 
@@ -609,7 +674,7 @@ final class StartBar: UIControl {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        face = keyFace(radius: 16, in: self)
+        face = keyFace(radius: 12, in: self, usesGlass: true)
         glyph.tintColor = Ink.mark
         glyph.contentMode = .scaleAspectFit
         label.textColor = Ink.mark
@@ -679,7 +744,7 @@ final class StartBar: UIControl {
     }
 
     override var isHighlighted: Bool {
-        didSet { face.backgroundColor = isHighlighted ? Ink.keyDown : Ink.key }
+        didSet { face.backgroundColor = isHighlighted ? Ink.keyDown : .clear }
     }
 }
 
@@ -690,10 +755,10 @@ final class Key: UIControl {
     private var symbolView: UIImageView?
     private var face: UIView!
 
-    init(title: String? = nil, symbol: String? = nil, label: String? = nil, output: String? = nil) {
+    init(title: String? = nil, symbol: String? = nil, label: String? = nil, output: String? = nil, usesGlass: Bool = false) {
         self.output = output ?? title ?? ""
         super.init(frame: .zero)
-        face = keyFace(radius: 6, in: self)
+        face = keyFace(radius: 8, in: self, usesGlass: usesGlass)
         let content: UIView
         if let symbol {
             let image = UIImageView(image: UIImage(systemName: symbol))
@@ -705,7 +770,7 @@ final class Key: UIControl {
             let text = UILabel()
             text.text = title
             text.textColor = Ink.mark
-            text.font = .systemFont(ofSize: (title?.count ?? 0) > 1 ? 16 : 22)
+            text.font = .systemFont(ofSize: (title?.count ?? 0) > 1 ? 18 : 22)
             titleLabel = text
             content = text
         }
@@ -724,14 +789,56 @@ final class Key: UIControl {
         accessibilityLabel = title
     }
 
+    private var restingColor = Ink.key
+
+    func setActionColor(_ accent: Bool) {
+        restingColor = accent ? .systemBlue : Ink.key
+        face.backgroundColor = restingColor
+        symbolView?.tintColor = accent ? .white : Ink.mark
+    }
+
     func setSymbol(_ symbol: String) {
         symbolView?.image = UIImage(systemName: symbol)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    private var typingKeys: TypingKeys? {
+        var ancestor = superview
+        while let view = ancestor {
+            if let keys = view as? TypingKeys { return keys }
+            ancestor = view.superview
+        }
+        return nil
+    }
+
+    private var preview: UIView?
+
     override var isHighlighted: Bool {
-        didSet { face.backgroundColor = isHighlighted ? Ink.keyDown : Ink.key }
+        didSet {
+            guard oldValue != isHighlighted else { return }
+            if !(face is UIVisualEffectView) { face.backgroundColor = isHighlighted ? Ink.keyDown : restingColor }
+            preview?.removeFromSuperview()
+            preview = nil
+            guard isHighlighted, output.count == 1, let character = titleLabel?.text,
+                character.count == 1, let keyboard = typingKeys else { return }
+            let bubble = UIControl()
+            bubble.isUserInteractionEnabled = false
+            bubble.accessibilityElementsHidden = true
+            let frame = convert(bounds, to: keyboard)
+            let width = max(46, frame.width + 10)
+            let x = min(max(0, frame.midX - width / 2), keyboard.bounds.width - width)
+            bubble.frame = CGRect(x: x, y: frame.minY - 44, width: width, height: 46)
+            _ = keyFace(radius: 12, in: bubble, usesGlass: true)
+            let label = UILabel(frame: bubble.bounds)
+            label.text = character
+            label.textAlignment = .center
+            label.textColor = Ink.mark
+            label.font = .systemFont(ofSize: 29)
+            bubble.addSubview(label)
+            keyboard.addSubview(bubble)
+            preview = bubble
+        }
     }
 
     // Half the gap on each side, so a tap between two keys still lands on one.

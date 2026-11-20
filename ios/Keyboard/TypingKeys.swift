@@ -7,12 +7,17 @@ final class TypingKeys: UIStackView {
     private var page = Page.letters
     private var letterKeys: [Key] = []
     private var shiftKey: Key?
+    private let enter = Key(symbol: "return.left", label: "Return", output: "\n")
+    private var returnType: UIReturnKeyType?
     private var uppercase = false
     private var capsLock = false
     private var lastShift = Date.distantPast
     private var swedish = false
     private let globe = Key(symbol: "globe", label: "Next keyboard")
 
+    let mic = Key(symbol: "mic", label: "Start dictation", usesGlass: true)
+    var moveCursor: ((Int) -> Void)?
+    private var trackpadX: CGFloat = 0
     var insert: ((String) -> Void)?
     var startDelete: (() -> Void)?
     var endDelete: (() -> Void)?
@@ -21,7 +26,8 @@ final class TypingKeys: UIStackView {
         super.init(frame: frame)
         axis = .vertical
         distribution = .fillEqually
-        spacing = 6
+        spacing = 11
+        enter.addTarget(self, action: #selector(typed(_:)), for: .touchUpInside)
         rebuild()
     }
 
@@ -49,6 +55,21 @@ final class TypingKeys: UIStackView {
     }
 
     func updateCase(for proxy: UITextDocumentProxy) {
+        if proxy.returnKeyType != returnType {
+            returnType = proxy.returnKeyType
+            let action: (String, String)
+            switch returnType {
+            case .search, .google, .yahoo: action = ("magnifyingglass", "Search")
+            case .send: action = ("arrow.up", "Send")
+            case .go, .next, .continue: action = ("arrow.right", "Continue")
+            case .done: action = ("checkmark", "Done")
+            case .join: action = ("arrow.right", "Join")
+            default: action = ("return.left", "Return")
+            }
+            enter.setSymbol(action.0)
+            enter.accessibilityLabel = action.1
+            enter.setActionColor(action.1 != "Return")
+        }
         guard !capsLock else { return }
         let before = proxy.documentContextBeforeInput ?? ""
         let capitals: Bool
@@ -85,7 +106,12 @@ final class TypingKeys: UIStackView {
         case .symbols: rows = ["[]{}#%^*+=", "_\\|~<>€£¥•", ".,?!'`"]
         }
         for (index, characters) in rows.enumerated() {
-            var controls = characters.map { typingKey(String($0)) }
+            let controls = characters.map { typingKey(String($0)) }
+            let row = addRow()
+            let cluster = UIStackView(arrangedSubviews: controls)
+            cluster.spacing = 6
+            cluster.distribution = .fillEqually
+            let columns = page == .letters && swedish ? 11 : 10
             if page == .letters { letterKeys += controls }
             if index == 2 {
                 let modifier: Key
@@ -100,31 +126,72 @@ final class TypingKeys: UIStackView {
                 let delete = Key(symbol: "delete.left", label: "Delete")
                 delete.addTarget(self, action: #selector(deleteDown), for: .touchDown)
                 delete.addTarget(self, action: #selector(deleteUp), for: [.touchUpInside, .touchUpOutside, .touchCancel])
-                controls.insert(modifier, at: 0)
-                controls.append(delete)
+                row.addArrangedSubview(modifier)
+                row.addArrangedSubview(UIView())
+                row.addArrangedSubview(cluster)
+                row.addArrangedSubview(UIView())
+                row.addArrangedSubview(delete)
+                modifier.widthAnchor.constraint(equalTo: row.widthAnchor, multiplier: page == .letters && swedish ? 0.105 : 0.118).isActive = true
+                delete.widthAnchor.constraint(equalTo: modifier.widthAnchor).isActive = true
+            } else {
+                row.addArrangedSubview(cluster)
             }
-            let row = addRow(controls)
-            row.distribution = .fillEqually
+            cluster.centerXAnchor.constraint(equalTo: row.centerXAnchor).isActive = true
+            if index < 2 && controls.count < columns {
+                let left = UIView()
+                row.insertArrangedSubview(left, at: 0)
+                row.addArrangedSubview(UIView())
+            }
+            let fraction: CGFloat = page != .letters && index == 2 ? 0.70 : CGFloat(controls.count) / CGFloat(columns)
+            cluster.widthAnchor.constraint(equalTo: row.widthAnchor, multiplier: fraction, constant: (fraction - 1) * 6).isActive = true
         }
         let mode = Key(title: page == .letters ? "123" : "ABC")
         mode.addTarget(self, action: #selector(changePage), for: .touchUpInside)
-        let space = typingKey("space", output: " ")
-        let enter = Key(symbol: "return.left", label: "Return", output: "\n")
-        enter.addTarget(self, action: #selector(typed(_:)), for: .touchUpInside)
-        let bottom = addRow([mode, globe, space, typingKey("."), enter])
-        for (key, fraction) in [(mode, 0.15), (enter, 0.17)] {
-            key.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: fraction).isActive = true
+        let space = Key(title: "", label: "Space", output: " ")
+        space.addTarget(self, action: #selector(typed(_:)), for: .touchUpInside)
+        let language = UILabel()
+        language.text = swedish ? "SV" : "EN"
+        language.font = .systemFont(ofSize: 10)
+        language.textColor = .tertiaryLabel
+        language.isAccessibilityElement = false
+        language.translatesAutoresizingMaskIntoConstraints = false
+        space.addSubview(language)
+        NSLayoutConstraint.activate([
+            language.trailingAnchor.constraint(equalTo: space.trailingAnchor, constant: -5),
+            language.bottomAnchor.constraint(equalTo: space.bottomAnchor, constant: -3)
+        ])
+        let trackpad = UILongPressGestureRecognizer(target: self, action: #selector(trackCursor(_:)))
+        trackpad.minimumPressDuration = 0.35
+        space.addGestureRecognizer(trackpad)
+        let bottom = addRow()
+        bottom.spacing = 6
+        [mode, globe, mic, space, enter].forEach(bottom.addArrangedSubview)
+        for key in [mode, globe, mic] {
+            let width = key.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.111)
+            width.priority = .defaultHigh
+            width.isActive = true
         }
-        bottom.arrangedSubviews[3].widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.10).isActive = true
-        let globeWidth = globe.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.11)
-        globeWidth.priority = .defaultHigh
-        globeWidth.isActive = true
+        enter.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.239).isActive = true
         setUppercase(uppercase)
     }
 
-    private func addRow(_ controls: [Key]) -> UIStackView {
-        let row = UIStackView(arrangedSubviews: controls)
-        row.spacing = 4
+    @objc private func trackCursor(_ gesture: UILongPressGestureRecognizer) {
+        let x = gesture.location(in: self).x
+        switch gesture.state {
+        case .began:
+            trackpadX = x
+            UISelectionFeedbackGenerator().selectionChanged()
+        case .changed:
+            let steps = Int((x - trackpadX) / 8)
+            guard steps != 0 else { return }
+            moveCursor?(steps)
+            trackpadX += CGFloat(steps) * 8
+        default: break
+        }
+    }
+
+    private func addRow() -> UIStackView {
+        let row = UIStackView()
         addArrangedSubview(row)
         return row
     }
