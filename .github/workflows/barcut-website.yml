@@ -1,0 +1,30 @@
+name: Deploy BarCut v1.2.0
+
+on:
+  push:
+    branches: ["deploy/barcut-v1.2.0"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: barcut-website
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: Willayam/barcut
+          ref: 6d5fb9b74a8438b9f5916c54ce0e11788b79ba51
+          persist-credentials: false
+      - name: Check that the Mac installer is available
+        run: curl -fsSLI https://github.com/Willayam/barcut/releases/latest/download/BarCut.dmg > /dev/null
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.164.0"
+          command: deploy
