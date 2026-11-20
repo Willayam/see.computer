@@ -32,6 +32,23 @@ final class KeyboardViewController: UIInputViewController {
     private var manualEdit: ManualEdit?
     private let cancel = CloseButton()
     private let keys = TypingKeys()
+    /// Destructive edits require the same field, selection and surrounding text.
+    private struct Caret: Equatable {
+        let field: UUID
+        let before: String
+        let after: String?
+
+        init?(_ proxy: UITextDocumentProxy) {
+            guard proxy.selectedText?.isEmpty != false, let before = proxy.documentContextBeforeInput else { return nil }
+            field = proxy.documentIdentifier
+            self.before = before
+            after = proxy.documentContextAfterInput
+        }
+    }
+    private var lastSpace: (time: TimeInterval, caret: Caret)?
+    private var lastLetter: Caret?
+    private var suggestionSpace: Caret?
+    private var lastCorrection: (caret: Caret, inserted: String, original: String)?
     private var deleteRepeat: Timer?
     private var pendingInsert = false
     private var activatedAt = Date.distantPast
@@ -73,6 +90,9 @@ final class KeyboardViewController: UIInputViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         layout()
+        requestSupplementaryLexicon { [weak self] lexicon in
+            DispatchQueue.main.async { self?.completions.use(lexicon) }
+        }
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -98,6 +118,7 @@ final class KeyboardViewController: UIInputViewController {
         super.viewWillDisappear(animated)
         hasLeft = true
         isActive = false
+        forgetTypingPosition()
         Diagnostics.log(
             "keyboard_hidden",
             [
@@ -159,7 +180,7 @@ final class KeyboardViewController: UIInputViewController {
 
     private func updateTypingContext() {
         keys.updateCase(for: textDocumentProxy)
-        completions.update(for: textDocumentProxy)
+        completions.update(for: textDocumentProxy, canCorrect: lastLetter != nil && lastLetter == Caret(textDocumentProxy))
     }
 
     override func selectionDidChange(_ textInput: UITextInput?) {
@@ -424,6 +445,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func startTake() {
+        forgetTypingPosition()
         selectionAtStart = Selection(textDocumentProxy)
         Signals.post(.start)
     }
@@ -552,11 +574,67 @@ final class KeyboardViewController: UIInputViewController {
         Bridge.write(edit, "manual-edit.json")
     }
 
+    private func forgetTypingPosition() {
+        lastSpace = nil
+        lastLetter = nil
+        lastCorrection = nil
+        suggestionSpace = nil
+    }
+
+    private func replaceSuffix(_ original: String, with replacement: String) {
+        let shared = zip(original, replacement).prefix { $0.0 == $0.1 }.count
+        for _ in original.dropFirst(shared) { textDocumentProxy.deleteBackward() }
+        let tail = String(replacement.dropFirst(shared))
+        if !tail.isEmpty { textDocumentProxy.insertText(tail) }
+    }
+
+    private func chooseSuggestion(_ input: WordInput, _ candidate: String) {
+        guard isActive, keys.isUserInteractionEnabled else { return }
+        prepareForManualEdit()
+        let proxy = textDocumentProxy
+        guard WordInput(proxy) == input else { return }
+        forgetTypingPosition()
+        let next = proxy.documentContextAfterInput?.first
+        let addSpace = next == nil || next.map { !$0.isWhitespace && !".,!?;:)]}".contains($0) } == true
+        replaceSuffix(input.word, with: candidate + (addSpace ? " " : ""))
+        if next == " " { proxy.adjustTextPosition(byCharacterOffset: 1) }
+        if addSpace { suggestionSpace = Caret(proxy) }
+        rememberEditedField()
+        updateTypingContext()
+    }
+
     private func typed(_ output: String) {
         guard isActive, keys.isUserInteractionEnabled else { return }
         prepareForManualEdit()
-        let straight = output == "’" && textDocumentProxy.smartQuotesType == .no
-        textDocumentProxy.insertText(straight ? "'" : output)
+        let proxy = textDocumentProxy
+        let caret = Caret(proxy)
+        let previousSpace = lastSpace
+        let followsLetter = caret != nil && caret == lastLetter
+        let punctuation = output.count == 1 && ".,!?;:".contains(output)
+        let removeSpace = punctuation && caret != nil && caret == suggestionSpace && caret?.before.last == " "
+        forgetTypingPosition()
+        let now = ProcessInfo.processInfo.systemUptime
+        if output == " ", let previousSpace, now - previousSpace.time < 0.45, caret == previousSpace.caret {
+            replaceSuffix(" ", with: ". ")
+        } else {
+            if removeSpace { proxy.deleteBackward() }
+            if followsLetter, output == " " || punctuation,
+               let input = WordInput(proxy), !input.word.isEmpty, let correction = completions.suggestions(for: input).automatic {
+                let inserted = correction + output
+                replaceSuffix(input.word, with: inserted)
+                if let end = Caret(proxy), end.before.hasSuffix(inserted) {
+                    lastCorrection = (end, inserted, input.word)
+                }
+            } else {
+                proxy.insertText(output == "’" && proxy.smartQuotesType == .no ? "'" : output)
+            }
+            if output.count == 1, output.first?.isLetter == true {
+                lastLetter = Caret(proxy)
+            } else if output == " ", let prior = caret?.before.last, prior.isLetter || prior.isNumber,
+                      let end = Caret(proxy), end.before.last == " " {
+                lastSpace = (now, end)
+            }
+        }
         rememberEditedField()
         updateTypingContext()
     }
@@ -564,7 +642,13 @@ final class KeyboardViewController: UIInputViewController {
     private func deleteCharacter() {
         guard isActive, keys.isUserInteractionEnabled else { return }
         prepareForManualEdit()
-        textDocumentProxy.deleteBackward()
+        let correction = lastCorrection
+        forgetTypingPosition()
+        if let correction, correction.caret == Caret(textDocumentProxy) {
+            replaceSuffix(correction.inserted, with: correction.original)
+        } else {
+            textDocumentProxy.deleteBackward()
+        }
         rememberEditedField()
         updateTypingContext()
     }
@@ -625,14 +709,10 @@ final class KeyboardViewController: UIInputViewController {
         keys.connectGlobe(to: self)
         keys.moveCursor = { [weak self] offset in
             self?.prepareForManualEdit()
+            self?.forgetTypingPosition()
             self?.textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
         }
-        completions.accept = { [weak self] prefix, suffix in
-            guard let self,
-                CompletionStrip.word(in: self.textDocumentProxy) == prefix else { return }
-            let trailingSpace = self.textDocumentProxy.documentContextAfterInput?.first?.isWhitespace == true ? "" : " "
-            self.typed(suffix + trailingSpace)
-        }
+        completions.accept = { [weak self] input, candidate in self?.chooseSuggestion(input, candidate) }
         keys.insert = { [weak self] in self?.typed($0) }
         keys.startDelete = { [weak self] in self?.deleteDown() }
         keys.endDelete = { [weak self] in self?.deleteUp() }
@@ -659,10 +739,10 @@ final class KeyboardViewController: UIInputViewController {
             statusRow.centerYAnchor.constraint(equalTo: controls.centerYAnchor),
             statusRow.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
             statusRow.trailingAnchor.constraint(lessThanOrEqualTo: controls.leadingAnchor, constant: -6),
-            keys.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 4),
-            keys.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 7),
-            keys.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -7),
-            keys.bottomAnchor.constraint(equalTo: root.bottomAnchor)
+            keys.topAnchor.constraint(equalTo: controls.bottomAnchor),
+            keys.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 4),
+            keys.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -4),
+            keys.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: 5)
         ])
     }
 }
@@ -688,7 +768,7 @@ private enum Ink {
 }
 
 /// Flat keycap above the system keyboard material.
-private func keyFace(radius: CGFloat, in control: UIControl, usesGlass: Bool = false) -> UIView {
+private func keyFace(radius: CGFloat, in control: UIControl, usesGlass: Bool = false, inset: CGSize = .zero) -> UIView {
     let face: UIView
     if #available(iOS 26, *), usesGlass {
         let glass = UIGlassEffect(style: .regular)
@@ -706,10 +786,10 @@ private func keyFace(radius: CGFloat, in control: UIControl, usesGlass: Bool = f
     face.translatesAutoresizingMaskIntoConstraints = false
     control.addSubview(face)
     NSLayoutConstraint.activate([
-        face.leadingAnchor.constraint(equalTo: control.leadingAnchor),
-        face.trailingAnchor.constraint(equalTo: control.trailingAnchor),
-        face.topAnchor.constraint(equalTo: control.topAnchor),
-        face.bottomAnchor.constraint(equalTo: control.bottomAnchor)
+        face.leadingAnchor.constraint(equalTo: control.leadingAnchor, constant: inset.width),
+        face.trailingAnchor.constraint(equalTo: control.trailingAnchor, constant: -inset.width),
+        face.topAnchor.constraint(equalTo: control.topAnchor, constant: inset.height),
+        face.bottomAnchor.constraint(equalTo: control.bottomAnchor, constant: -inset.height)
     ])
     return face
 }
@@ -780,7 +860,10 @@ final class Key: UIControl {
     init(title: String? = nil, symbol: String? = nil, label: String? = nil, output: String? = nil, usesGlass: Bool = false) {
         self.output = output ?? title ?? ""
         super.init(frame: .zero)
-        face = keyFace(radius: 8, in: self, usesGlass: usesGlass)
+        // The host hit-tests a remote keyboard surface. Give the touch cell a
+        // continuous surface even where the inset keycap leaves a gutter.
+        backgroundColor = UIColor(white: 0.5, alpha: 0.02)
+        face = keyFace(radius: 8, in: self, usesGlass: usesGlass, inset: CGSize(width: 3, height: 5.5))
         let content: UIView
         if let symbol {
             let image = UIImageView(image: UIImage(systemName: symbol))
@@ -834,39 +917,55 @@ final class Key: UIControl {
         return nil
     }
 
-    private var preview: UIView?
-
     override var isHighlighted: Bool {
         didSet {
             guard oldValue != isHighlighted else { return }
-            if !(face is UIVisualEffectView) { face.backgroundColor = isHighlighted ? Ink.keyDown : restingColor }
-            preview?.removeFromSuperview()
-            preview = nil
-            guard isHighlighted, output.count == 1, let character = titleLabel?.text,
-                character.count == 1, let keyboard = typingKeys else { return }
-            let bubble = UIControl()
-            bubble.isUserInteractionEnabled = false
-            bubble.accessibilityElementsHidden = true
-            let frame = convert(bounds, to: keyboard)
-            let width = max(46, frame.width + 10)
-            let x = min(max(0, frame.midX - width / 2), keyboard.bounds.width - width)
-            bubble.frame = CGRect(x: x, y: frame.minY - 44, width: width, height: 46)
-            _ = keyFace(radius: 12, in: bubble, usesGlass: true)
-            let label = UILabel(frame: bubble.bounds)
-            label.text = character
-            label.textAlignment = .center
-            label.textColor = Ink.mark
-            label.font = .systemFont(ofSize: 29)
-            bubble.addSubview(label)
-            keyboard.addSubview(bubble)
-            preview = bubble
+            face.backgroundColor = isHighlighted ? Ink.keyDown : restingColor
+            guard output.count == 1, let character = titleLabel?.text, character.count == 1,
+                let keyboard = typingKeys else { return }
+            if isHighlighted {
+                keyboard.preview.show(character, for: self, in: keyboard)
+            } else {
+                keyboard.preview.hide(for: self)
+            }
         }
     }
+}
 
-    // Half the gap on each side, so a tap between two keys still lands on one.
-    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        bounds.insetBy(dx: -3, dy: -4).contains(point)
+/// Reuse one material and label for all letters. Overlapping thumb presses
+/// release independently, so only the key that owns the preview can hide it.
+final class KeyPreview: UIControl {
+    private let label = UILabel()
+    private weak var owner: Key?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        accessibilityElementsHidden = true
+        _ = keyFace(radius: 12, in: self, usesGlass: true)
+        label.textAlignment = .center
+        label.textColor = Ink.mark
+        label.font = .systemFont(ofSize: 29)
+        addSubview(label)
     }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func show(_ character: String, for key: Key, in keyboard: TypingKeys) {
+        owner = key
+        let rect = key.convert(key.bounds, to: keyboard)
+        let width = max(46, rect.width + 4)
+        let x = min(max(0, rect.midX - width / 2), keyboard.bounds.width - width)
+        frame = CGRect(x: x, y: rect.minY - 40, width: width, height: 46)
+        label.frame = bounds
+        label.text = character
+        keyboard.addSubview(self)
+    }
+
+    func hide(for key: Key) {
+        if key === owner { removeFromSuperview() }
+    }
+
 }
 
 /// How loud the microphone hears you, from the level the app writes.

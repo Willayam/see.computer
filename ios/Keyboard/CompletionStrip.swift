@@ -1,14 +1,15 @@
 import UIKit
 
-/// A completion adds only the missing suffix. Selecting or moving within a
-/// word leaves editing to the host's text selection menu.
+/// Correction and prediction buttons share their candidates with the space key.
 final class CompletionStrip: UIStackView {
-    private let checker = UITextChecker()
-    private var prefix = ""
-    private var needsRefresh = true
-    private var languages: [String] = []
+    private let vocabulary = TypingVocabulary()
+    private var input: WordInput?
+    private var shownInput: WordInput?
+    private var cached: WordSuggestions?
+    private var canCorrect = false
+    private var pending: DispatchWorkItem?
     private let choices = (0..<3).map { _ in UIButton(type: .system) }
-    var accept: ((String, String) -> Void)?
+    var accept: ((WordInput, String) -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -32,54 +33,69 @@ final class CompletionStrip: UIStackView {
                 ])
             }
         }
+        vocabulary.load { [weak self] in self?.refresh() }
     }
 
     required init(coder: NSCoder) { fatalError("not used") }
 
     func configure(_ preference: TypingLanguages) {
-        let swedish = preference.usesSwedishKeys
-        let available = UITextChecker.availableLanguages
-        let codes = preference == .swedish ? ["sv"] : (swedish ? ["sv", "en"] : ["en"])
-        languages = codes.compactMap { code in
-            available.first { Locale(identifier: $0).language.languageCode?.identifier == code }
-        }
-        needsRefresh = true
+        vocabulary.configure(preference)
+        refresh()
     }
 
-    static func word(in proxy: UITextDocumentProxy) -> String {
-        guard proxy.selectedText?.isEmpty != false, proxy.autocorrectionType != .no,
-            proxy.documentContextAfterInput?.first?.isLetter != true,
-            let before = proxy.documentContextBeforeInput else { return "" }
-        return String(before.reversed().prefix(while: { $0.isLetter }).reversed())
+    func use(_ lexicon: UILexicon) {
+        vocabulary.use(lexicon)
+        refresh()
     }
 
-    func update(for proxy: UITextDocumentProxy) {
-        let word = Self.word(in: proxy)
-        guard word != prefix || needsRefresh else { return }
-        prefix = word
-        needsRefresh = false
-        var titles = [String]()
-        if !word.isEmpty {
-            titles.append(word)
-            let range = NSRange(word.startIndex..., in: word)
-            let lists = languages.map { checker.completions(forPartialWordRange: range, in: word, language: $0) ?? [] }
-            for rank in 0..<3 {
-                for list in lists where list.indices.contains(rank) {
-                    let candidate = list[rank]
-                    if candidate.hasPrefix(word), !titles.contains(candidate) { titles.append(candidate) }
-                }
-            }
+    func update(for proxy: UITextDocumentProxy, canCorrect: Bool) {
+        let current = WordInput(proxy)
+        guard input != current || self.canCorrect != canCorrect else { return }
+        self.canCorrect = canCorrect
+        input = current
+        refresh()
+    }
+
+    private func refresh() {
+        cached = nil
+        pending?.cancel()
+        guard let input else {
+            setTitles(WordSuggestions())
+            return
         }
+        // Keep the previous row visible during a fast key sequence. A tap is
+        // validated against the field before its candidate can be applied.
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.input == input else { return }
+            self.setTitles(self.suggestions(for: input))
+        }
+        pending = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.035, execute: work)
+    }
+
+    func suggestions(for word: WordInput) -> WordSuggestions {
+        if input == word, let cached { return cached }
+        let result = vocabulary.suggestions(for: word)
+        if input == word { cached = result }
+        return result
+    }
+
+    private func setTitles(_ result: WordSuggestions) {
+        shownInput = input
         for (index, button) in choices.enumerated() {
-            let title = titles.indices.contains(index) ? titles[index] : nil
+            let value = result.titles.indices.contains(index) ? result.titles[index] : nil
+            let title = index == 0 && canCorrect && result.automatic != nil ? value.map { "“\($0)”" } : value
             button.setTitle(title, for: .normal)
-            button.isEnabled = title != nil
-            button.isAccessibilityElement = title != nil
+            button.accessibilityLabel = value
+            let proposed = canCorrect && value != nil && value == result.automatic
+            button.titleLabel?.font = .systemFont(ofSize: 16, weight: proposed ? .semibold : .regular)
+            button.isEnabled = value != nil
+            button.isAccessibilityElement = value != nil
         }
     }
 
     @objc private func chosen(_ button: UIButton) {
-        guard let title = button.currentTitle else { return }
-        accept?(prefix, String(title.dropFirst(prefix.count)))
+        guard let shownInput, let candidate = button.accessibilityLabel else { return }
+        accept?(shownInput, candidate)
     }
 }

@@ -3,6 +3,7 @@ import UIKit
 /// The letter rows stay in place while dictation runs. Only a page or language
 /// change rebuilds them, so changing case never interrupts a touch.
 final class TypingKeys: UIStackView {
+    let preview = KeyPreview()
     private enum Page { case letters, numbers, symbols }
     private var page = Page.letters
     private var letterKeys: [Key] = []
@@ -25,7 +26,7 @@ final class TypingKeys: UIStackView {
         super.init(frame: frame)
         axis = .vertical
         distribution = .fillEqually
-        spacing = 11
+        spacing = 0
         enter.addTarget(self, action: #selector(typed(_:)), for: .touchUpInside)
         rebuild()
     }
@@ -81,7 +82,7 @@ final class TypingKeys: UIStackView {
                 (before.last?.isWhitespace == true && trimmed.last.map { ".!?".contains($0) } == true)
         default: capitals = false
         }
-        setUppercase(capitals)
+        if capitals != uppercase { setUppercase(capitals) }
     }
 
     private func setUppercase(_ value: Bool) {
@@ -95,6 +96,7 @@ final class TypingKeys: UIStackView {
 
     private func rebuild() {
         endDelete?()
+        preview.removeFromSuperview()
         arrangedSubviews.forEach { $0.removeFromSuperview() }
         letterKeys = []
         shiftKey = nil
@@ -108,7 +110,7 @@ final class TypingKeys: UIStackView {
             let controls = characters.map { typingKey(String($0)) }
             let row = addRow()
             let cluster = UIStackView(arrangedSubviews: controls)
-            cluster.spacing = 6
+            cluster.spacing = 0
             cluster.distribution = .fillEqually
             let columns = page == .letters && swedish ? 11 : 10
             if page == .letters { letterKeys += controls }
@@ -130,7 +132,7 @@ final class TypingKeys: UIStackView {
                 row.addArrangedSubview(cluster)
                 row.addArrangedSubview(UIView())
                 row.addArrangedSubview(delete)
-                modifier.widthAnchor.constraint(equalTo: row.widthAnchor, multiplier: page == .letters && swedish ? 0.105 : 0.118).isActive = true
+                modifier.widthAnchor.constraint(equalTo: row.widthAnchor, multiplier: page == .letters && swedish ? 0.105 : 0.118, constant: 5).isActive = true
                 delete.widthAnchor.constraint(equalTo: modifier.widthAnchor).isActive = true
             } else {
                 row.addArrangedSubview(cluster)
@@ -142,7 +144,7 @@ final class TypingKeys: UIStackView {
                 row.addArrangedSubview(UIView())
             }
             let fraction: CGFloat = page != .letters && index == 2 ? 0.70 : CGFloat(controls.count) / CGFloat(columns)
-            cluster.widthAnchor.constraint(equalTo: row.widthAnchor, multiplier: fraction, constant: (fraction - 1) * 6).isActive = true
+            cluster.widthAnchor.constraint(equalTo: row.widthAnchor, multiplier: fraction, constant: 0).isActive = true
         }
         let mode = Key(title: page == .letters ? "123" : "ABC")
         mode.addTarget(self, action: #selector(changePage), for: .touchUpInside)
@@ -156,21 +158,23 @@ final class TypingKeys: UIStackView {
         language.translatesAutoresizingMaskIntoConstraints = false
         space.addSubview(language)
         NSLayoutConstraint.activate([
-            language.trailingAnchor.constraint(equalTo: space.trailingAnchor, constant: -5),
-            language.bottomAnchor.constraint(equalTo: space.bottomAnchor, constant: -3)
+            language.trailingAnchor.constraint(equalTo: space.trailingAnchor, constant: -8),
+            language.bottomAnchor.constraint(equalTo: space.bottomAnchor, constant: -8)
         ])
         let trackpad = UILongPressGestureRecognizer(target: self, action: #selector(trackCursor(_:)))
+        trackpad.delaysTouchesEnded = false
         trackpad.minimumPressDuration = 0.35
         space.addGestureRecognizer(trackpad)
         let bottom = addRow()
-        bottom.spacing = 6
-        [mode, globe, space, enter].forEach(bottom.addArrangedSubview)
+        bottom.spacing = 0
+        let bottomKeys = [mode, globe, space, enter]
+        bottomKeys.forEach(bottom.addArrangedSubview)
         for key in [mode, globe] {
-            let width = key.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.111)
+            let width = key.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.111, constant: 5)
             width.priority = .defaultHigh
             width.isActive = true
         }
-        enter.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.239).isActive = true
+        enter.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.239, constant: 4.5).isActive = true
         setUppercase(uppercase)
     }
 
@@ -205,6 +209,10 @@ final class TypingKeys: UIStackView {
         lastShift = .distantPast
         let value = page == .letters && uppercase ? key.output.uppercased() : key.output
         insert?(value)
+        if page != .letters && (value == " " || value == "’") {
+            page = .letters
+            rebuild()
+        }
     }
 
     @objc private func shift() {
