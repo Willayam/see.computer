@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: Willayam/barcut
-          ref: 6d5fb9b74a8438b9f5916c54ce0e11788b79ba51
+          ref: dcc423085a9cf453a60c0fde9faeb3f82bedad3e
           persist-credentials: false
       - name: Check that the Mac installer is available
         run: curl -fsSLI https://github.com/Willayam/barcut/releases/latest/download/BarCut.dmg > /dev/null
