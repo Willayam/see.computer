@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var termCount = DictionaryFolder.termCount()
     @State private var connected = DictionaryFolder.isConnected
     @State private var copied: Date?
+    @AppStorage(TypingLanguages.key, store: TypingLanguages.store) private var typingLanguages = TypingLanguages.device
     @FocusState private var tryItFocused: Bool
 
     var body: some View {
@@ -104,6 +105,10 @@ struct ContentView: View {
 
     private var setup: some View {
         Section("Keyboard") {
+            Picker("Typing languages", selection: $typingLanguages) {
+                ForEach(TypingLanguages.allCases) { Text($0.label).tag($0) }
+            }
+            .onChange(of: typingLanguages) { _, _ in Signals.post(.typingLanguagesChanged) }
             Button("Add the keyboard and allow Full Access") {
                 UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
             }

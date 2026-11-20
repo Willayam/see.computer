@@ -18,11 +18,11 @@ final class KeyboardViewController: UIInputViewController {
     private let bar = StartBar()
     private let page = LivePage()
     private let cancel = CloseButton()
-    private let keys = UIStackView()
-    private let globe = Key(symbol: "globe", label: "Next keyboard")
+    private let keys = TypingKeys()
     /// Covers the faint keys during a take, so a tap there finishes it too.
     private let finishArea = UIControl()
     private var deleteRepeat: Timer?
+    private var pendingInsert = false
     private var activatedAt = Date.distantPast
     /// False once the field has failed to hold the words, for the rest of the take.
     private var wordsInField = true
@@ -36,6 +36,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        hasDictationKey = true
         layout()
     }
 
@@ -83,6 +84,10 @@ final class KeyboardViewController: UIInputViewController {
     private func activate() {
         guard !isActive else { return }
         isActive = true
+        keys.reset()
+        configureTypingKeys()
+        keys.updateCase(for: textDocumentProxy)
+        Signals.observe(.typingLanguagesChanged) { [weak self] in self?.configureTypingKeys() }
         activatedAt = Date()
         // Registered here, because the signals go to whichever controller registered last.
         Signals.observe(.changed) { [weak self] in self?.reload() }
@@ -109,11 +114,20 @@ final class KeyboardViewController: UIInputViewController {
         startAfterReturningFromTheApp()
     }
 
+    private func configureTypingKeys() {
+        keys.configure(swedish: TypingLanguages.current.usesSwedishKeys, needsGlobe: needsInputModeSwitchKey)
+    }
+
+    override func selectionDidChange(_ textInput: UITextInput?) {
+        keys.updateCase(for: textDocumentProxy)
+    }
+
     override func textWillChange(_ textInput: UITextInput?) {}
 
     override func textDidChange(_ textInput: UITextInput?) {
         switchAwayFromFieldsThatNeedTheirOwnKeys()
         _ = endTakeIfFieldWasSent()
+        keys.updateCase(for: textDocumentProxy)
     }
 
     /// A chat app empties its field when it sends, live words included. Only the
@@ -158,6 +172,7 @@ final class KeyboardViewController: UIInputViewController {
                 "phase_seen",
                 ["from": previous.rawValue, "to": state.phase.rawValue, "problem": state.problem ?? "none"])
         }
+        pendingInsert = state.take.map { $0.sent != true && $0.id > (Bridge.read(Int64.self, "inserted.json") ?? 0) } ?? false
         settleField()
         showWords()
         render()
@@ -171,6 +186,7 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
         insertFinishedTake()
+        pendingInsert = false
         // A take that ended with no transcript has no words to replace these with.
         if state.phase != .recording, state.phase != .transcribing,
             let draft = Bridge.read(Draft.self, "draft.json")
@@ -178,6 +194,8 @@ final class KeyboardViewController: UIInputViewController {
             if draft.dropped == true { _ = takeDraftBack() } else { keepDraft(draft) }
         }
         showWords()
+        keys.updateCase(for: textDocumentProxy)
+        render()
     }
 
     private var fieldHasSettled: Bool { Date().timeIntervalSince(activatedAt) >= Self.fieldSettles }
@@ -435,19 +453,28 @@ final class KeyboardViewController: UIInputViewController {
 
     // MARK: Typing
 
-    @objc private func typed(_ key: Key) {
+    private func typed(_ output: String) {
+        guard isActive, keys.isUserInteractionEnabled else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        let straight = key.output == "\u{2019}" && textDocumentProxy.smartQuotesType == .no
-        textDocumentProxy.insertText(straight ? "'" : key.output)
+        let straight = output == "’" && textDocumentProxy.smartQuotesType == .no
+        textDocumentProxy.insertText(straight ? "'" : output)
+        keys.updateCase(for: textDocumentProxy)
     }
 
-    @objc private func deleteDown() {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    private func deleteCharacter() {
+        guard isActive, keys.isUserInteractionEnabled else { return }
         textDocumentProxy.deleteBackward()
+        keys.updateCase(for: textDocumentProxy)
+    }
+
+    private func deleteDown() {
+        guard isActive, keys.isUserInteractionEnabled else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        deleteCharacter()
         deleteRepeat?.invalidate()
         deleteRepeat = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self] _ in
-            self?.deleteRepeat = Timer.scheduledTimer(withTimeInterval: 0.09, repeats: true) { _ in
-                self?.textDocumentProxy.deleteBackward()
+            self?.deleteRepeat = Timer.scheduledTimer(withTimeInterval: 0.09, repeats: true) { [weak self] _ in
+                self?.deleteCharacter()
             }
         }
     }
@@ -460,7 +487,7 @@ final class KeyboardViewController: UIInputViewController {
     // MARK: Drawing
 
     private func render() {
-        let phase: SessionState.Phase = looksAlive ? state.phase : .off
+        let phase: SessionState.Phase = looksAlive || !fieldHasSettled ? state.phase : .off
         let talking = phase == .recording || phase == .transcribing
         let message = hasFullAccess ? note ?? state.problem : "Allow Full Access"
         bar.show(phase, message: message, since: state.since)
@@ -470,7 +497,10 @@ final class KeyboardViewController: UIInputViewController {
         page.isHidden = !wordsHere
         keys.isHidden = wordsHere
         keys.alpha = talking ? 0.35 : 1
-        globe.isHidden = !needsInputModeSwitchKey
+        let waitingForField = pendingInsert
+        keys.isUserInteractionEnabled = !talking && !waitingForField
+        keys.accessibilityElementsHidden = !keys.isUserInteractionEnabled
+        if !keys.isUserInteractionEnabled { deleteUp() }
         page.show(phase)
     }
 
@@ -485,26 +515,10 @@ final class KeyboardViewController: UIInputViewController {
             control.addTarget(self, action: #selector(micUp), for: [.touchUpInside, .touchUpOutside, .touchCancel])
         }
         cancel.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
-        globe.addTarget(self, action: #selector(handleInputModeList(from:with:)), for: .allTouchEvents)
-
-        let marks = [".", ",", "?", "!", "\u{2019}"].map { Key(title: $0) }
-        let delete = Key(symbol: "delete.left", label: "Delete")
-        let space = Key(label: "Space", output: " ")
-        let enter = Key(symbol: "return.left", label: "Return", output: "\n")
-        for key in marks + [space, enter] { key.addTarget(self, action: #selector(typed(_:)), for: .touchUpInside) }
-        delete.addTarget(self, action: #selector(deleteDown), for: .touchDown)
-        delete.addTarget(self, action: #selector(deleteUp), for: [.touchUpInside, .touchUpOutside, .touchCancel])
-
-        let upper = UIStackView(arrangedSubviews: marks + [delete])
-        upper.distribution = .fillEqually
-        let lower = UIStackView(arrangedSubviews: [globe, space, enter])
-        for row in [upper, lower] {
-            row.spacing = 6
-            row.heightAnchor.constraint(equalToConstant: 46).isActive = true
-            keys.addArrangedSubview(row)
-        }
-        keys.axis = .vertical
-        keys.spacing = 8
+        keys.connectGlobe(to: self)
+        keys.insert = { [weak self] in self?.typed($0) }
+        keys.startDelete = { [weak self] in self?.deleteDown() }
+        keys.endDelete = { [weak self] in self?.deleteUp() }
 
         // The finish area lies over the faint keys, so a tap there ends the take too.
         for child in [bar, keys, finishArea, page, cancel] as [UIView] {
@@ -520,8 +534,7 @@ final class KeyboardViewController: UIInputViewController {
             keys.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
             keys.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
             keys.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
-            globe.widthAnchor.constraint(equalToConstant: 46),
-            enter.widthAnchor.constraint(equalToConstant: 116),
+            bar.heightAnchor.constraint(equalToConstant: 46),
 
             finishArea.topAnchor.constraint(equalTo: keys.topAnchor),
             finishArea.leadingAnchor.constraint(equalTo: keys.leadingAnchor),
@@ -590,7 +603,6 @@ final class StartBar: UIControl {
     private let middle = UIStackView()
     private let glyph = UIImageView()
     private let label = UILabel()
-    private let spinner = UIActivityIndicatorView(style: .medium)
     private let corner = UIStackView()
     private let clock = UILabel()
     private let meter = Meter()
@@ -605,8 +617,6 @@ final class StartBar: UIControl {
         label.textAlignment = .center
         clock.textColor = Ink.mark
         clock.font = .monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
-        spinner.color = Ink.mark
-        spinner.hidesWhenStopped = true
         middle.axis = .horizontal
         middle.alignment = .center
         middle.spacing = 8
@@ -615,7 +625,7 @@ final class StartBar: UIControl {
         corner.alignment = .center
         corner.spacing = 8
         [clock, meter].forEach(corner.addArrangedSubview)
-        for child in [middle, spinner, corner] as [UIView] {
+        for child in [middle, corner] {
             child.translatesAutoresizingMaskIntoConstraints = false
             child.isUserInteractionEnabled = false
             addSubview(child)
@@ -624,9 +634,7 @@ final class StartBar: UIControl {
             middle.centerXAnchor.constraint(equalTo: centerXAnchor),
             middle.centerYAnchor.constraint(equalTo: centerYAnchor),
             middle.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
-            spinner.centerXAnchor.constraint(equalTo: centerXAnchor),
-            spinner.centerYAnchor.constraint(equalTo: centerYAnchor),
-            corner.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            corner.centerYAnchor.constraint(equalTo: centerYAnchor),
             corner.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             corner.heightAnchor.constraint(equalToConstant: 28),
         ])
@@ -638,9 +646,7 @@ final class StartBar: UIControl {
 
     /// `message` is for what a tap alone will not fix. Everything else goes unsaid.
     func show(_ phase: SessionState.Phase, message: String?, since: Date?) {
-        middle.isHidden = phase == .transcribing
         corner.isHidden = phase != .recording
-        if phase == .transcribing { spinner.startAnimating() } else { spinner.stopAnimating() }
         var font = UIFont.systemFont(ofSize: 20, weight: .semibold)
         switch phase {
         case .off, .armed:
@@ -653,7 +659,9 @@ final class StartBar: UIControl {
             label.text = "Done"
             accessibilityLabel = "Finish"
         case .transcribing:
-            accessibilityLabel = "Writing"
+            glyph.image = UIImage(systemName: "ellipsis")
+            label.text = "Finishing…"
+            accessibilityLabel = "Finishing dictation"
         }
         label.font = font
         glyph.preferredSymbolConfiguration = .init(pointSize: 20, weight: .semibold)
@@ -675,26 +683,30 @@ final class StartBar: UIControl {
     }
 }
 
-/// A punctuation, space, return, delete or globe key.
+/// A text or action key.
 final class Key: UIControl {
     let output: String
+    private var titleLabel: UILabel?
+    private var symbolView: UIImageView?
     private var face: UIView!
 
     init(title: String? = nil, symbol: String? = nil, label: String? = nil, output: String? = nil) {
         self.output = output ?? title ?? ""
         super.init(frame: .zero)
-        face = keyFace(radius: 10, in: self)
+        face = keyFace(radius: 6, in: self)
         let content: UIView
         if let symbol {
             let image = UIImageView(image: UIImage(systemName: symbol))
             image.tintColor = Ink.mark
             image.preferredSymbolConfiguration = .init(pointSize: 19, weight: .regular)
+            symbolView = image
             content = image
         } else {
             let text = UILabel()
             text.text = title
             text.textColor = Ink.mark
-            text.font = .systemFont(ofSize: 24)
+            text.font = .systemFont(ofSize: (title?.count ?? 0) > 1 ? 16 : 22)
+            titleLabel = text
             content = text
         }
         content.translatesAutoresizingMaskIntoConstraints = false
@@ -705,6 +717,15 @@ final class Key: UIControl {
         isAccessibilityElement = true
         accessibilityTraits = .keyboardKey
         accessibilityLabel = label ?? title
+    }
+
+    func setTitle(_ title: String) {
+        titleLabel?.text = title
+        accessibilityLabel = title
+    }
+
+    func setSymbol(_ symbol: String) {
+        symbolView?.image = UIImage(systemName: symbol)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }

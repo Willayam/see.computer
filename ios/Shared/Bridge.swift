@@ -50,7 +50,7 @@ enum Signal: String {
     /// `away`: the keyboard hid mid-take with the words still in the field.
     /// `sent`: the field emptied with the words in it, so the user sent them.
     case start, stop, cancel, ping, away, sent
-    case changed, pong, words
+    case changed, pong, words, typingLanguagesChanged
 
     fileprivate var name: CFString { "computer.see.ios.\(rawValue)" as CFString }
 }

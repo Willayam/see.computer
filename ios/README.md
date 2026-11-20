@@ -26,7 +26,9 @@ To use your Mac dictionary, tap **Use the dictionary from your Mac** in the app 
 
 ## Using it
 
-Tap **Start**, talk, then tap **Done**. Or hold Start, talk, and let go. While you talk, the keys go faint and a tap on them also finishes. The X cancels. Below Start are punctuation, delete, space and return. For letters, switch to another keyboard.
+Tap **Start**, talk, then tap **Done**. Or hold Start, talk, and let go. While you talk, the keys go faint and a tap on them also finishes. The X cancels. When the transcript lands, select a word in the host app and type its replacement on the same keyboard. Tap Start again to continue speaking.
+
+**Typing languages** in the see.computer app follows the iPhone’s preferred languages by default. Choose **English & Svenska** once to keep Å, Ä and Ö on the letter rows in every app. Shift changes case, a double tap locks capitals, and **123** opens numbers and symbols. Typed words are inserted as entered.
 
 The words appear in the text field as you talk, underlined until the take is done, and the final text replaces them. If a field stops holding them, because the cursor moved, the rest show on the keyboard.
 
