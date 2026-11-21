@@ -7,10 +7,18 @@ device="${1:?Pass a booted simulator UDID}"
 shift
 out=""
 pass=""
+replay=""
+layout=""
+spaces=""
+language=english
 metric=noisy_wer
 while [ $# -gt 0 ]; do
     case "$1" in
         --mode) pass="$pass --mode $2"; if [ "$2" = swipe ]; then metric=noisy_swipe_wer; fi; shift 2 ;;
+        --replay) replay="$2"; shift 2 ;;
+        --layout) layout="$2"; shift 2 ;;
+        --observed-spaces) spaces=--observed-spaces; shift ;;
+        --languages) language="$2"; pass="$pass --languages $2"; shift 2 ;;
         --out) out="$2"; shift 2 ;;
         *) pass="$pass $1"; shift ;;
     esac
@@ -26,6 +34,14 @@ xcrun --sdk iphonesimulator swiftc -O -target "$(uname -m)-apple-ios17.0-simulat
     "$root"/Keyboard/TypingVocabulary.swift "$root/Keyboard/Typist.swift" \
     "$root/Keyboard/TypingKeys.swift" "$root/Keyboard/KeyboardControls.swift" \
     "$root/tests/TypingSim.swift" -o "$scratch/sim"
+if [ -n "$layout" ]; then
+    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --languages "$language" --layout "$layout"
+    exit
+fi
+if [ -n "$replay" ]; then
+    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --languages "$language" --replay "$replay" --out "${out:?Pass --out with --replay}" $spaces
+    exit
+fi
 for level in clean steady hurried; do
     # shellcheck disable=SC2086
     xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --level "$level" \

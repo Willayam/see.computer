@@ -368,9 +368,56 @@ private func type(_ sentence: String, on pipeline: Pipeline, level: Level, seed:
     return true
 }
 
+private struct ReplaySentence: Decodable {
+    let person, id: String
+    let words: [String]
+    let taps: [[[Double]]]
+    let spaces: [[Double]?]
+}
+
+@MainActor
+private func replay(_ path: String, out: String, languages: TypingLanguages, size: CGSize, observedSpaces: Bool) async throws {
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let sentences = try JSONDecoder().decode([ReplaySentence].self, from: data)
+    var rows = [[String: Any]]()
+    var person: String?
+    var pipeline: Pipeline!
+    for sentence in sentences {
+        if person != sentence.person {
+            pipeline = await Pipeline(languages: languages, size: size)
+            person = sentence.person
+        }
+        pipeline.newField()
+        let bar = pipeline.keys.frame(of: "Space")!
+        var choices = [[String]]()
+        var beforeSpace = [String]()
+        var insertedSpace = [Bool]()
+        var commits = [String]()
+        precondition(sentence.words.count == sentence.taps.count && sentence.words.count == sentence.spaces.count)
+        for (index, taps) in sentence.taps.enumerated() {
+            let before = pipeline.field.text
+            for point in taps { pipeline.tap(at: CGPoint(x: point[0], y: point[1])) }
+            let typed = pipeline.field.text
+            beforeSpace.append(typed.hasPrefix(before) ? String(typed.dropFirst(before.count)) : (tokens(typed).last ?? ""))
+            choices.append(Array(pipeline.suggestions().prefix(3)))
+            if observedSpaces, let space = sentence.spaces[index] {
+                pipeline.tap(at: CGPoint(x: space[0], y: space[1]))
+            } else {
+                pipeline.tap(at: CGPoint(x: bar.midX, y: bar.midY))
+            }
+            let after = pipeline.field.text
+            insertedSpace.append(after.last?.isWhitespace == true && after != typed)
+            commits.append(after.hasPrefix(before) ? String(after.dropFirst(before.count)) : (tokens(after).last ?? ""))
+        }
+        rows.append(["id": sentence.id, "bars": choices, "commits": commits, "text": pipeline.field.text,
+                     "beforeSpace": beforeSpace, "insertedSpace": insertedSpace])
+    }
+    try JSONSerialization.data(withJSONObject: rows).write(to: URL(fileURLWithPath: out))
+}
+
 @main
 enum TypingSim {
-    @MainActor static func main() async {
+    @MainActor static func main() async throws {
         let arguments = CommandLine.arguments
         func option(_ name: String) -> String? {
             arguments.firstIndex(of: name).flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
@@ -388,6 +435,21 @@ enum TypingSim {
         let languages: TypingLanguages = mode == "english" ? .english : .bilingual
         let files = mode == "english" ? ["en"] : ["en", "sv"]
         let size = CGSize(width: 394, height: 210)
+        if let path = option("--replay"), let out = option("--out") {
+            try await replay(path, out: out, languages: languages, size: size, observedSpaces: arguments.contains("--observed-spaces"))
+            return
+        }
+        if let path = option("--layout") {
+            let pipeline = await Pipeline(languages: languages, size: size)
+            var frames = [String: [Double]]()
+            for key in Lexicon.alphabet.map(String.init) + ["Space"] {
+                if let rect = pipeline.keys.frame(of: key) {
+                    frames[key] = [rect.midX, rect.midY, rect.width, rect.height]
+                }
+            }
+            try JSONEncoder().encode(frames).write(to: URL(fileURLWithPath: path))
+            return
+        }
         let levels = [
             Level(name: "clean", spread: 0, slip: 0),
             Level(name: "steady", spread: 0.2, slip: 0.005),
