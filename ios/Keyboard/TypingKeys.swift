@@ -51,17 +51,22 @@ final class TypingKeys: UIStackView {
 
     struct StrokeTravel {
         private var neighbor: Key?
-        private var distance: CGFloat = 0
+        private var crossedSeveralKeys = false
+        private var reachedPitch = false
 
-        mutating func isWordGesture(at point: CGPoint, previous: CGPoint, from key: Key, on keyboard: TypingKeys) -> Bool {
-            distance += hypot(point.x - previous.x, point.y - previous.y)
+        mutating func isWordGesture(at point: CGPoint, start: CGPoint, from key: Key, on keyboard: TypingKeys) -> Bool {
             let cell = key.convert(key.bounds, to: keyboard)
+            if hypot(point.x - start.x, point.y - start.y) >= cell.width { reachedPitch = true }
             if !cell.contains(point), let next = keyboard.releaseKey(at: point),
                next !== key, keyboard.letterKeys.contains(next) {
-                if let neighbor, neighbor !== next { return true }
+                // Sparse samples can jump over an intervening cell.
+                let nextCell = next.convert(next.bounds, to: keyboard)
+                if (neighbor != nil && neighbor !== next) || !cell.insetBy(dx: -1, dy: -1).intersects(nextCell) {
+                    crossedSeveralKeys = true
+                }
                 neighbor = next
             }
-            return neighbor != nil && distance > cell.width * 1.6
+            return reachedPitch && crossedSeveralKeys
         }
     }
 
@@ -70,10 +75,23 @@ final class TypingKeys: UIStackView {
         _ = onSwipe?(samples, uppercase, capsLock, nil)
     }
 
+    private static let commonPairs: Set<String> = [
+        "am", "an", "as", "at", "be", "by", "do", "go", "he", "if", "in", "is", "it", "me", "my",
+        "no", "of", "on", "or", "so", "to", "up", "us", "we", "av", "de", "du", "då", "en", "er",
+        "ej", "få", "ge", "ha", "ja", "ju", "ni", "nu", "ny", "om", "på", "se", "så", "ta", "vi", "är", "åt"
+    ]
+
     func finishShortSwipe(_ samples: [SwipeSample], from origin: Key) -> Bool {
-        guard canSwipe(from: origin), let point = samples.last?.point,
+        guard canSwipe(from: origin), let start = samples.first?.point, let point = samples.last?.point,
               let end = releaseKey(at: point), end !== origin, letterKeys.contains(end) else { return false }
-        guard onSwipe?(samples, uppercase, capsLock, origin.output + end.output) == true else { return false }
+        let cell = origin.convert(origin.bounds, to: self)
+        let target = end.convert(end.bounds, to: self)
+        let dx = target.midX - cell.midX, dy = target.midY - cell.midY
+        guard !cell.contains(point), target.contains(point),
+              hypot(point.x - start.x, point.y - start.y) >= cell.width,
+              (point.x - target.midX) * dx + (point.y - target.midY) * dy > 0 else { return false }
+        let pair = origin.output + end.output
+        guard Self.commonPairs.contains(pair), onSwipe?(samples, uppercase, capsLock, pair) == true else { return false }
         lastShift = .distantPast
         return true
     }
@@ -83,8 +101,8 @@ final class TypingKeys: UIStackView {
         guard let first = samples.first, let last = samples.last else { return }
         guard let origin = hitTest(first.point, with: nil) as? Key else { return }
         var travel = StrokeTravel()
-        if canSwipe(from: origin), zip(samples, samples.dropFirst()).contains(where: {
-            travel.isWordGesture(at: $1.point, previous: $0.point, from: origin, on: self)
+        if canSwipe(from: origin), samples.dropFirst().contains(where: {
+            travel.isWordGesture(at: $0.point, start: first.point, from: origin, on: self)
         }) {
             finishSwipe(samples)
         } else if finishShortSwipe(samples, from: origin) {

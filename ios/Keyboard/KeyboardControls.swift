@@ -110,7 +110,7 @@ final class Key: UIControl {
         }
         stroke.append(sample)
         if !swiping {
-            guard travel.isWordGesture(at: sample.point, previous: stroke[stroke.count - 2].point, from: self, on: keyboard) else { return }
+            guard travel.isWordGesture(at: sample.point, start: stroke[0].point, from: self, on: keyboard) else { return }
             guard keyboard.beginSwipe(from: self) else { return }
             swiping = true
             trackedKey?.isHighlighted = false

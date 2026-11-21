@@ -97,7 +97,16 @@ final class Typist {
     }
 
     func startsSwipeWord(in proxy: UITextDocumentProxy) -> Bool {
-        swipeChoices(in: proxy) != nil || proxy.documentContextBeforeInput?.last?.isLetter != true
+        guard let before = proxy.documentContextBeforeInput else { return !proxy.hasText }
+        return Self.atWordStart(before)
+    }
+
+    private static func atWordStart(_ before: String) -> Bool {
+        guard let last = before.last else { return true }
+        if last.isWhitespace { return true }
+        if last == "\"" { return before.dropLast().filter { $0 == "\"" }.count.isMultiple(of: 2) }
+        if last == "'" { return before.dropLast().last.map { $0.isWhitespace || WordInput.opensWord($0) } ?? true }
+        return WordInput.opensWord(last)
     }
 
     func swipeChoices(in proxy: UITextDocumentProxy) -> [String]? {
@@ -111,8 +120,7 @@ final class Typist {
 
     func insertSwipe(_ prediction: SwipePrediction, uppercase: Bool, locked: Bool, in proxy: UITextDocumentProxy) {
         let before = proxy.documentContextBeforeInput ?? ""
-        let closingQuote = before.last == "'" && before.dropLast().last.map { $0.isLetter || $0.isNumber } == true
-        let prefix = before.last.map { $0.isWhitespace || (WordInput.opensWord($0) && !closingQuote) ? "" : " " } ?? ""
+        let prefix = Self.atWordStart(before) ? "" : " "
         let capitalize = uppercase || (!prefix.isEmpty && Self.capitalizes(after: before + prefix, mode: proxy.autocapitalizationType))
         let ranked = prediction.words.map { choice -> SwipeChoice in
             let word = choice.word
@@ -134,7 +142,10 @@ final class Typist {
                 swipeUndo = (inserted + prefix + word, original)
             }
         }
-        let trailingSpace = proxy.documentContextAfterInput?.first?.isLetter == true
+        let trailingSpace = proxy.documentContextAfterInput?.first.map { next in
+            if next == "\"" { return before.filter { $0 == "\"" }.count.isMultiple(of: 2) }
+            return !next.isWhitespace && !".,!?;:…)]}’”»'".contains(next)
+        } ?? false
         proxy.insertText(prefix + word + (trailingSpace ? " " : ""))
         if trailingSpace { proxy.adjustTextPosition(byCharacterOffset: -1) }
         if let caret = Caret(proxy), caret.before.hasSuffix(prefix + word) {
