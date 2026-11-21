@@ -97,6 +97,7 @@ final class Typist {
     }
 
     func startsSwipeWord(in proxy: UITextDocumentProxy) -> Bool {
+        if swipeChoices(in: proxy) != nil { return true }
         guard let before = proxy.documentContextBeforeInput else { return !proxy.hasText }
         return Self.atWordStart(before)
     }

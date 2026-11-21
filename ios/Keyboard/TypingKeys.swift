@@ -78,7 +78,7 @@ final class TypingKeys: UIStackView {
     private static let commonPairs: Set<String> = [
         "am", "an", "as", "at", "be", "by", "do", "go", "he", "if", "in", "is", "it", "me", "my",
         "no", "of", "on", "or", "so", "to", "up", "us", "we", "av", "de", "du", "då", "en", "er",
-        "ej", "få", "ge", "ha", "ja", "ju", "ni", "nu", "ny", "om", "på", "se", "så", "ta", "vi", "är", "åt"
+        "ej", "få", "ge", "ha", "ja", "ju", "ni", "nu", "ny", "ok", "om", "på", "sa", "se", "så", "ta", "vi", "är", "åt", "öl"
     ]
 
     func finishShortSwipe(_ samples: [SwipeSample], from origin: Key) -> Bool {
@@ -86,10 +86,8 @@ final class TypingKeys: UIStackView {
               let end = releaseKey(at: point), end !== origin, letterKeys.contains(end) else { return false }
         let cell = origin.convert(origin.bounds, to: self)
         let target = end.convert(end.bounds, to: self)
-        let dx = target.midX - cell.midX, dy = target.midY - cell.midY
         guard !cell.contains(point), target.contains(point),
-              hypot(point.x - start.x, point.y - start.y) >= cell.width,
-              (point.x - target.midX) * dx + (point.y - target.midY) * dy > 0 else { return false }
+              hypot(point.x - start.x, point.y - start.y) >= cell.width * 0.35 else { return false }
         let pair = origin.output + end.output
         guard Self.commonPairs.contains(pair), onSwipe?(samples, uppercase, capsLock, pair) == true else { return false }
         lastShift = .distantPast
