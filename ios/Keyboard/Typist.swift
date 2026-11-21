@@ -34,6 +34,15 @@ final class Typist {
     private var lastLetter: Caret?
     private var suggestionSpace: Caret?
     private var lastCorrection: (caret: Caret, inserted: String, original: String)?
+    struct HeldWord {
+        let input: WordInput
+        let taps: TapTrail
+        let space: CGPoint
+        let output: String
+        let end: Caret
+    }
+    private var held: HeldWord?
+    var reconsider: ((HeldWord, WordInput, TapTrail, String) -> String?)?
     var committed: ((TapTrail, String) -> Void)?
     private let suggestions: (WordInput, TapTrail) -> WordSuggestions
 
@@ -46,6 +55,7 @@ final class Typist {
     }
 
     func forget() {
+        held = nil
         trail = TapTrail()
         lastSpace = nil
         lastLetter = nil
@@ -66,6 +76,7 @@ final class Typist {
     func type(_ output: String, at point: CGPoint?, in proxy: UITextDocumentProxy) {
         let caret = Caret(proxy)
         let priorTrail = caret != nil && caret == trail.end ? trail : TapTrail()
+        let previousWord = held
         let previousSpace = lastSpace
         let followsLetter = caret != nil && caret == lastLetter
         let punctuation = output.count == 1 && ".,!?;:".contains(output)
@@ -79,20 +90,32 @@ final class Typist {
         if removeSpace { proxy.deleteBackward() }
         let input = followsLetter && (output == " " || punctuation) ? WordInput(proxy) : nil
         let correction = input.flatMap { suggestions($0, priorTrail).automatic }
-        if let input { committed?(priorTrail, correction ?? input.word) }
-        if followsLetter, output == " " || punctuation,
-           let input, !input.word.isEmpty, let correction {
-            let inserted = correction + output
-            replaceSuffix(input.word, with: inserted, in: proxy)
+        var joint: String?
+        if let input, let previousWord, let caret,
+           previousWord.end.field == caret.field, previousWord.end.after == caret.after,
+           previousWord.end.before + input.word == caret.before {
+            joint = reconsider?(previousWord, input, priorTrail, correction ?? input.word)
+        }
+        if let input, let replacement = joint ?? correction {
+            let prefix = joint == nil ? "" : (previousWord!.output + " ")
+            let inserted = replacement + output
+            replaceSuffix(prefix + input.word, with: inserted, in: proxy)
             if let end = Caret(proxy), end.before.hasSuffix(inserted) {
-                lastCorrection = (end, inserted, input.word)
+                let original = joint == nil ? input.word : previousWord!.input.word + " " + input.word
+                lastCorrection = (end, inserted, original)
             }
         } else {
             proxy.insertText(output == "’" && proxy.smartQuotesType == .no ? "'" : output)
         }
+        if joint == nil, let input { committed?(priorTrail, correction ?? input.word) }
+        if output == " ", joint == nil, let input, let point, let end = Caret(proxy),
+           end.before.hasSuffix((correction ?? input.word) + " ") {
+            held = HeldWord(input: input, taps: priorTrail, space: point, output: correction ?? input.word, end: end)
+        }
         if let letter = output.first, output.count == 1, WordInput.wordCharacter(letter),
            let start = caret, let end = Caret(proxy), start.field == end.field, start.after == end.after,
            end.before == start.before + output {
+            held = previousWord
             trail = priorTrail
             trail.taps.append(Tap(typed: Character(output.lowercased()), shifted: letter.isUppercase, point: point))
             if trail.taps.count > 36 { trail.taps.removeFirst() }

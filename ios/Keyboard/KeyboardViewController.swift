@@ -66,6 +66,7 @@ final class KeyboardViewController: UIInputViewController {
             else { return nil }
             return (prior, self.completions.vocabulary.spread)
         }
+        typist.reconsider = { [completions, keys] in completions.vocabulary.reconsider($0, input: $1, trail: $2, chosen: $3, layout: keys.keyLayout) }
         typist.committed = { [completions, keys] in completions.vocabulary.learn($0, chosen: $1, layout: keys.keyLayout) }
         layout()
         requestSupplementaryLexicon { [weak self] lexicon in

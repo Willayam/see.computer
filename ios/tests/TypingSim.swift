@@ -45,6 +45,7 @@ private final class Pipeline {
             else { return nil }
             return (prior, self.vocabulary.spread)
         }
+        typist.reconsider = { [vocabulary, keys] in vocabulary.reconsider($0, input: $1, trail: $2, chosen: $3, layout: keys.keyLayout) }
         typist.committed = { [vocabulary, keys] in vocabulary.learn($0, chosen: $1, layout: keys.keyLayout) }
         keys.startDelete = { [unowned self] in self.typist.delete(in: self.field); self.keys.updateCase(for: self.field) }
         keys.insert = { [unowned self] output, point in

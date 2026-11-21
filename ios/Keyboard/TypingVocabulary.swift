@@ -118,6 +118,62 @@ final class TypingVocabulary {
         }
     }
 
+    private func languageWeights(_ input: WordInput) -> [Double] {
+        var weight = Array(repeating: 0.0, count: languages.count)
+        if languages.count == 2, let first = tables[languages[0].code], let second = tables[languages[1].code] {
+            func frequency(_ w: String, _ lex: Lexicon) -> Double {
+                lex.node(w).flatMap(lex.terminal).map { exp(lex.unigram($0)) } ?? 0
+            }
+            let evidence = input.previous.reduce(0.0) { odds, previous in
+                odds * 0.7 + log((frequency(previous, first) + 2e-6) / (frequency(previous, second) + 2e-6))
+            }
+            let p = 1 / (1 + exp(-max(-6, min(6, evidence))))
+            weight = [log(p), log1p(-p)]
+        }
+        return weight
+    }
+
+    func reconsider(_ held: Typist.HeldWord, input: WordInput, trail: TapTrail, chosen: String, layout: KeyLayout) -> String? {
+        let first = held.input.word, second = input.word
+        guard !held.output.contains(" "), !chosen.contains(" "), second.first?.isLowercase == true,
+              held.input.sentenceStart || first.first?.isLowercase == true,
+              first.dropFirst() == first.dropFirst().lowercased(), second == second.lowercased(),
+              ![first, second].contains(where: { protectedWords.contains($0.lowercased()) || shortcuts[$0.lowercased()] != nil }),
+              held.taps.taps.count == first.count, trail.taps.count == second.count else { return nil }
+        let sigma = spread * layout.pitch
+        let taps = held.taps.taps + [Tap(typed: " ", shifted: false, point: held.space)] + trail.taps
+        let rows = taps.compactMap { tap -> [Double]? in
+            let letter = tap.typed == " " ? 0 : Lexicon.codes[tap.typed == "’" ? "'" : tap.typed]
+            return letter.map { layout.costs(letter: $0, point: tap.point, spread: spread) }
+        }
+        guard rows.count == taps.count else { return nil }
+        let spaces = taps.map { layout.spaceCost($0.point, sigma: sigma) }
+        let usual = (held.output + " " + chosen).lowercased().replacingOccurrences(of: "’", with: "'")
+        let weight = languageWeights(held.input)
+        var usualScore: Double?, best = -Double.infinity, bestText = ""
+        for (i, lang) in languages.enumerated() {
+            guard let lex = tables[lang.code] else { continue }
+            let prev = held.input.sentenceStart ? lex.sentenceStart : held.input.previous.last.flatMap(lex.node).flatMap(lex.terminal)
+            let readings = TapDecoder(lexicon: lex).candidates(costs: rows, omissions: layout.omissionCosts(spread: spread),
+                textOnly: false, previous: prev, spaces: spaces, lostSpace: layout.lostSpaceCost(sigma: sigma))
+            let ids = usual.split(separator: " ").map { lex.node(String($0)).flatMap(lex.terminal) }
+            for (r, cost) in readings {
+                let score = weight[i] + lex.logProbability(r.last, after: r.first ?? prev) - cost
+                if ids.count == 2, let lead = ids[0], r.first == lead, r.last == ids[1] { usualScore = max(usualScore ?? -.infinity, score) }
+                if score >= best {
+                    let text = (r.first.map { lex.displayForm(lex.text($0)) + " " } ?? "") + lex.displayForm(lex.text(r.last))
+                    if score > best || text < bestText { best = score; bestText = text }
+                }
+            }
+        }
+        guard best.isFinite, bestText.lowercased() != usual else { return nil }
+        if let usualScore {
+            guard best - usualScore >= 2 else { return nil }
+        } else if bestText.contains(" ") || held.space.y >= layout.space.minY + 8 { return nil }
+        if first.first?.isUppercase == true { bestText = bestText.prefix(1).uppercased() + bestText.dropFirst() }
+        return input.smartQuotes ? bestText.replacingOccurrences(of: "'", with: "’") : bestText
+    }
+
     func keyPrior(for input: WordInput, trail: TapTrail, layout: KeyLayout) -> [Double]? {
         guard !input.word.isEmpty, !trail.taps.isEmpty,
               input.word.lowercased() == String(trail.taps.map(\.typed)),
@@ -172,17 +228,7 @@ final class TypingVocabulary {
         let literalCost = zip(costs, codes).reduce(0.0) { $0 + $1.0[$1.1] }
         var literal = -Double.infinity, unknown = -Double.infinity
         var candidates: [(String, Double)] = [], completions: [(String, Double)] = []
-        var weight = Array(repeating: 0.0, count: languages.count)
-        if languages.count == 2, let first = tables[languages[0].code], let second = tables[languages[1].code] {
-            func frequency(_ w: String, _ lex: Lexicon) -> Double {
-                lex.node(w).flatMap(lex.terminal).map { exp(lex.unigram($0)) } ?? 0
-            }
-            let evidence = input.previous.reduce(0.0) { odds, previous in
-                odds * 0.7 + log((frequency(previous, first) + 2e-6) / (frequency(previous, second) + 2e-6))
-            }
-            let p = 1 / (1 + exp(-max(-6, min(6, evidence))))
-            weight = [log(p), log1p(-p)]
-        }
+        let weight = languageWeights(input)
         lastWeights = weight
         for (index, language) in languages.enumerated() {
             guard let lex = tables[language.code] else { continue }
