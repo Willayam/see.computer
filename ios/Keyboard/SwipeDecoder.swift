@@ -3,6 +3,7 @@ import Foundation
 /// Reduce a stroke to endpoints and turns, in units of one key pitch.
 struct SwipeDecoder {
     private let path: [CGPoint]
+    private let skipCosts: [Double?]
     private let timedPath: [CGPoint]
     private let centers: [CGPoint?]
 
@@ -10,7 +11,7 @@ struct SwipeDecoder {
         func scaled(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x / layout.pitch, y: p.y / layout.pitch) }
         centers = layout.centers.map { $0.map(scaled) }
         let points = samples.map { scaled($0.point) }
-        guard points.count >= 2 else { path = points; timedPath = []; return }
+        guard points.count >= 2 else { path = points; timedPath = []; skipCosts = []; return }
         var turns = [points[0]]
         func simplify(_ a: Int, _ b: Int, depth: Int) {
             let start = points[a], end = points[b]
@@ -49,6 +50,7 @@ struct SwipeDecoder {
         }
         simplify(0, points.count - 1, depth: 0)
         path = turns
+        skipCosts = Self.skipCosts(along: turns, centers: centers)
         // A speed valley can identify a letter even when the stroke continues in a straight line.
         let speeds = zip(samples, samples.dropFirst()).map { a, b in
             hypot(b.point.x - a.point.x, b.point.y - a.point.y) / max(0.001, b.time - a.time)
@@ -68,6 +70,26 @@ struct SwipeDecoder {
             simplify(a, b, depth: 0)
         }
         timedPath = turns
+    }
+
+    // A shallow bend between letters can be incidental. Keep the bend mandatory
+    // if it lands squarely on a key, or if skipping it would reverse direction.
+    private static func skipCosts(along path: [CGPoint], centers: [CGPoint?]) -> [Double?] {
+        path.indices.map { i in
+            guard i + 2 < path.count else { return nil }
+            let start = path[i], bend = path[i + 1], end = path[i + 2]
+            let centered = centers.contains { center in
+                guard let center else { return false }
+                return hypot(center.x - bend.x, center.y - bend.y) < 0.12
+            }
+            guard !centered else { return nil }
+            let dx = end.x - start.x, dy = end.y - start.y
+            let x = bend.x - start.x, y = bend.y - start.y
+            let t = (x * dx + y * dy) / max(0.001, dx * dx + dy * dy)
+            let miss = hypot(x - t * dx, y - t * dy)
+            guard t > 0 && t < 1 && miss < 1.1 else { return nil }
+            return 2 + 4 * miss * miss
+        }
     }
 
     private struct State {
@@ -143,6 +165,10 @@ struct SwipeDecoder {
                     let d = distance(b)
                     if d < 3.2 { advance(i + 1, 0, 4.8 * d) }
                     guard passingLetters else { continue }
+                    if let skip = skipCosts[i] {
+                        let d = distance(path[i + 2])
+                        if d < 3.2 { advance(i + 2, 0, 4.8 * d + skip) }
+                    }
                     // Letters passed along a straight leg need no turn, but must occur in order.
                     let dx = b.x - a.x, dy = b.y - a.y
                     let t = ((center.x - a.x) * dx + (center.y - a.y) * dy) / max(0.001, dx * dx + dy * dy)
