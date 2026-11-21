@@ -25,6 +25,23 @@ struct SwipeDecoder {
                     if error > largest { split = i; largest = error }
                 }
             }
+            // A smooth bow can be far from its chord without containing a corner.
+            if split != a && largest < 0.04 * length {
+                let norm = sqrt(length)
+                func chordCoordinates(_ p: CGPoint) -> (Double, Double) {
+                    let x = p.x - start.x, y = p.y - start.y
+                    return ((x * dx + y * dy) / length, (y * dx - x * dy) / norm)
+                }
+                let (at, offset) = chordCoordinates(points[split])
+                if at > 0.18 && at < 0.82 {
+                    let amplitude = offset / (at * (1 - at))
+                    let smooth = points[(a + 1)..<b].allSatisfy { point in
+                        let (t, lateral) = chordCoordinates(point)
+                        return t >= 0 && t <= 1 && abs(lateral - amplitude * t * (1 - t)) < 0.10
+                    }
+                    if smooth { split = a }
+                }
+            }
             if split != a {
                 simplify(a, split, depth: depth + 1)
                 simplify(split, b, depth: depth + 1)
