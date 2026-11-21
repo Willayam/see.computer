@@ -296,9 +296,19 @@ final class TypingVocabulary {
                 if text.count > word.count { completions.append((lex.displayForm(text), context + next.score)) }
             }
         }
+        let shiftedName = !input.sentenceStart && typed.first?.isUppercase == true &&
+            matches && offset == 0 && suffix.first?.shifted == true && suffix.allSatisfy { $0.point != nil }
         candidates.sort { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }
-        if let best = candidates.first, best.0.lowercased() != word, !protectedWords.contains(word),
-            typed.dropFirst() == typed.dropFirst().lowercased(), input.sentenceStart || typed.first?.isUppercase != true
+        let best = candidates.first { text, _ in
+            guard shiftedName else { return true }
+            guard text.first?.isUppercase == true, !text.contains(" "), text.count == codes.count else { return false }
+            let letters = text.lowercased().compactMap { Lexicon.codes[$0] }
+            return letters.count == costs.count && letters.enumerated().allSatisfy { index, letter in
+                costs[index][letter] - costs[index][codes[index]] <= 3
+            }
+        }
+        if let best, best.0.lowercased() != word, !protectedWords.contains(word),
+            typed.dropFirst() == typed.dropFirst().lowercased(), input.sentenceStart || typed.first?.isUppercase != true || shiftedName
         {
             var threshold = literal + 1
             if !literal.isFinite {
