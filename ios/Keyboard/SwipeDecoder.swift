@@ -201,7 +201,8 @@ struct SwipeDecoder {
             if spelling.last != letter { spelling.append(letter) }
             cost += 5 * distance
         }
-        if spelling.count >= 2, lex.node(spelling).flatMap(lex.terminal) == nil {
+        // Spell the keys only when no word fits the path, so a stray stroke never beats a real word.
+        if candidates.isEmpty, spelling.count >= 2, lex.node(spelling).flatMap(lex.terminal) == nil {
             candidates.append((spelling, lex.unknown(spelling) - 6 - cost))
         }
         return candidates
