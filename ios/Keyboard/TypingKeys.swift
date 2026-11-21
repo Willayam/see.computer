@@ -38,11 +38,15 @@ final class TypingKeys: UIStackView {
     /// Replay the same start-key and travel checks used by touch delivery.
     func swipe(_ samples: [SwipeSample]) {
         guard let first = samples.first, let last = samples.last else { return }
-        if let origin = hitTest(first.point, with: nil) as? Key, canSwipe(from: origin),
+        guard let origin = hitTest(first.point, with: nil) as? Key else { return }
+        if canSwipe(from: origin),
            samples.contains(where: { crossesSwipeThreshold($0.point, from: first.point, key: origin) }) {
             finishSwipe(samples)
-        } else {
-            tap(at: last.point)
+        } else if resolvesAtRelease(origin) {
+            let lastKey = samples.reversed().lazy.compactMap { self.releaseKey(at: $0.point) }.first
+            release(from: origin, to: lastKey ?? origin, at: last.point)
+        } else if origin === deleteKey || origin === hitTest(last.point, with: nil) {
+            activate(origin, at: first.point)
         }
     }
 

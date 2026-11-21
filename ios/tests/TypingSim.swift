@@ -74,6 +74,25 @@ private final class Pipeline {
         }
     }
 
+    func checkSwipeEdits() {
+        newField()
+        field.insertText("(")
+        typist.insertSwipe(["hello", "hallo"], uppercase: true, locked: false, in: field)
+        precondition(field.text == "(Hello" && typist.swipeChoices(in: field) == ["Hello", "Hallo"])
+        typist.choose(WordInput(field)!, "Hallo", in: field)
+        precondition(field.text == "(Hallo")
+        typist.insertSwipe(["world"], uppercase: false, locked: true, in: field)
+        precondition(field.text == "(Hallo WORLD")
+        typist.delete(in: field)
+        precondition(field.text == "(Hallo")
+        typist.insertSwipe(["again"], uppercase: false, locked: false, in: field)
+        field.insertText("x")
+        precondition(typist.swipeChoices(in: field) == nil)
+        typist.delete(in: field)
+        precondition(field.text == "(Hallo again")
+        newField()
+    }
+
     func newField() {
         field = Field()
         typist.forget()
@@ -91,6 +110,7 @@ private final class Pipeline {
     /// What the suggestion row offers after the latest keystroke.
     func suggestions() -> [String] {
         guard let input = WordInput(field) else { return [] }
+        if let choices = typist.swipeChoices(in: field) { return choices }
         let start = DispatchTime.now().uptimeNanoseconds
         let titles = vocabulary.suggestions(for: input, trail: typist.trail, layout: keys.keyLayout).titles
         suggestionNanos.append(DispatchTime.now().uptimeNanoseconds - start)
@@ -322,7 +342,10 @@ enum TypingSim {
         ]
         let chosen = option("--level").map { name in levels.filter { $0.name == name } } ?? levels
         let pipeline = await Pipeline(languages: languages, size: size)
-        if swipe { pipeline.configureSwipe(endpoints: arguments.contains("--endpoints")) }
+        if swipe {
+            pipeline.checkSwipeEdits()
+            pipeline.configureSwipe(endpoints: arguments.contains("--endpoints"))
+        }
         var rows = ["level\tlanguage\tindex\twords\terrors"]
         for level in chosen {
             pipeline.swipeNanos.removeAll()
@@ -352,7 +375,7 @@ enum TypingSim {
             if swipe {
                 let ten = pipeline.tenLetterNanos.sorted()
                 let p95 = ten.isEmpty ? 0 : Double(ten[Int(Double(ten.count - 1)*0.95)])/1e6
-                print("ten_letter count=\(ten.count) decode_ms_p95=\(p95)")
+                print("ten_letter level=\(level.name) count=\(ten.count) decode_ms_p95=\(p95)")
             }
             func millis(_ q: Double) -> Double { nanos.isEmpty ? 0 : Double(nanos[Int(Double(nanos.count - 1) * q)]) / 1e6 }
             let wer = Double(tally.wordErrors) / Double(max(tally.words, 1)) * 100

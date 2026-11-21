@@ -7,6 +7,8 @@ struct WordInput: Equatable {
     let sentenceStart: Bool
     let smartQuotes: Bool
 
+    static func opensWord(_ c: Character) -> Bool { "([{\"“‘'«".contains(c) }
+
     static func wordCharacter(_ c: Character) -> Bool { c.isLetter || c == "'" || c == "’" }
 
     init?(_ proxy: UITextDocumentProxy) {
@@ -25,7 +27,7 @@ struct WordInput: Equatable {
             guard before.last?.isWhitespace == true else { return nil }
         } else {
             guard word.count <= 36, before.hasSuffix(word),
-                  leading.last.map({ $0.isWhitespace || "(\"“‘'[«".contains($0) }) ?? true else { return nil }
+                  leading.last.map({ $0.isWhitespace || Self.opensWord($0) }) ?? true else { return nil }
         }
         let prior = leading.trimmingCharacters(in: .whitespaces)
         sentenceStart = prior.isEmpty || prior.last?.isNewline == true || prior.last.map { ".!?".contains($0) } == true

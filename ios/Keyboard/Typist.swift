@@ -72,7 +72,7 @@ final class Typist {
         guard let word = choices.first else { return }
         forget()
         let prefix = proxy.documentContextBeforeInput?.last.map {
-            $0.isWhitespace || "([{\"“‘«".contains($0) ? "" : " "
+            $0.isWhitespace || WordInput.opensWord($0) ? "" : " "
         } ?? ""
         proxy.insertText(prefix + word)
         if let caret = Caret(proxy), caret.before.hasSuffix(prefix + word) {
