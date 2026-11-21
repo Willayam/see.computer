@@ -105,9 +105,9 @@ final class Typist {
         guard let word = choices.first else { return }
         let previous = precedingChoices(in: proxy).first?.word
         forget()
-        let prefix = proxy.documentContextBeforeInput?.last.map {
-            $0.isWhitespace || WordInput.opensWord($0) ? "" : " "
-        } ?? ""
+        let before = proxy.documentContextBeforeInput ?? ""
+        let closingQuote = before.last == "'" && before.dropLast().last.map { $0.isLetter || $0.isNumber } == true
+        let prefix = before.last.map { $0.isWhitespace || (WordInput.opensWord($0) && !closingQuote) ? "" : " " } ?? ""
         if let replacement = prediction.previous, let previous, let before = proxy.documentContextBeforeInput {
             let separator = before.last == " " ? " " : ""
             if before.hasSuffix(previous + separator) {
@@ -140,11 +140,12 @@ final class Typist {
         if let edit = swipeEdit, edit.caret == Caret(proxy), edit.candidates.contains(candidate) {
             let undo = swipeUndo
             forget()
-            replaceSuffix(input.word, with: candidate, in: proxy)
+            let original = edit.candidates[0]
+            replaceSuffix(original, with: candidate, in: proxy)
             if let caret = Caret(proxy), caret.before.hasSuffix(edit.prefix + candidate) {
                 swipeEdit = (caret, [candidate], edit.prefix)
-                if let undo, undo.inserted.hasSuffix(input.word) {
-                    swipeUndo = (String(undo.inserted.dropLast(input.word.count)) + candidate, undo.original)
+                if let undo, undo.inserted.hasSuffix(original) {
+                    swipeUndo = (String(undo.inserted.dropLast(original.count)) + candidate, undo.original)
                 }
             }
             return
