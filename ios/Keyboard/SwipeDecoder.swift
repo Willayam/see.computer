@@ -103,6 +103,25 @@ struct SwipeDecoder {
             }
             beam = Array(next.prefix(80))
         }
-        return top.map { (lex.displayForm(lex.text($0.id)), $0.score) }
+        var candidates = top.map { (lex.displayForm(lex.text($0.id)), $0.score) }
+        var spelling = ""
+        var cost = 0.0
+        for point in path {
+            var nearest = 0, distance = Double.infinity
+            for (letter, center) in centers.enumerated() {
+                guard let center else { continue }
+                let dx = point.x - center.x, dy = point.y - center.y
+                let d = dx * dx + dy * dy
+                if d < distance { nearest = letter; distance = d }
+            }
+            guard distance < 1 else { return candidates }
+            let letter = Lexicon.alphabet[nearest]
+            if spelling.last != letter { spelling.append(letter) }
+            cost += 5 * distance
+        }
+        if spelling.count >= 2, lex.node(spelling).flatMap(lex.terminal) == nil {
+            candidates.append((spelling, lex.unknown(spelling) - 6 - cost))
+        }
+        return candidates
     }
 }
