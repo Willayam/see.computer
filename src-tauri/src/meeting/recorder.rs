@@ -2,6 +2,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crate::meeting::folder::{self, Manifest, State, THEM, YOU};
 use crate::meeting::{holders, processes_of, MeetingApp};
@@ -29,8 +30,9 @@ pub fn start(
         folder::read(&folder).ok_or_else(|| io::Error::other("meeting manifest missing"))?;
     let (tx, rx) = std::sync::mpsc::channel();
     let wav = folder.join(YOU);
+    let started = Instant::now();
     let mic = qos::spawn("see-meeting-mic", Class::Upkeep, move || {
-        write_mic(rx, &wav)
+        write_mic(rx, &wav, started)
     });
     *meeting_sink()
         .lock()
@@ -78,7 +80,7 @@ impl Recording {
     }
 }
 
-fn write_mic(blocks: Receiver<Block>, wav: &Path) -> io::Result<()> {
+fn write_mic(blocks: Receiver<Block>, wav: &Path, started: Instant) -> io::Result<()> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: 16_000,
@@ -96,9 +98,19 @@ fn write_mic(blocks: Receiver<Block>, wav: &Path) -> io::Result<()> {
         }
         Ok(())
     };
+    let mut first = true;
     for block in blocks {
         if block.rate == 0 || block.channels == 0 {
             continue;
+        }
+        if std::mem::take(&mut first) {
+            // A Bluetooth mic only opens once the meeting starts. Silence for the
+            // wait keeps you.wav aligned with them.wav, which starts on time.
+            let captured = Duration::from_secs_f64(
+                block.samples.len() as f64 / f64::from(block.channels) / f64::from(block.rate),
+            );
+            let late = started.elapsed().saturating_sub(captured);
+            write(vec![0.0; (late.as_secs_f64() * 16_000.0) as usize])?;
         }
         if rate != block.rate {
             if let Some(previous) = resampler.as_mut() {
@@ -140,7 +152,7 @@ mod tests {
             .unwrap();
         }
         drop(tx);
-        write_mic(rx, &wav).unwrap();
+        write_mic(rx, &wav, Instant::now()).unwrap();
         let mut reader = hound::WavReader::open(&wav).unwrap();
         let samples = reader
             .samples::<i16>()
@@ -148,6 +160,36 @@ mod tests {
             .unwrap();
         assert!((samples.len() as isize - 16_000).abs() <= 1);
         assert_eq!(samples[8_000], 8192);
+        std::fs::remove_file(wav).unwrap();
+    }
+
+    #[test]
+    fn a_mic_that_opens_late_is_preceded_by_silence() {
+        let wav = std::env::temp_dir().join(format!(
+            "see-meeting-late-mic-{}.wav",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Block {
+            samples: vec![0.25; 16_000],
+            rate: 16_000,
+            channels: 1,
+        })
+        .unwrap();
+        drop(tx);
+        let started = Instant::now() - Duration::from_secs(2);
+        write_mic(rx, &wav, started).unwrap();
+        let mut reader = hound::WavReader::open(&wav).unwrap();
+        let samples = reader
+            .samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let silence = samples.iter().take_while(|sample| **sample == 0).count();
+        assert!((16_000..16_800).contains(&silence), "{silence}");
+        assert_eq!(samples.len(), silence + 16_000);
         std::fs::remove_file(wav).unwrap();
     }
 }
