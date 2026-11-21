@@ -3,6 +3,9 @@ import UIKit
 /// The letter rows stay in place while dictation runs. Only a page or language
 /// change rebuilds them, so changing case never interrupts a touch.
 final class TypingKeys: UIStackView {
+    static let deleteRepeatDelay: TimeInterval = 0.45
+    static let deleteRepeatInterval: TimeInterval = 0.09
+
     let preview = KeyPreview()
     private enum Page { case letters, numbers, symbols }
     private var page = Page.letters
@@ -45,7 +48,11 @@ final class TypingKeys: UIStackView {
         } else if resolvesAtRelease(origin) {
             let lastKey = samples.reversed().lazy.compactMap { self.releaseKey(at: $0.point) }.first
             release(from: origin, to: lastKey ?? origin, at: last.point)
-        } else if origin === deleteKey || origin === hitTest(last.point, with: nil) {
+        } else if origin === deleteKey {
+            let held = max(0, last.time - first.time - Self.deleteRepeatDelay)
+            let repeats = Int(held / Self.deleteRepeatInterval)
+            for _ in 0...repeats { activate(origin, at: first.point) }
+        } else if origin === hitTest(last.point, with: nil) {
             activate(origin, at: first.point)
         }
     }

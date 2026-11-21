@@ -614,8 +614,8 @@ final class KeyboardViewController: UIInputViewController {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         deleteCharacter()
         deleteRepeat?.invalidate()
-        deleteRepeat = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self] _ in
-            self?.deleteRepeat = Timer.scheduledTimer(withTimeInterval: 0.09, repeats: true) { [weak self] _ in
+        deleteRepeat = Timer.scheduledTimer(withTimeInterval: TypingKeys.deleteRepeatDelay, repeats: false) { [weak self] _ in
+            self?.deleteRepeat = Timer.scheduledTimer(withTimeInterval: TypingKeys.deleteRepeatInterval, repeats: true) { [weak self] _ in
                 self?.deleteCharacter()
             }
         }
