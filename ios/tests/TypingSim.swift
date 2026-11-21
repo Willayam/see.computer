@@ -30,6 +30,8 @@ private final class Pipeline {
     let vocabulary = TypingVocabulary()
     private(set) var field = Field()
     private var typist: Typist!
+    var swipeNanos: [UInt64] = []
+    var tenLetterNanos: [UInt64] = []
     var suggestionNanos: [UInt64] = []
 
     init(languages: TypingLanguages, size: CGSize) async {
@@ -50,6 +52,24 @@ private final class Pipeline {
         keys.startDelete = { [unowned self] in self.typist.delete(in: self.field); self.keys.updateCase(for: self.field) }
         keys.insert = { [unowned self] output, point in
             self.typist.type(output, at: point, in: self.field)
+            self.keys.updateCase(for: self.field)
+        }
+    }
+
+    func configureSwipe(endpoints: Bool) {
+        keys.onSwipe = { [unowned self] samples, upper, locked in
+            let start = DispatchTime.now().uptimeNanoseconds
+            let layout = self.keys.keyLayout
+            func nearest(_ point: CGPoint) -> Character {
+                let letter = layout.centers.indices.compactMap { i in
+                    layout.centers[i].map { (i, hypot(point.x - $0.x, point.y - $0.y)) }
+                }.min { $0.1 < $1.1 }!.0
+                return Lexicon.alphabet[letter]
+            }
+            let word = String([nearest(samples.first!.point), nearest(samples.last!.point)])
+            self.swipeNanos.append(DispatchTime.now().uptimeNanoseconds - start)
+            if let last = self.field.text.last, !last.isWhitespace { self.field.insertText(" ") }
+            self.field.insertText(word)
             self.keys.updateCase(for: self.field)
         }
     }
@@ -141,7 +161,7 @@ private func wordDistance(_ reference: [String], _ hypothesis: [String]) -> Int 
 }
 
 @MainActor
-private func type(_ sentence: String, on pipeline: Pipeline, level: Level, seed: String, tally: inout Tally) -> Bool {
+private func type(_ sentence: String, on pipeline: Pipeline, level: Level, seed: String, tally: inout Tally, swipe: Bool) -> Bool {
     let keys = pipeline.keys
     var random = Generator(seed)
     pipeline.newField()
@@ -175,10 +195,79 @@ private func type(_ sentence: String, on pipeline: Pipeline, level: Level, seed:
     }
 
     let characters = Array(sentence)
+    func swipeEnd(_ start: Int) -> Int {
+        var end = start
+        while end < characters.count {
+            let c = characters[end]
+            if !c.isLetter && !(c == "'" && end + 1 < characters.count && characters[end + 1].isLetter) { break }
+            end += 1
+        }
+        return end
+    }
+    func gesture(_ letters: ArraySlice<Character>) -> Bool {
+        var via = [CGPoint]()
+        var previous: String?
+        for c in letters where c.isLetter {
+            let key = String(c).lowercased()
+            if key == previous { continue }
+            guard let target = center(key) else { return false }
+            via.append(noisy(target))
+            previous = key
+        }
+        guard !via.isEmpty else { return false }
+        let speed = (10 + 10 * random.next()) * pitch
+        let hz = 60 + 60 * random.next()
+        if via.count > 1 {
+            for (i, j) in [(0, 1), (via.count - 1, via.count - 2)] {
+                let a = via[i], b = via[j]
+                let scale = random.gaussian() * level.spread * pitch / max(1, hypot(a.x-b.x, a.y-b.y))
+                via[i] = CGPoint(x: a.x + scale*(a.x-b.x), y: a.y + scale*(a.y-b.y))
+            }
+        }
+        var points = [via[0]]
+        for (a,b) in zip(via, via.dropFirst()) {
+            let count = max(2, Int(ceil(hypot(b.x-a.x,b.y-a.y) / speed * hz)))
+            for step in 1...count {
+                let u = Double(step) / Double(count)
+                let t = u*u*(3-2*u)
+                points.append(CGPoint(x: a.x + t*(b.x-a.x), y: a.y + t*(b.y-a.y)))
+            }
+        }
+        let radius = level.spread == 0 ? 0 : Int(2 + 2 * random.next())
+        let samples = points.indices.map { i -> SwipeSample in
+            var point = points[i]
+            if i > 0 && i + 1 < points.count {
+                let window = points[max(0,i-radius)...min(points.count-1,i+radius)]
+                point = CGPoint(x: window.reduce(0) { $0 + $1.x } / Double(window.count),
+                                y: window.reduce(0) { $0 + $1.y } / Double(window.count))
+            }
+            return SwipeSample(point: point, time: Double(i)/hz)
+        }
+        let oldCount = pipeline.swipeNanos.count
+        keys.swipe(samples)
+        if letters.count == 10 && pipeline.swipeNanos.count > oldCount {
+            pipeline.tenLetterNanos.append(pipeline.swipeNanos.last!)
+        }
+        keys.layoutIfNeeded()
+        return true
+    }
     var index = 0
     while index < characters.count {
         let character = characters[index]
-        if character.isLetter {
+        if swipe, character == " ", index + 1 < characters.count,
+           characters[index + 1].isLetter, swipeEnd(index + 1) > index + 2 {
+            index += 1
+            continue
+        }
+        if swipe, character.isLetter {
+            let end = swipeEnd(index)
+            if end > index + 1 {
+                guard gesture(characters[index..<end]) else { return false }
+                index = end
+                continue
+            }
+            guard tapLetter(character) else { return false }
+        } else if character.isLetter {
             let roll = random.next()
             if roll < level.slip {
                 index += 1
@@ -220,6 +309,7 @@ enum TypingSim {
             print("usage: TypingSim --corpus <dir> [--set dev|test] [--languages bilingual|english] [--out <tsv>]")
             exit(2)
         }
+        let swipe = option("--mode") == "swipe"
         let set = option("--set") ?? "dev"
         let mode = option("--languages") ?? "bilingual"
         let languages: TypingLanguages = mode == "english" ? .english : .bilingual
@@ -228,12 +318,15 @@ enum TypingSim {
         let levels = [
             Level(name: "clean", spread: 0, slip: 0),
             Level(name: "steady", spread: 0.2, slip: 0.005),
-            Level(name: "hurried", spread: 0.3, slip: 0.005)
+            Level(name: "hurried", spread: swipe ? 0.35 : 0.3, slip: 0.005)
         ]
         let chosen = option("--level").map { name in levels.filter { $0.name == name } } ?? levels
         let pipeline = await Pipeline(languages: languages, size: size)
+        if swipe { pipeline.configureSwipe(endpoints: arguments.contains("--endpoints")) }
         var rows = ["level\tlanguage\tindex\twords\terrors"]
         for level in chosen {
+            pipeline.swipeNanos.removeAll()
+            pipeline.tenLetterNanos.removeAll()
             var tally = Tally()
             pipeline.suggestionNanos.removeAll()
             for language in files {
@@ -243,7 +336,7 @@ enum TypingSim {
                     exit(1)
                 }
                 for (index, sentence) in text.split(separator: "\n").map(String.init).enumerated() {
-                    guard type(sentence, on: pipeline, level: level, seed: "\(level.name)/\(language)/\(index)", tally: &tally) else {
+                    guard type(sentence, on: pipeline, level: level, seed: "\(level.name)/\(language)/\(index)", tally: &tally, swipe: swipe) else {
                         tally.skipped += 1
                         continue
                     }
@@ -255,14 +348,19 @@ enum TypingSim {
                     rows.append("\(level.name)\t\(language)\t\(index)\t\(reference.count)\t\(errors)")
                 }
             }
-            let nanos = pipeline.suggestionNanos.sorted()
+            let nanos = (swipe ? pipeline.swipeNanos : pipeline.suggestionNanos).sorted()
+            if swipe {
+                let ten = pipeline.tenLetterNanos.sorted()
+                let p95 = ten.isEmpty ? 0 : Double(ten[Int(Double(ten.count - 1)*0.95)])/1e6
+                print("ten_letter count=\(ten.count) decode_ms_p95=\(p95)")
+            }
             func millis(_ q: Double) -> Double { nanos.isEmpty ? 0 : Double(nanos[Int(Double(nanos.count - 1) * q)]) / 1e6 }
             let wer = Double(tally.wordErrors) / Double(max(tally.words, 1)) * 100
             print(String(
-                format: "%@ errors=%d wer=%.2f%% letter_miss=%.2f%% bar_recall=%.1f%% sentences=%d skipped=%d words=%d suggest_ms_p50=%.2f p95=%.2f calls=%d",
+                format: "%@ errors=%d wer=%.2f%% letter_miss=%.2f%% bar_recall=%.1f%% sentences=%d skipped=%d words=%d %@_ms_p50=%.2f p95=%.2f calls=%d",
                 level.name, tally.wordErrors, wer, Double(tally.letterMisses) / Double(max(tally.letterTaps, 1)) * 100,
                 Double(tally.barHits) / Double(max(tally.barChances, 1)) * 100,
-                tally.sentences, tally.skipped, tally.words, millis(0.5), millis(0.95), nanos.count))
+                tally.sentences, tally.skipped, tally.words, swipe ? "decode" : "suggest", millis(0.5), millis(0.95), nanos.count))
         }
         if let out = option("--out") {
             try? (rows.joined(separator: "\n") + "\n").write(toFile: out, atomically: true, encoding: .utf8)

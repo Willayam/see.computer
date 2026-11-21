@@ -7,8 +7,10 @@ device="${1:?Pass a booted simulator UDID}"
 shift
 out=""
 pass=""
+metric=noisy_wer
 while [ $# -gt 0 ]; do
     case "$1" in
+        --mode) pass="$pass --mode $2"; if [ "$2" = swipe ]; then metric=noisy_swipe_wer; fi; shift 2 ;;
         --out) out="$2"; shift 2 ;;
         *) pass="$pass $1"; shift ;;
     esac
@@ -30,10 +32,10 @@ for level in clean steady hurried; do
         --out "$scratch/$level.tsv" $pass > "$scratch/$level.txt" 2>&1 &
 done
 wait
-for level in clean steady hurried; do grep "^$level " "$scratch/$level.txt" || { cat "$scratch/$level.txt"; exit 1; }; done
-cat "$scratch"/clean.txt "$scratch"/steady.txt "$scratch"/hurried.txt | awk '
+for level in clean steady hurried; do grep -E "^($level |ten_letter )"  "$scratch/$level.txt" || { cat "$scratch/$level.txt"; exit 1; }; done
+cat "$scratch"/clean.txt "$scratch"/steady.txt "$scratch"/hurried.txt | awk -v metric="$metric" '
     /^(steady|hurried) / { for (i = 1; i <= NF; i++) { split($i, kv, "="); if (kv[1] == "errors") e += kv[2]; if (kv[1] == "words") w += kv[2] } }
-    END { printf "metric noisy_wer=%.3f%%\n", e / w * 100 }'
+    END { printf "metric %s=%.3f%%\n", metric, e / w * 100 }'
 if [ -n "$out" ]; then
     { head -1 "$scratch/clean.tsv"; for level in clean steady hurried; do tail -n +2 "$scratch/$level.tsv"; done; } > "$out"
 fi

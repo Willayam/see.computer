@@ -1,5 +1,10 @@
 import Foundation
 
+struct SwipeSample {
+    let point: CGPoint
+    let time: TimeInterval
+}
+
 struct KeyLayout: Equatable {
     var centers = [CGPoint?](repeating: nil, count: 30)
     var pitch: CGFloat = 1

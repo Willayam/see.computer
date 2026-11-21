@@ -20,6 +20,28 @@ final class TypingKeys: UIStackView {
     private let globe = Key(symbol: "globe", label: "Next keyboard")
 
     var keyPrior: (() -> (probabilities: [Double], spread: Double)?)?
+    var onSwipe: (([SwipeSample], Bool, Bool) -> Void)?
+
+    func canSwipe(from key: Key) -> Bool {
+        page == .letters && letterKeys.contains(key) && onSwipe != nil
+    }
+
+    func finishSwipe(_ samples: [SwipeSample]) {
+        lastShift = .distantPast
+        onSwipe?(samples, uppercase, capsLock)
+    }
+
+    /// Replay the same start-key and travel checks used by touch delivery.
+    func swipe(_ samples: [SwipeSample]) {
+        guard let first = samples.first, let last = samples.last else { return }
+        if let origin = hitTest(first.point, with: nil) as? Key, canSwipe(from: origin),
+           samples.contains(where: { hypot($0.point.x - first.point.x, $0.point.y - first.point.y) > origin.bounds.width / 2 }) {
+            finishSwipe(samples)
+        } else {
+            tap(at: last.point)
+        }
+    }
+
     var moveCursor: ((Int) -> Void)?
     private var trackpadX: CGFloat = 0
     var insert: ((String, CGPoint?) -> Void)?
