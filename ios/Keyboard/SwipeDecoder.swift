@@ -3,13 +3,14 @@ import Foundation
 /// Reduce a stroke to endpoints and turns, in units of one key pitch.
 struct SwipeDecoder {
     private let path: [CGPoint]
+    private let timedPath: [CGPoint]
     private let centers: [CGPoint?]
 
     init(samples: [SwipeSample], layout: KeyLayout) {
         func scaled(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x / layout.pitch, y: p.y / layout.pitch) }
         centers = layout.centers.map { $0.map(scaled) }
         let points = samples.map { scaled($0.point) }
-        guard points.count >= 2 else { path = points; return }
+        guard points.count >= 2 else { path = points; timedPath = []; return }
         var turns = [points[0]]
         func simplify(_ a: Int, _ b: Int, depth: Int) {
             let start = points[a], end = points[b]
@@ -31,6 +32,32 @@ struct SwipeDecoder {
         }
         simplify(0, points.count - 1, depth: 0)
         path = turns
+        // A speed valley can identify a letter even when the stroke continues in a straight line.
+        let speeds = zip(samples, samples.dropFirst()).map { a, b in
+            hypot(b.point.x - a.point.x, b.point.y - a.point.y) / max(0.001, b.time - a.time)
+        }
+        var anchors = [0]
+        if speeds.count >= 5 {
+            for i in 2..<(speeds.count - 2) {
+                guard speeds[i] < speeds[i - 1], speeds[i] <= speeds[i + 1] else { continue }
+                let left = speeds[max(0, i - 8)..<i].max() ?? 0
+                let right = speeds[(i + 1)...min(speeds.count - 1, i + 8)].max() ?? 0
+                if speeds[i] < 0.65 * min(left, right) { anchors.append(i) }
+            }
+        }
+        anchors.append(points.count - 1)
+        var fits = true
+        for (a, b) in zip(anchors, anchors.dropFirst()) {
+            let start = points[a], dx = points[b].x - start.x, dy = points[b].y - start.y
+            let length = max(0.001, dx * dx + dy * dy)
+            for j in (a + 1)..<b {
+                let x = points[j].x - start.x, y = points[j].y - start.y
+                let t = min(1, max(0, (x * dx + y * dy) / length))
+                if hypot(x - t * dx, y - t * dy) > 0.7 { fits = false; break }
+            }
+            if !fits { break }
+        }
+        timedPath = fits ? anchors.map { points[$0] } : []
     }
 
     private struct State {
@@ -42,6 +69,13 @@ struct SwipeDecoder {
     }
 
     func candidates(in lex: Lexicon, after previous: Int?) -> [(String, Double)] {
+        let geometric = candidates(along: path, passingLetters: true, in: lex, after: previous)
+        guard timedPath.count >= 2 else { return geometric }
+        return geometric + candidates(along: timedPath, passingLetters: false, in: lex, after: previous)
+    }
+
+    private func candidates(along path: [CGPoint], passingLetters: Bool, in lex: Lexicon,
+                            after previous: Int?) -> [(String, Double)] {
         guard path.count >= 2 else { return [] }
         var beam = [State(node: 0, segment: 0, fraction: 0, cost: 0, priority: 0)]
         var top = [(id: Int, score: Double)]()
@@ -87,6 +121,7 @@ struct SwipeDecoder {
                     let a = path[i], b = path[i + 1]
                     let d = distance(b)
                     if d < 3.2 { advance(i + 1, 0, 4.8 * d) }
+                    guard passingLetters else { continue }
                     // Letters passed along a straight leg need no turn, but must occur in order.
                     let dx = b.x - a.x, dy = b.y - a.y
                     let t = ((center.x - a.x) * dx + (center.y - a.y) * dy) / max(0.001, dx * dx + dy * dy)
