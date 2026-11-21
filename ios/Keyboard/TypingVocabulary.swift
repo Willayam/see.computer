@@ -135,6 +135,16 @@ final class TypingVocabulary {
         return weight
     }
 
+    private func centered(_ word: String, trail: TapTrail, layout: KeyLayout) -> Bool {
+        let letters = word.lowercased()
+        guard !letters.isEmpty, letters.count == trail.taps.count else { return false }
+        return zip(letters, trail.taps).allSatisfy { letter, tap in
+            guard tap.typed == letter, let point = tap.point, let code = Lexicon.codes[letter],
+                  let center = layout.centers[code] else { return false }
+            return hypot(point.x - center.x, point.y - center.y) <= layout.pitch * 0.15
+        }
+    }
+
     func reconsider(_ held: Typist.HeldWord, input: WordInput, trail: TapTrail, chosen: String, layout: KeyLayout) -> String? {
         let first = held.input.word, second = input.word
         guard !held.output.contains(" "), !chosen.contains(" "), second.first?.isLowercase == true,
@@ -172,6 +182,20 @@ final class TypingVocabulary {
         if let usualScore {
             guard best - usualScore >= 2 else { return nil }
         } else if bestText.contains(" ") || held.space.y >= layout.space.minY + 8 { return nil }
+        // A firm space separates two independent words. Keep any centered dictionary word on its side.
+        if layout.space.insetBy(dx: 0, dy: 8).contains(held.space) {
+            let parts = bestText.lowercased().split(separator: " ")
+            for (i, word, taps) in [(0, first, held.taps), (1, second, trail)] {
+                let lower = word.lowercased()
+                if (parts.count != 2 || parts[i] != lower), centered(lower, trail: taps, layout: layout),
+                   languages.contains(where: { language in
+                       guard let lex = tables[language.code] else { return false }
+                       return lex.node(lower).flatMap(lex.terminal) != nil
+                   }) {
+                    return nil
+                }
+            }
+        }
         if let split = bestText.firstIndex(of: " "), let lex = tables["sv"],
            languages.contains(where: { $0.code == "sv" }) {
             let parts = [String(bestText[..<split]).lowercased(), String(bestText[bestText.index(after: split)...]).lowercased()]
@@ -307,9 +331,8 @@ final class TypingVocabulary {
                 costs[index][letter] - costs[index][codes[index]] <= 3
             }
         }
-        // A known two-letter word that only lacks letters at its end stays as typed. The strip offers the longer word.
         if let best, best.0.lowercased() != word, !protectedWords.contains(word),
-            !(literal.isFinite && word.count <= 2 && best.0.lowercased().hasPrefix(word)),
+            !(literal.isFinite && centered(word, trail: trail, layout: layout)),
             typed.dropFirst() == typed.dropFirst().lowercased(), input.sentenceStart || typed.first?.isUppercase != true || shiftedName
         {
             var threshold = literal + 1
