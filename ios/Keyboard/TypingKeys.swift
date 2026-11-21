@@ -29,8 +29,20 @@ final class TypingKeys: UIStackView {
         page == .letters && letterKeys.contains(key) && onSwipe != nil
     }
 
-    func crossesSwipeThreshold(_ point: CGPoint, from start: CGPoint, key: Key) -> Bool {
-        hypot(point.x - start.x, point.y - start.y) > key.bounds.width / 2
+    struct StrokeTravel {
+        private var neighbor: Key?
+        private var distance: CGFloat = 0
+
+        mutating func isWordGesture(at point: CGPoint, previous: CGPoint, from key: Key, on keyboard: TypingKeys) -> Bool {
+            distance += hypot(point.x - previous.x, point.y - previous.y)
+            let cell = key.convert(key.bounds, to: keyboard)
+            if !cell.contains(point), let next = keyboard.releaseKey(at: point),
+               next !== key, keyboard.letterKeys.contains(next) {
+                if let neighbor, neighbor !== next { return true }
+                neighbor = next
+            }
+            return neighbor != nil && distance > cell.width * 1.6
+        }
     }
 
     func finishSwipe(_ samples: [SwipeSample]) {
@@ -42,8 +54,10 @@ final class TypingKeys: UIStackView {
     func swipe(_ samples: [SwipeSample]) {
         guard let first = samples.first, let last = samples.last else { return }
         guard let origin = hitTest(first.point, with: nil) as? Key else { return }
-        if canSwipe(from: origin),
-           samples.contains(where: { crossesSwipeThreshold($0.point, from: first.point, key: origin) }) {
+        var travel = StrokeTravel()
+        if canSwipe(from: origin), zip(samples, samples.dropFirst()).contains(where: {
+            travel.isWordGesture(at: $1.point, previous: $0.point, from: origin, on: self)
+        }) {
             finishSwipe(samples)
         } else if resolvesAtRelease(origin) {
             let lastKey = samples.reversed().lazy.compactMap { self.releaseKey(at: $0.point) }.first

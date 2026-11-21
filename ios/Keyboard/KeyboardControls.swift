@@ -99,6 +99,7 @@ final class Key: UIControl {
 
     private var stroke = [SwipeSample]()
     private var swiping = false
+    private var travel = TypingKeys.StrokeTravel()
     private var trailLayer: CAShapeLayer?
 
     private func record(_ touch: UITouch, on keyboard: TypingKeys) {
@@ -109,7 +110,7 @@ final class Key: UIControl {
         }
         stroke.append(sample)
         if !swiping {
-            guard keyboard.crossesSwipeThreshold(sample.point, from: stroke[0].point, key: self) else { return }
+            guard travel.isWordGesture(at: sample.point, previous: stroke[stroke.count - 2].point, from: self, on: keyboard) else { return }
             swiping = true
             trackedKey?.isHighlighted = false
             trackedKey = nil
@@ -132,6 +133,7 @@ final class Key: UIControl {
     private func endStroke() {
         stroke.removeAll(keepingCapacity: true)
         swiping = false
+        travel = TypingKeys.StrokeTravel()
         guard let layer = trailLayer else { return }
         trailLayer = nil
         CATransaction.begin()
