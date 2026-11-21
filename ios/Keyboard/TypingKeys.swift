@@ -87,7 +87,7 @@ final class TypingKeys: UIStackView {
         let cell = origin.convert(origin.bounds, to: self)
         let target = end.convert(end.bounds, to: self)
         guard !cell.contains(point), target.contains(point),
-              hypot(point.x - start.x, point.y - start.y) >= cell.width * 0.35 else { return false }
+              hypot(point.x - start.x, point.y - start.y) >= cell.width * 0.6 else { return false }
         let pair = origin.output + end.output
         guard Self.commonPairs.contains(pair), onSwipe?(samples, uppercase, capsLock, pair) == true else { return false }
         lastShift = .distantPast
