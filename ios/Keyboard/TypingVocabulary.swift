@@ -285,7 +285,7 @@ final class TypingVocabulary {
         {
             var threshold = literal + 1
             if !literal.isFinite {
-                threshold = unknown + log(input.sentenceStart ? 0.03 : 0.01)
+                threshold = unknown + log(typed.first?.isUppercase == true ? 0.03 : 0.0002)
                 let range = NSRange(word.startIndex..., in: word)
                 if languages.compactMap(\.dictionary).contains(where: {
                     checker.rangeOfMisspelledWord(in: word, range: range, startingAt: 0, wrap: false, language: $0)
