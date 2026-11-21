@@ -30,6 +30,7 @@ final class KeyboardViewController: UIInputViewController {
     private let keys = TypingKeys()
     private lazy var typist = Typist { [completions, keys] in completions.suggestions(for: $0, trail: $1, layout: keys.keyLayout) }
     private var deleteRepeat: Timer?
+    private var loggedField: UUID?
     private var pendingInsert = false
     private var activatedAt = Date.distantPast
     /// False once the field has failed to hold the words, for the rest of the take.
@@ -99,6 +100,8 @@ final class KeyboardViewController: UIInputViewController {
         hasLeft = true
         isActive = false
         forgetTypingPosition()
+        logEdit("hide") {}
+        loggedField = nil
         Diagnostics.log(
             "keyboard_hidden",
             [
@@ -582,6 +585,58 @@ final class KeyboardViewController: UIInputViewController {
         Bridge.write(edit, "manual-edit.json")
     }
 
+    /// Logs an edit with the text before the caret on both sides of it, so a replay
+    /// can see what each key, swipe or suggestion actually changed.
+    private func logEdit(_ event: String, _ fields: [String: Any] = [:], _ edit: () -> Void) {
+        let proxy = textDocumentProxy
+        let before = proxy.documentContextBeforeInput
+        edit()
+        guard TypingLog.isOn else { return }
+        logField()
+        var fields = fields
+        // Codes and passwords stay out, even though iOS rarely gives those fields to a custom keyboard.
+        let secret = proxy.isSecureTextEntry == true || [.password, .newPassword, .oneTimeCode, .creditCardNumber]
+            .contains(proxy.textContentType ?? .name)
+        if secret {
+            fields = ["private": true]
+        } else {
+            fields["b"] = before.map { String($0.suffix(80)) } ?? NSNull()
+            fields["a"] = proxy.documentContextBeforeInput.map { String($0.suffix(80)) } ?? NSNull()
+            fields["f"] = proxy.documentContextAfterInput.map { String($0.prefix(20)) } ?? NSNull()
+        }
+        TypingLog.write(event, fields)
+    }
+
+    /// What the field asks of a keyboard, and the key positions, once per field.
+    private func logField() {
+        let proxy = textDocumentProxy
+        let field = SeeDocumentIdentifier(proxy)
+        guard field != loggedField else { return }
+        loggedField = field
+        let layout = keys.keyLayout
+        var centers: [String: [Double]] = [:]
+        for (letter, code) in Lexicon.codes {
+            if let center = layout.centers[code] { centers[String(letter)] = [Double(center.x), Double(center.y)] }
+        }
+        TypingLog.write("field", [
+            "host": HostCapture.host ?? NSNull(),
+            "keyboard": proxy.keyboardType?.rawValue ?? -1,
+            "autocorrect": proxy.autocorrectionType?.rawValue ?? -1,
+            "autocap": proxy.autocapitalizationType?.rawValue ?? -1,
+            "spell": proxy.spellCheckingType?.rawValue ?? -1,
+            "quotes": proxy.smartQuotesType?.rawValue ?? -1,
+            "content": proxy.textContentType?.rawValue ?? NSNull(),
+            "return": proxy.returnKeyType?.rawValue ?? -1,
+            "corrects": WordInput.allowsCorrection(in: proxy),
+            "languages": TypingLanguages.current.rawValue,
+            "spread": completions.vocabulary.spread,
+            "keys": centers,
+            "pitch": Double(layout.pitch),
+            "space": [layout.space.minX, layout.space.minY, layout.space.width, layout.space.height].map(Double.init),
+            "size": [Double(keys.bounds.width), Double(keys.bounds.height)],
+        ])
+    }
+
     private func forgetTypingPosition() {
         typist.forget()
     }
@@ -590,7 +645,7 @@ final class KeyboardViewController: UIInputViewController {
         guard isActive, keys.isUserInteractionEnabled, WordInput(textDocumentProxy) == input else { return }
         prepareForManualEdit()
         guard WordInput(textDocumentProxy) == input else { return }
-        typist.choose(input, candidate, in: textDocumentProxy)
+        logEdit("pick", ["w": candidate, "s": completions.shownTitles]) { typist.choose(input, candidate, in: textDocumentProxy) }
         rememberEditedField()
         updateTypingContext()
     }
@@ -598,7 +653,9 @@ final class KeyboardViewController: UIInputViewController {
     private func typed(_ output: String, at point: CGPoint?) {
         guard isActive, keys.isUserInteractionEnabled else { return }
         prepareForManualEdit()
-        typist.type(output, at: point, in: textDocumentProxy)
+        var fields: [String: Any] = ["o": output, "s": completions.shownTitles]
+        if let point { fields["x"] = Double(point.x); fields["y"] = Double(point.y) }
+        logEdit("key", fields) { typist.type(output, at: point, in: textDocumentProxy) }
         rememberEditedField()
         updateTypingContext()
     }
@@ -606,7 +663,7 @@ final class KeyboardViewController: UIInputViewController {
     private func deleteCharacter() {
         guard isActive, keys.isUserInteractionEnabled else { return }
         prepareForManualEdit()
-        typist.delete(in: textDocumentProxy)
+        logEdit("delete") { typist.delete(in: textDocumentProxy) }
         rememberEditedField()
         updateTypingContext()
     }
@@ -668,7 +725,7 @@ final class KeyboardViewController: UIInputViewController {
         keys.moveCursor = { [weak self] offset in
             self?.prepareForManualEdit()
             self?.forgetTypingPosition()
-            self?.textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
+            self?.logEdit("move", ["n": offset]) { self?.textDocumentProxy.adjustTextPosition(byCharacterOffset: offset) }
             self?.rememberEditedField()
             self?.updateTypingContext()
         }
@@ -684,8 +741,18 @@ final class KeyboardViewController: UIInputViewController {
             if shortWord != nil && !self.typist.startsSwipeWord(in: self.textDocumentProxy) { return false }
             let words = self.completions.vocabulary.swipe(samples, layout: self.keys.keyLayout,
                 before: self.textDocumentProxy.documentContextBeforeInput ?? "", previousChoices: self.typist.precedingChoices(in: self.textDocumentProxy))
-            if let shortWord, words.words.first?.word.lowercased() != shortWord { return false }
-            self.typist.insertSwipe(words, uppercase: upper, locked: locked, in: self.textDocumentProxy)
+            let start = samples.first?.time ?? 0
+            var fields: [String: Any] = [
+                "p": samples.map { [Double($0.point.x), Double($0.point.y), ($0.time - start) * 1000] },
+                "c": words.words.prefix(5).map { [$0.word, $0.score] as [Any] },
+                "r": words.previous ?? NSNull(),
+            ]
+            if let shortWord { fields["short"] = shortWord }
+            if let shortWord, words.words.first?.word.lowercased() != shortWord {
+                self.logEdit("swipe", fields.merging(["kept": false]) { $1 }) {}
+                return false
+            }
+            self.logEdit("swipe", fields) { self.typist.insertSwipe(words, uppercase: upper, locked: locked, in: self.textDocumentProxy) }
             self.rememberEditedField()
             self.updateTypingContext()
             return true

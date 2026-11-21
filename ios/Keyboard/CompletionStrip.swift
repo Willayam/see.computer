@@ -13,6 +13,7 @@ final class CompletionStrip: UIStackView {
     private var pending: DispatchWorkItem?
     private let choices = (0..<3).map { _ in UIButton(type: .custom) }
     var accept: ((WordInput, String) -> Void)?
+    var shownTitles: [String] { choices.compactMap { $0.title(for: .normal) } }
 
     override init(frame: CGRect) {
         super.init(frame: frame)

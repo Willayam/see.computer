@@ -12,6 +12,7 @@ struct ContentView: View {
     @State private var connected = DictionaryFolder.isConnected
     @State private var copied: Date?
     @AppStorage(TypingLanguages.key, store: TypingLanguages.store) private var typingLanguages = TypingLanguages.device
+    @AppStorage(TypingLog.key, store: TypingLog.store) private var keepsTypingLog = true
     @FocusState private var tryItFocused: Bool
 
     var body: some View {
@@ -109,10 +110,12 @@ struct ContentView: View {
                 ForEach(TypingLanguages.allCases) { Text($0.label).tag($0) }
             }
             .onChange(of: typingLanguages) { _, _ in Signals.post(.typingLanguagesChanged) }
+            Toggle("Keep a typing log", isOn: $keepsTypingLog)
+                .onChange(of: keepsTypingLog) { _, on in if !on { TypingLog.erase() } }
             Button("Add the keyboard and allow Full Access") {
                 UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
             }
-            Text("In Settings, open Keyboards, turn on see.computer, then turn on Allow Full Access. The keyboard needs it to talk to this app. Audio and text stay on this iPhone.")
+            Text("In Settings, open Keyboards, turn on see.computer, then turn on Allow Full Access. The keyboard needs it to talk to this app. Audio and text stay on this iPhone. The typing log records each key, swipe and correction so mistyped words can be studied later. Turning it off deletes it.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
