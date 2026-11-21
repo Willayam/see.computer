@@ -28,6 +28,22 @@ struct TapTrail: Equatable {
     var end: Caret?
 }
 
+struct SwipeChoice {
+    let word: String
+    let score: Double
+}
+
+struct SwipePrediction {
+    let words: [SwipeChoice]
+    let previous: String?
+}
+
+extension SwipePrediction {
+    init(_ words: [String]) {
+        self.init(words: words.map { SwipeChoice(word: $0, score: 0) }, previous: nil)
+    }
+}
+
 /// The edits a tap on the typing keys makes, and what the next tap may undo.
 @MainActor
 final class Typist {
@@ -58,29 +74,59 @@ final class Typist {
 
     private var swipeEdit: (caret: Caret, candidates: [String], prefix: String)?
 
+    private var precedingSwipe: (caret: Caret, choices: [SwipeChoice])?
+    private var swipeUndo: (inserted: String, original: String)?
+    var reviseSwipe: (([SwipeChoice], String) -> String?)?
+
+    func precedingChoices(in proxy: UITextDocumentProxy) -> [SwipeChoice] {
+        guard let prior = precedingSwipe, prior.caret == Caret(proxy),
+              WordInput(proxy) != nil else { return [] }
+        return prior.choices
+    }
+
     func swipeChoices(in proxy: UITextDocumentProxy) -> [String]? {
         guard let edit = swipeEdit, edit.caret == Caret(proxy) else { return nil }
         return edit.candidates
     }
 
     func insertSwipe(_ words: [String], uppercase: Bool, locked: Bool, in proxy: UITextDocumentProxy) {
-        let choices = words.map { word -> String in
+        insertSwipe(SwipePrediction(words), uppercase: uppercase, locked: locked, in: proxy)
+    }
+
+    func insertSwipe(_ prediction: SwipePrediction, uppercase: Bool, locked: Bool, in proxy: UITextDocumentProxy) {
+        let ranked = prediction.words.map { choice -> SwipeChoice in
+            let word = choice.word
             let text = proxy.smartQuotesType == .no ? word : word.replacingOccurrences(of: "'", with: "’")
-            if locked || proxy.autocapitalizationType == .allCharacters { return text.uppercased() }
-            return uppercase ? text.prefix(1).uppercased() + text.dropFirst() : text
+            let cased = locked || proxy.autocapitalizationType == .allCharacters ? text.uppercased()
+                : uppercase ? text.prefix(1).uppercased() + text.dropFirst() : text
+            return SwipeChoice(word: cased, score: choice.score)
         }
+        let choices = ranked.map(\.word)
         guard let word = choices.first else { return }
+        let previous = precedingChoices(in: proxy).first?.word
         forget()
         let prefix = proxy.documentContextBeforeInput?.last.map {
             $0.isWhitespace || WordInput.opensWord($0) ? "" : " "
         } ?? ""
+        if let replacement = prediction.previous, let previous, let before = proxy.documentContextBeforeInput {
+            let separator = before.last == " " ? " " : ""
+            if before.hasSuffix(previous + separator) {
+                let original = previous + separator
+                let inserted = replacement + separator
+                replaceSuffix(original, with: inserted, in: proxy)
+                swipeUndo = (inserted + prefix + word, original)
+            }
+        }
         proxy.insertText(prefix + word)
         if let caret = Caret(proxy), caret.before.hasSuffix(prefix + word) {
             swipeEdit = (caret, choices, prefix)
+            precedingSwipe = (caret, ranked)
         }
     }
 
     func forget() {
+        precedingSwipe = nil
+        swipeUndo = nil
         swipeEdit = nil
         held = nil
         trail = TapTrail()
@@ -92,10 +138,14 @@ final class Typist {
 
     func choose(_ input: WordInput, _ candidate: String, in proxy: UITextDocumentProxy) {
         if let edit = swipeEdit, edit.caret == Caret(proxy), edit.candidates.contains(candidate) {
+            let undo = swipeUndo
             forget()
             replaceSuffix(input.word, with: candidate, in: proxy)
             if let caret = Caret(proxy), caret.before.hasSuffix(edit.prefix + candidate) {
                 swipeEdit = (caret, [candidate], edit.prefix)
+                if let undo, undo.inserted.hasSuffix(input.word) {
+                    swipeUndo = (String(undo.inserted.dropLast(input.word.count)) + candidate, undo.original)
+                }
             }
             return
         }
@@ -112,6 +162,7 @@ final class Typist {
         let caret = Caret(proxy)
         let priorTrail = caret != nil && caret == trail.end ? trail : TapTrail()
         let previousWord = held
+        let swipe = precedingSwipe
         let previousSpace = lastSpace
         let followsLetter = caret != nil && caret == lastLetter
         let punctuation = output.count == 1 && ".,!?;:".contains(output)
@@ -131,12 +182,21 @@ final class Typist {
            previousWord.end.before + input.word == caret.before {
             joint = reconsider?(previousWord, input, priorTrail, correction ?? input.word)
         }
+        var swipePrefix: String?
+        if let input, let swipe, let caret, let first = swipe.choices.first,
+           swipe.caret.before.hasSuffix(first.word + " "), swipe.caret.field == caret.field,
+           swipe.caret.after == caret.after, swipe.caret.before + input.word == caret.before,
+           let revised = reviseSwipe?(swipe.choices, correction ?? input.word) {
+            swipePrefix = first.word + " "
+            joint = revised + " " + (correction ?? input.word)
+        }
         if let input, let replacement = joint ?? correction {
-            let prefix = joint == nil ? "" : (previousWord!.output + " ")
+            let prefix = swipePrefix ?? (joint == nil ? "" : previousWord!.output + " ")
             let inserted = replacement + output
             replaceSuffix(prefix + input.word, with: inserted, in: proxy)
             if let end = Caret(proxy), end.before.hasSuffix(inserted) {
-                let original = joint == nil ? input.word : previousWord!.input.word + " " + input.word
+                let originalPrefix = swipePrefix ?? (joint == nil ? "" : previousWord!.input.word + " ")
+                let original = originalPrefix + input.word
                 if replacement != original { lastCorrection = (end, inserted, original) }
             }
         } else {
@@ -150,6 +210,7 @@ final class Typist {
         if let letter = output.first, output.count == 1, WordInput.wordCharacter(letter),
            let start = caret, let end = Caret(proxy), start.field == end.field, start.after == end.after,
            end.before == start.before + output {
+            precedingSwipe = swipe
             held = previousWord
             trail = priorTrail
             trail.taps.append(Tap(typed: Character(output.lowercased()), shifted: letter.isUppercase, point: point))
@@ -161,13 +222,22 @@ final class Typist {
         } else if output == " ", let prior = caret?.before.last, prior.isLetter || prior.isNumber,
                   let end = Caret(proxy), end.before.last == " " {
             lastSpace = (now, end)
+            if let swipe, swipe.caret == caret, end.before == swipe.caret.before + " ",
+               end.after == swipe.caret.after, end.field == swipe.caret.field {
+                precedingSwipe = (end, swipe.choices)
+            }
         }
     }
 
     func delete(in proxy: UITextDocumentProxy) {
         if let edit = swipeEdit, edit.caret == Caret(proxy) {
+            let undo = swipeUndo
             forget()
-            replaceSuffix(edit.prefix + edit.candidates[0], with: "", in: proxy)
+            if let undo, edit.caret.before.hasSuffix(undo.inserted) {
+                replaceSuffix(undo.inserted, with: undo.original, in: proxy)
+            } else {
+                replaceSuffix(edit.prefix + edit.candidates[0], with: "", in: proxy)
+            }
             return
         }
         let prior = trail

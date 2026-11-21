@@ -66,6 +66,7 @@ final class KeyboardViewController: UIInputViewController {
             else { return nil }
             return (prior, self.completions.vocabulary.spread)
         }
+        typist.reviseSwipe = completions.vocabulary.reviseSwipe
         typist.reconsider = { [completions, keys] in completions.vocabulary.reconsider($0, input: $1, trail: $2, chosen: $3, layout: keys.keyLayout) }
         typist.committed = { [completions, keys] in completions.vocabulary.learn($0, chosen: $1, layout: keys.keyLayout) }
         layout()
@@ -675,7 +676,7 @@ final class KeyboardViewController: UIInputViewController {
             guard let self, self.isActive, self.keys.isUserInteractionEnabled else { return }
             self.prepareForManualEdit()
             let words = self.completions.vocabulary.swipe(samples, layout: self.keys.keyLayout,
-                before: self.textDocumentProxy.documentContextBeforeInput ?? "")
+                before: self.textDocumentProxy.documentContextBeforeInput ?? "", previousChoices: self.typist.precedingChoices(in: self.textDocumentProxy))
             self.typist.insertSwipe(words, uppercase: upper, locked: locked, in: self.textDocumentProxy)
             self.rememberEditedField()
             self.updateTypingContext()

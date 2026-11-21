@@ -147,12 +147,57 @@ final class TypingVocabulary {
         }
     }
 
-    func swipe(_ samples: [SwipeSample], layout: KeyLayout, before: String) -> [String] {
+    func swipe(_ samples: [SwipeSample], layout: KeyLayout, before: String,
+               previousChoices: [SwipeChoice] = []) -> SwipePrediction {
+        let decoder = SwipeDecoder(samples: samples, layout: layout)
+        let usual = rankedSwipe(decoder, before: before)
+        var prediction = SwipePrediction(words: usual, previous: nil)
+        let trimmed = before.last == " " ? String(before.dropLast()) : before
+        guard let first = previousChoices.first, trimmed.hasSuffix(first.word),
+              let current = usual.first, canReviseSwipe(first.word) else { return prediction }
+        let prefix = trimmed.dropLast(first.word.count)
+        var best = first.score + current.score + 0.8
+        for alternative in previousChoices.dropFirst() {
+            let next = rankedSwipe(decoder, before: prefix + alternative.word)
+            guard let score = next.first?.score else { continue }
+            let joint = alternative.score + score
+            if joint > best {
+                best = joint
+                prediction = SwipePrediction(words: next, previous: alternative.word)
+            }
+        }
+        return prediction
+    }
+
+    private func canReviseSwipe(_ word: String) -> Bool {
+        !protectedWords.contains(word.lowercased()) && shortcuts[word.lowercased()] == nil
+    }
+
+    func reviseSwipe(_ choices: [SwipeChoice], followedBy next: String) -> String? {
+        guard let first = choices.first, canReviseSwipe(first.word) else { return nil }
+        func likelihood(_ word: String) -> Double {
+            let previous = word.lowercased().replacingOccurrences(of: "’", with: "'")
+            let following = next.lowercased().replacingOccurrences(of: "’", with: "'")
+            return languages.compactMap { language -> Double? in
+                guard let lex = tables[language.code], let id = lex.node(following).flatMap(lex.terminal)
+                else { return nil }
+                return lex.logProbability(id, after: lex.node(previous).flatMap(lex.terminal))
+            }.max() ?? 0
+        }
+        var best = first.score + likelihood(first.word) + 0.8
+        var replacement: String?
+        for alternative in choices.dropFirst() {
+            let score = alternative.score + likelihood(alternative.word)
+            if score > best { best = score; replacement = alternative.word }
+        }
+        return replacement
+    }
+
+    private func rankedSwipe(_ decoder: SwipeDecoder, before: String) -> [SwipeChoice] {
         let sentence = before.suffix(128).reversed().prefix { !$0.isNewline && !".!?".contains($0) }.reversed()
         let previous = sentence.split { !WordInput.wordCharacter($0) }.suffix(4).map {
             String($0).lowercased().replacingOccurrences(of: "’", with: "'")
         }
-        let decoder = SwipeDecoder(samples: samples, layout: layout)
         let weights = languageWeights(previous)
         var scores = [String: Double]()
         for (i, language) in languages.enumerated() {
@@ -164,7 +209,7 @@ final class TypingVocabulary {
         }
         return scores.keys.sorted {
             scores[$0] == scores[$1] ? $0 < $1 : scores[$0]! > scores[$1]!
-        }.prefix(3).map { $0 }
+        }.prefix(3).map { SwipeChoice(word: $0, score: scores[$0]!) }
     }
 
     func reconsider(_ held: Typist.HeldWord, input: WordInput, trail: TapTrail, chosen: String, layout: KeyLayout) -> String? {

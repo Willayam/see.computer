@@ -47,6 +47,7 @@ private final class Pipeline {
             else { return nil }
             return (prior, self.vocabulary.spread)
         }
+        typist.reviseSwipe = vocabulary.reviseSwipe
         typist.reconsider = { [vocabulary, keys] in vocabulary.reconsider($0, input: $1, trail: $2, chosen: $3, layout: keys.keyLayout) }
         typist.committed = { [vocabulary, keys] in vocabulary.learn($0, chosen: $1, layout: keys.keyLayout) }
         keys.startDelete = { [unowned self] in self.typist.delete(in: self.field); self.keys.updateCase(for: self.field) }
@@ -66,8 +67,8 @@ private final class Pipeline {
                 }.min { $0.1 < $1.1 }!.0
                 return Lexicon.alphabet[letter]
             }
-            let words = endpoints ? [String([nearest(samples.first!.point), nearest(samples.last!.point)])] :
-                self.vocabulary.swipe(samples, layout: layout, before: self.field.text)
+            let words = endpoints ? SwipePrediction([String([nearest(samples.first!.point), nearest(samples.last!.point)])]) :
+                self.vocabulary.swipe(samples, layout: layout, before: self.field.text, previousChoices: self.typist.precedingChoices(in: self.field))
             self.swipeNanos.append(DispatchTime.now().uptimeNanoseconds - start)
             self.typist.insertSwipe(words, uppercase: upper, locked: locked, in: self.field)
             self.keys.updateCase(for: self.field)
@@ -90,6 +91,24 @@ private final class Pipeline {
         precondition(typist.swipeChoices(in: field) == nil)
         typist.delete(in: field)
         precondition(field.text == "(Hallo again")
+        newField()
+        typist.insertSwipe(["on", "in"], uppercase: false, locked: false, in: field)
+        let revision = SwipePrediction(words: [SwipeChoice(word: "town", score: 0)], previous: "in")
+        typist.insertSwipe(revision, uppercase: false, locked: false, in: field)
+        precondition(field.text == "in town")
+        typist.delete(in: field)
+        precondition(field.text == "on")
+        newField()
+        typist.insertSwipe(["on", "in"], uppercase: false, locked: false, in: field)
+        typist.type(" ", at: nil, in: field)
+        let saved = typist.reviseSwipe
+        typist.reviseSwipe = { _, _ in "in" }
+        for letter in "town" { typist.type(String(letter), at: nil, in: field) }
+        typist.type(" ", at: nil, in: field)
+        precondition(field.text == "in town ")
+        typist.delete(in: field)
+        precondition(field.text == "on town")
+        typist.reviseSwipe = saved
         newField()
     }
 
