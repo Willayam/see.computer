@@ -1,13 +1,13 @@
 import UIKit
+import simd
 
 /// Types held-out sentences on the real keyboard views with simulated finger noise
 /// and scores the words that end up in the field.
 @MainActor
-final class SimField: NSObject, UITextDocumentProxy {
+private final class Field: NSObject, UITextDocumentProxy {
     var text = ""
     var documentContextBeforeInput: String? { text }
-    var following: String?
-    var documentContextAfterInput: String? { following }
+    var documentContextAfterInput: String? { nil }
     var selectedText: String? { nil }
     var documentInputMode: UITextInputMode? { nil }
     let documentIdentifier = UUID()
@@ -29,7 +29,7 @@ final class SimField: NSObject, UITextDocumentProxy {
 private final class Pipeline {
     let keys = TypingKeys()
     let vocabulary = TypingVocabulary()
-    private(set) var field = SimField()
+    private(set) var field = Field()
     private var typist: Typist!
     var swipeNanos: [UInt64] = []
     var tenLetterNanos: [UInt64] = []
@@ -42,19 +42,18 @@ private final class Pipeline {
         vocabulary.configure(languages, dictionaries: UITextChecker.availableLanguages)
         await withCheckedContinuation { continuation in vocabulary.load { continuation.resume() } }
         typist = Typist { [vocabulary, keys] in vocabulary.suggestions(for: $0, trail: $1, layout: keys.keyLayout) }
-        keys.keyPrior = { [weak self] layout in
+        keys.keyPrior = { [weak self] in
             guard let self, let input = WordInput(self.field), self.typist.trail.end == Caret(self.field),
-                  let prior = self.vocabulary.keyPrior(for: input, trail: self.typist.trail, layout: layout)
+                  let prior = self.vocabulary.keyPrior(for: input, trail: self.typist.trail, layout: self.keys.keyLayout)
             else { return nil }
-            return (prior, self.vocabulary.spread, self.vocabulary.offsets(for: layout))
+            return (prior, self.vocabulary.spread)
         }
         typist.reviseSwipe = vocabulary.reviseSwipe
         typist.reconsider = { [vocabulary, keys] in vocabulary.reconsider($0, input: $1, trail: $2, chosen: $3, layout: keys.keyLayout) }
-        typist.editedInsideWord = vocabulary.observeEditInsideWord
-        typist.committed = { [vocabulary, keys] in vocabulary.learn($0, trail: $1, chosen: $2, picked: $3, layout: keys.keyLayout) }
+        typist.committed = { [vocabulary, keys] in vocabulary.learn($0, chosen: $1, layout: keys.keyLayout) }
         keys.startDelete = { [unowned self] in self.typist.delete(in: self.field); self.keys.updateCase(for: self.field) }
         keys.insert = { [unowned self] output, point in
-            self.typist.type(output, at: point, in: self.field, layout: self.keys.keyLayout)
+            self.typist.type(output, at: point, in: self.field)
             self.keys.updateCase(for: self.field)
         }
     }
@@ -121,7 +120,7 @@ private final class Pipeline {
     }
 
     func newField() {
-        field = SimField()
+        field = Field()
         typist.forget()
         keys.reset()
         keys.updateCase(for: field)
@@ -133,6 +132,15 @@ private final class Pipeline {
         keys.tap(at: point)
         keys.layoutIfNeeded()
     }
+
+    /// Rank the committed swipe or the literal text from a tap fallback.
+    func gestureChoices(before: String) -> [String] {
+        if let choices = typist.swipeChoices(in: field) { return Array(choices.prefix(3)) }
+        guard field.text.hasPrefix(before) else { return [] }
+        return [String(field.text.dropFirst(before.count)).trimmingCharacters(in: .whitespaces)]
+    }
+
+    var traceOutput: FileHandle?
 
     /// What the suggestion row offers after the latest keystroke.
     func suggestions() -> [String] {
@@ -316,7 +324,27 @@ private func type(_ sentence: String, on pipeline: Pipeline, level: Level, seed:
             return SwipeSample(point: point, time: Double(i)/hz)
         }
         let oldCount = pipeline.swipeNanos.count
+        let before = pipeline.field.text
+        let exportLayout = pipeline.traceOutput.map { _ in keys.keyLayout }
         keys.swipe(samples)
+        if let file = pipeline.traceOutput, let layout = exportLayout {
+            // Normalize the three letter rows to the encoder's unit square.
+            let present = layout.centers.compactMap { $0 }
+            let top = present.map(\.y).min()!, bottom = present.map(\.y).max()!
+            let row = (bottom - top) / 2
+            func xy(_ p: CGPoint) -> [Double] {
+                [p.x / keys.bounds.width, (p.y - top + row / 2) / (3 * row)]
+            }
+            var centers = [String: [Double]]()
+            for (i, point) in layout.centers.enumerated() {
+                if let point { centers[String(Lexicon.alphabet[i])] = xy(point) }
+            }
+            let trace: [String: Any] = ["word": String(letters), "before": before, "level": level.name, "sentenceID": seed,
+                "centers": centers, "points": samples.map { xy($0.point) + [$0.time * 1000] },
+                "baseline": pipeline.gestureChoices(before: before)]
+            file.write(try! JSONSerialization.data(withJSONObject: trace))
+            file.write(Data([10]))
+        }
         if letters.count == 10 && pipeline.swipeNanos.count > oldCount {
             pipeline.tenLetterNanos.append(pipeline.swipeNanos.last!)
         }
@@ -370,58 +398,72 @@ private func type(_ sentence: String, on pipeline: Pipeline, level: Level, seed:
     return true
 }
 
-private struct ReplaySentence: Decodable {
-    let person, id: String
-    let words: [String]
-    let taps: [[[Double]]]
-    let spaces: [[Double]?]
+private struct FutoLayout: Decodable {
+    struct Key: Decodable { let letter: String; let cx, cy: Double }
+    let keys: [Key]
+}
+
+private struct RealSwipe: Decodable {
+    struct Point: Decodable { let x, y, t: Double }
+    let id, word_idx: Int
+    let word, sentence: String
+    let data: [Point]
 }
 
 @MainActor
-private func replay(_ path: String, out: String, languages: TypingLanguages, size: CGSize, observedSpaces: Bool) async throws {
-    let data = try Data(contentsOf: URL(fileURLWithPath: path))
-    let sentences = try JSONDecoder().decode([ReplaySentence].self, from: data)
-    let lexicons = (languages == .english ? ["en"] : ["en", "sv"]).compactMap(Lexicon.init(language:))
-    var rows = [[String: Any]]()
-    var person: String?
-    var pipeline: Pipeline!
-    for sentence in sentences {
-        if person != sentence.person {
-            pipeline = await Pipeline(languages: languages, size: size)
-            person = sentence.person
-        }
-        pipeline.newField()
-        let bar = pipeline.keys.frame(of: "Space")!
-        var choices = [[String]]()
-        var beforeSpace = [String]()
-        var insertedSpace = [Bool]()
-        var commits = [String]()
-        precondition(sentence.words.count == sentence.taps.count && sentence.words.count == sentence.spaces.count)
-        for (index, taps) in sentence.taps.enumerated() {
-            let before = pipeline.field.text
-            for point in taps { pipeline.tap(at: CGPoint(x: point[0], y: point[1])) }
-            let typed = pipeline.field.text
-            beforeSpace.append(typed.hasPrefix(before) ? String(typed.dropFirst(before.count)) : (tokens(typed).last ?? ""))
-            choices.append(Array(pipeline.suggestions().prefix(3)))
-            if observedSpaces, let space = sentence.spaces[index] {
-                pipeline.tap(at: CGPoint(x: space[0], y: space[1]))
-            } else {
-                pipeline.tap(at: CGPoint(x: bar.midX, y: bar.midY))
-            }
-            let after = pipeline.field.text
-            insertedSpace.append(after.last?.isWhitespace == true && after != typed)
-            commits.append(after.hasPrefix(before) ? String(after.dropFirst(before.count)) : (tokens(after).last ?? ""))
-        }
-        let known = sentence.words.map { word in lexicons.contains { $0.node(word).flatMap($0.terminal) != nil } }
-        rows.append(["known": known, "id": sentence.id, "bars": choices, "commits": commits, "text": pipeline.field.text,
-                     "beforeSpace": beforeSpace, "insertedSpace": insertedSpace])
+private func replay(_ input: String, layout: String, output: String, pipeline: Pipeline) throws {
+    let decoder = JSONDecoder()
+    let source = try decoder.decode(FutoLayout.self, from: Data(contentsOf: URL(fileURLWithPath: layout)))
+    // Solve the two least-squares systems for target x and y.
+    var gram = simd_double3x3()
+    var sx = SIMD3<Double>.zero, sy = SIMD3<Double>.zero
+    let centers = pipeline.keys.keyLayout.centers
+    for key in source.keys {
+        guard let c = key.letter.first, let i = Lexicon.codes[c], let point = centers[i] else { continue }
+        let p = SIMD3(key.cx, key.cy, 1)
+        gram += simd_double3x3(columns: (p * p.x, p * p.y, p))
+        sx += p * point.x
+        sy += p * point.y
     }
-    try JSONSerialization.data(withJSONObject: rows).write(to: URL(fileURLWithPath: out))
+    guard abs(gram.determinant) > 1e-8 else { throw CocoaError(.fileReadCorruptFile) }
+    let ax = gram.inverse * sx, ay = gram.inverse * sy
+    var rows = ["id\tword\ttop1\ttop2\ttop3"]
+    let inputText = try Data(contentsOf: URL(fileURLWithPath: input), options: .mappedIfSafe)
+    for line in inputText.split(separator: UInt8(10)) {
+        let record = try decoder.decode(RealSwipe.self, from: line)
+        let context = record.sentence.split(whereSeparator: \.isWhitespace).prefix(record.word_idx).joined(separator: " ")
+        pipeline.newField()
+        let before = context.isEmpty ? "" : context + " "
+        pipeline.field.text = before
+        pipeline.keys.updateCase(for: pipeline.field)
+        pipeline.keys.layoutIfNeeded()
+        let samples = record.data.map {
+            let p = SIMD3($0.x, $0.y, 1)
+            return SwipeSample(point: CGPoint(x: simd_dot(ax, p), y: simd_dot(ay, p)), time: ($0.t - record.data[0].t)/1000)
+        }
+        if rows.count <= 8 {
+            let nearest = [samples.first, samples.last].compactMap { sample -> Character? in
+                guard let point = sample?.point else { return nil }
+                let i = centers.indices.min {
+                    func distance(_ i: Int) -> Double {
+                        centers[i].map { hypot($0.x-point.x, $0.y-point.y) } ?? .infinity
+                    }
+                    return distance($0) < distance($1)
+                }!
+                return Lexicon.alphabet[i]
+            }
+            print("trace", record.word, String(nearest))
+        }
+        pipeline.keys.swipe(samples)
+        let choices = pipeline.gestureChoices(before: before)
+        rows.append(([String(record.id), record.word] + choices).joined(separator: "\t"))
+    }
+    try rows.joined(separator: "\n").write(toFile: output, atomically: true, encoding: .utf8)
 }
 
 @main
 enum TypingSim {
-    @MainActor static func main() async throws {
+    @MainActor static func main() async {
         let arguments = CommandLine.arguments
         func option(_ name: String) -> String? {
             arguments.firstIndex(of: name).flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
@@ -430,7 +472,6 @@ enum TypingSim {
             print("usage: TypingSim --corpus <dir> [--set dev|test] [--languages bilingual|english] [--out <tsv>]")
             exit(2)
         }
-        if let path = option("--typing-log") { try await replayPhone(path); return }
         let swipe = option("--mode") == "swipe"
         let gesture = option("--gesture") ?? "curved"
         guard ["straight", "curved"].contains(gesture) else { exit(2) }
@@ -440,21 +481,6 @@ enum TypingSim {
         let languages: TypingLanguages = mode == "english" ? .english : .bilingual
         let files = mode == "english" ? ["en"] : ["en", "sv"]
         let size = CGSize(width: 394, height: 210)
-        if let path = option("--replay"), let out = option("--out") {
-            try await replay(path, out: out, languages: languages, size: size, observedSpaces: arguments.contains("--observed-spaces"))
-            return
-        }
-        if let path = option("--layout") {
-            let pipeline = await Pipeline(languages: languages, size: size)
-            var frames = [String: [Double]]()
-            for key in Lexicon.alphabet.map(String.init) + ["Space"] {
-                if let rect = pipeline.keys.frame(of: key) {
-                    frames[key] = [rect.midX, rect.midY, rect.width, rect.height]
-                }
-            }
-            try JSONEncoder().encode(frames).write(to: URL(fileURLWithPath: path))
-            return
-        }
         let levels = [
             Level(name: "clean", spread: 0, slip: 0),
             Level(name: "steady", spread: 0.2, slip: 0.005),
@@ -462,6 +488,13 @@ enum TypingSim {
         ]
         let chosen = option("--level").map { name in levels.filter { $0.name == name } } ?? levels
         let pipeline = await Pipeline(languages: languages, size: size)
+        if option("--mode") == "real-swipe" {
+            guard let input = option("--input"), let layout = option("--layout"), let out = option("--out") else { exit(2) }
+            pipeline.configureSwipe(endpoints: false)
+            do { try replay(input, layout: layout, output: out, pipeline: pipeline) }
+            catch { print(error); exit(1) }
+            return
+        }
         if swipe {
             pipeline.checkSwipeEdits()
             pipeline.configureSwipe(endpoints: arguments.contains("--endpoints"))
@@ -473,6 +506,14 @@ enum TypingSim {
             var tally = Tally()
             pipeline.suggestionNanos.removeAll()
             for language in files {
+                if let path = option("--export-sv"), language == "sv" {
+                    guard FileManager.default.createFile(atPath: path, contents: nil),
+                          let output = FileHandle(forWritingAtPath: path) else {
+                        print("Could not open trace output at \(path)")
+                        exit(1)
+                    }
+                    pipeline.traceOutput = output
+                } else { pipeline.traceOutput = nil }
                 let path = "\(corpus)/\(set)-\(language).txt"
                 guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
                     print("missing \(path)")
