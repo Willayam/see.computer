@@ -159,6 +159,14 @@ final class Typist {
     }
 
     func type(_ output: String, at point: CGPoint?, in proxy: UITextDocumentProxy) {
+        if output.count == 1, output.first?.isLetter == true, swipeChoices(in: proxy) != nil {
+            let swipe = precedingSwipe
+            proxy.insertText(" ")
+            if let swipe, let end = Caret(proxy), end.field == swipe.caret.field,
+               end.after == swipe.caret.after, end.before == swipe.caret.before + " " {
+                precedingSwipe = (end, swipe.choices)
+            }
+        }
         let caret = Caret(proxy)
         let priorTrail = caret != nil && caret == trail.end ? trail : TapTrail()
         let previousWord = held

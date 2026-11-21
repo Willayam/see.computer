@@ -100,7 +100,6 @@ private final class Pipeline {
         precondition(field.text == "on")
         newField()
         typist.insertSwipe(["on", "in"], uppercase: false, locked: false, in: field)
-        typist.type(" ", at: nil, in: field)
         let saved = typist.reviseSwipe
         typist.reviseSwipe = { _, _ in "in" }
         for letter in "town" { typist.type(String(letter), at: nil, in: field) }
@@ -109,6 +108,10 @@ private final class Pipeline {
         typist.delete(in: field)
         precondition(field.text == "on town")
         typist.reviseSwipe = saved
+        newField()
+        typist.insertSwipe(["word"], uppercase: false, locked: false, in: field)
+        typist.type(".", at: nil, in: field)
+        precondition(field.text == "word.")
         newField()
     }
 
