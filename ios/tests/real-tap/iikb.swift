@@ -26,14 +26,16 @@ struct Sentence: Decodable {
     let letters =
       swedish ? ["qwertyuiopå", "asdfghjklöä", "zxcvbnm"] : ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
     let labels = letters.map { $0.map(String.init) } + [["Space"]]
+    let columns = Double(letters[0].count)
+    let pitch = 394 / columns
     let rows: [[RowItem]] = labels.map { row in
       var items = [RowItem]()
       var edge = 0.0
       for k in row {
         let f = frames[k]!
         let left = f[0] - f[2] / 2
-        if left - edge > 0.01 { items.append(.spacer(.pitch(left - edge))) }
-        items.append(.key(Key(k == "Space" ? .space : .character(k), width: .pitch(f[2]))))
+        if left - edge > 0.01 { items.append(.spacer(.pitch((left - edge) / pitch))) }
+        items.append(.key(Key(k == "Space" ? .space : .character(k), width: .pitch(f[2] / pitch))))
         edge = left + f[2]
       }
       return items
@@ -41,8 +43,16 @@ struct Sentence: Decodable {
     let grid = KeyGrid(
       KeyboardLayout(rows: rows), width: 394,
       metrics: GridMetrics(
-        columns: 394, sideInset: 0, keyGap: 0, rowGap: 0, keyHeight: 52.5, numberRowHeight: 52.5,
+        columns: columns, sideInset: 0, keyGap: 0, rowGap: 0, keyHeight: 52.5, numberRowHeight: 52.5,
         topInset: 0))
+    for (label, expected) in frames {
+      let frame = grid.frame(of: label == "Space" ? " " : label)!
+      precondition(abs(frame.midX - expected[0]) < 0.25 && abs(frame.midY - expected[1]) < 0.25)
+      precondition(abs(frame.width - expected[2]) < 0.25 && abs(frame.height - expected[3]) < 0.25)
+    }
+    let q = frames["q"]!
+    precondition(grid.reaches("q", x: q[0] + 0.65 * pitch, y: q[1]))
+    precondition(!grid.reaches("q", x: q[0] + 0.85 * pitch, y: q[1]))
     let source =
       swedish ? Lexicon(bytes: Bytes.mapped(URL(fileURLWithPath: args[4]))!)! : Lexicon.english
     var corrector: Corrector!

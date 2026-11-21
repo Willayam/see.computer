@@ -174,3 +174,25 @@ diff = [
     for s, e in zip(tsi, errors["iikb-free"])
 ]
 print("TSI observed reset minus learned", rate(diff, den))
+for filename, label in [
+    ("verified-no-space", "Retrospective repair disabled"),
+    ("iikb-free-reset", "Touch history cleared"),
+]:
+    by_id = {r["id"]: r for r in read(filename)}
+    d = [edits(s["words"], clean(by_id[s["id"]]["text"])) for s in tsi]
+    print(
+        label,
+        sum(d),
+        "WER",
+        rate(d, den),
+        "minus full",
+        rate(np.subtract(d, errors["iikb-free"]), den),
+    )
+people = sorted({s["person"] for s in tsi})
+groups = np.zeros((len(people), 2), dtype=int)
+for s, a, b, n in zip(tsi, errors["free"], errors["iikb-free"], den, strict=True):
+    groups[people.index(s["person"])] += (a - b, n)
+weights = np.random.default_rng(20261121).multinomial(
+    len(people), [1 / len(people)] * len(people), size=4000
+)
+print("see minus iikb observed, participant bootstrap", rate(*groups.T))

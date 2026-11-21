@@ -40,3 +40,20 @@ runner="$(swift build -c release --show-bin-path)/Race"
 "$runner" "$out/bilingual.json" "$out/sv.json" "$out/iikb-sv.json" "$out/sv.lexicon"
 "$runner" "$out/english.json" "$out/tsi.json" "$out/iikb-free.json" --observed-spaces
 "$runner" "$out/english.json" "$out/tsi.json" "$out/iikb-free-reset.json" --observed-spaces --reset-touches
+# Build the boundary-repair ablation from a private copy of the same donor sources.
+rm "$package/Sources/KeyboardCore"
+cp -R "$iikb/Packages/KeyboardModules/Sources/KeyboardCore" "$package/Sources/KeyboardCore"
+python3 - <<'PY'
+from pathlib import Path
+p = Path("Sources/KeyboardCore/Correction/Corrector.swift")
+code = p.read_text()
+for method in [
+    "func missedSpaces(_ typed: TypedWord, context: String? = nil) -> (words: String, odds: Double)? {",
+    "func spaced(_ run: TypedWord, context: String, correcting: Bool) -> String? {",
+]:
+    assert code.count(method) == 1
+    code = code.replace(method, method + "\n        return nil")
+p.write_text(code)
+PY
+swift build -c release
+"$runner" "$out/english.json" "$out/tsi.json" "$out/verified-no-space.json" --observed-spaces
