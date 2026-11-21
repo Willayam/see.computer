@@ -677,15 +677,18 @@ final class KeyboardViewController: UIInputViewController {
             guard let self else { return false }
             return WordInput.allowsCorrection(in: self.textDocumentProxy)
         }
-        keys.onSwipe = { [weak self] samples, upper, locked in
-            guard let self, self.isActive, self.keys.isUserInteractionEnabled else { return }
+        keys.onSwipe = { [weak self] samples, upper, locked, shortWord in
+            guard let self, self.isActive, self.keys.isUserInteractionEnabled else { return false }
             self.prepareForManualEdit()
-            guard WordInput.allowsCorrection(in: self.textDocumentProxy) else { return }
+            guard WordInput.allowsCorrection(in: self.textDocumentProxy) else { return false }
+            if shortWord != nil && !self.typist.startsSwipeWord(in: self.textDocumentProxy) { return false }
             let words = self.completions.vocabulary.swipe(samples, layout: self.keys.keyLayout,
                 before: self.textDocumentProxy.documentContextBeforeInput ?? "", previousChoices: self.typist.precedingChoices(in: self.textDocumentProxy))
+            if let shortWord, words.words.first?.word.lowercased() != shortWord { return false }
             self.typist.insertSwipe(words, uppercase: upper, locked: locked, in: self.textDocumentProxy)
             self.rememberEditedField()
             self.updateTypingContext()
+            return true
         }
         keys.insert = { [weak self] in self?.typed($0, at: $1) }
         keys.startDelete = { [weak self] in self?.deleteDown() }

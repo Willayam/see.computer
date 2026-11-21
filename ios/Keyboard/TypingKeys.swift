@@ -24,7 +24,7 @@ final class TypingKeys: UIStackView {
 
     var keyPrior: (() -> (probabilities: [Double], spread: Double)?)?
     var allowsSwipe: () -> Bool = { true }
-    var onSwipe: (([SwipeSample], Bool, Bool) -> Void)?
+    var onSwipe: (([SwipeSample], Bool, Bool, String?) -> Bool)?
 
     private weak var activeSwipe: Key?
     private var pendingReleases: [(origin: Key, key: Key, point: CGPoint)] = []
@@ -67,7 +67,15 @@ final class TypingKeys: UIStackView {
 
     func finishSwipe(_ samples: [SwipeSample]) {
         lastShift = .distantPast
-        onSwipe?(samples, uppercase, capsLock)
+        _ = onSwipe?(samples, uppercase, capsLock, nil)
+    }
+
+    func finishShortSwipe(_ samples: [SwipeSample], from origin: Key) -> Bool {
+        guard canSwipe(from: origin), let point = samples.last?.point,
+              let end = releaseKey(at: point), end !== origin, letterKeys.contains(end) else { return false }
+        guard onSwipe?(samples, uppercase, capsLock, origin.output + end.output) == true else { return false }
+        lastShift = .distantPast
+        return true
     }
 
     /// Replay the same start-key and travel checks used by touch delivery.
@@ -79,6 +87,8 @@ final class TypingKeys: UIStackView {
             travel.isWordGesture(at: $1.point, previous: $0.point, from: origin, on: self)
         }) {
             finishSwipe(samples)
+        } else if finishShortSwipe(samples, from: origin) {
+            return
         } else if resolvesAtRelease(origin) {
             let lastKey = samples.reversed().lazy.compactMap { self.releaseKey(at: $0.point) }.first
             release(from: origin, last: lastKey ?? origin, at: last.point)

@@ -58,7 +58,8 @@ private final class Pipeline {
     }
 
     func configureSwipe(endpoints: Bool) {
-        keys.onSwipe = { [unowned self] samples, upper, locked in
+        keys.onSwipe = { [unowned self] samples, upper, locked, shortWord in
+            if shortWord != nil && !self.typist.startsSwipeWord(in: self.field) { return false }
             let start = DispatchTime.now().uptimeNanoseconds
             let layout = self.keys.keyLayout
             func nearest(_ point: CGPoint) -> Character {
@@ -70,8 +71,10 @@ private final class Pipeline {
             let words = endpoints ? SwipePrediction([String([nearest(samples.first!.point), nearest(samples.last!.point)])]) :
                 self.vocabulary.swipe(samples, layout: layout, before: self.field.text, previousChoices: self.typist.precedingChoices(in: self.field))
             self.swipeNanos.append(DispatchTime.now().uptimeNanoseconds - start)
+            if let shortWord, words.words.first?.word.lowercased() != shortWord { return false }
             self.typist.insertSwipe(words, uppercase: upper, locked: locked, in: self.field)
             self.keys.updateCase(for: self.field)
+            return true
         }
     }
 

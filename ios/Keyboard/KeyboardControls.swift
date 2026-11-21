@@ -195,6 +195,10 @@ final class Key: UIControl {
                 keyboard.finishSwipe(stroke)
                 return
             }
+            if keyboard.finishShortSwipe(stroke, from: self) {
+                finishHighlight()
+                return
+            }
         }
         let last = trackedKey
         finishHighlight()

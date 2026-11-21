@@ -96,6 +96,10 @@ final class Typist {
         return prior.choices
     }
 
+    func startsSwipeWord(in proxy: UITextDocumentProxy) -> Bool {
+        swipeChoices(in: proxy) != nil || proxy.documentContextBeforeInput?.last?.isLetter != true
+    }
+
     func swipeChoices(in proxy: UITextDocumentProxy) -> [String]? {
         guard let edit = swipeEdit, edit.caret == Caret(proxy) else { return nil }
         return edit.candidates
