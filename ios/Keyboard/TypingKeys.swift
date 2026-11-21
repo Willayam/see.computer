@@ -236,7 +236,7 @@ final class TypingKeys: UIStackView {
             if $0 === deleteKey { return point.x <= f.minX + 8 }
             return false
         }
-        guard !nearby.isEmpty, let prior = keyPrior?() else { return key }
+        guard isLetter || !nearby.isEmpty, let prior = keyPrior?() else { return key }
         let layout = keyLayout
         let sigma = prior.spread * layout.pitch
         let scale = 0.5 / (sigma * sigma)
