@@ -161,6 +161,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func updateTypingContext() {
+        typist.checkSwipePosition(in: textDocumentProxy)
         keys.updateCase(for: textDocumentProxy)
         completions.update(for: textDocumentProxy, trail: typist.trail, layout: keys.keyLayout, canCorrect: typist.canCorrect(textDocumentProxy), swipeChoices: typist.swipeChoices(in: textDocumentProxy))
     }

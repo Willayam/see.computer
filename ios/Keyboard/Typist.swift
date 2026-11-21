@@ -126,6 +126,16 @@ final class Typist {
         }
     }
 
+    func checkSwipePosition(in proxy: UITextDocumentProxy) {
+        guard swipeEdit != nil || precedingSwipe != nil else { return }
+        let expected = trail.end ?? swipeEdit?.caret ?? precedingSwipe?.caret
+        if expected != Caret(proxy) {
+            precedingSwipe = nil
+            swipeUndo = nil
+            swipeEdit = nil
+        }
+    }
+
     func forget() {
         precedingSwipe = nil
         swipeUndo = nil
