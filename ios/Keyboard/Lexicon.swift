@@ -37,6 +37,7 @@ struct Lexicon {
     func terminal(_ n: Int) -> Int? {
         uint(nodes + n * 8) & (1 << 29) == 0 ? nil : uint(nodes + n * 8 + 4) & 0xfffff
     }
+    func mass(_ n: Int) -> Double { exp(-Double(uint(nodes + n * 8 + 4) >> 26) / 2) }
     func best(_ n: Int) -> Double { -Double(uint(nodes + n * 8 + 4) >> 20 & 63) / 2 }
 
     func node(_ word: String) -> Int? {

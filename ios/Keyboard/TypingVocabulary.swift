@@ -118,6 +118,22 @@ final class TypingVocabulary {
         }
     }
 
+    func keyPrior(for input: WordInput, trail: TapTrail, layout: KeyLayout) -> [Double]? {
+        guard !input.word.isEmpty, !trail.taps.isEmpty,
+              input.word.lowercased() == String(trail.taps.map(\.typed)),
+              input.word.lowercased().allSatisfy({ Lexicon.codes[$0] != nil }), shortcuts[input.word.lowercased()] == nil
+        else { return nil }
+        _ = suggestions(for: input, trail: trail, layout: layout)
+        var prior = Array(repeating: 0.0, count: 31)
+        for (i, lang) in languages.enumerated() {
+            decoders[lang.code]?.addPrior(to: &prior, weight: lastWeights[i])
+        }
+        let sum = prior.reduce(0, +)
+        return sum > 0 ? prior.map { $0 / sum } : nil
+    }
+
+    private var lastWeights: [Double] = []
+
     func suggestions(for input: WordInput) -> WordSuggestions {
         suggestions(for: input, trail: TapTrail(), layout: .standard(swedish: languages.contains { $0.code == "sv" }))
     }
@@ -167,6 +183,7 @@ final class TypingVocabulary {
             let p = 1 / (1 + exp(-max(-6, min(6, evidence))))
             weight = [log(p), log1p(-p)]
         }
+        lastWeights = weight
         for (index, language) in languages.enumerated() {
             guard let lex = tables[language.code] else { continue }
             let prev =

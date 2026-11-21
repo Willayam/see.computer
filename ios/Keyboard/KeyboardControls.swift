@@ -96,10 +96,54 @@ final class StartBar: UIControl {
 final class Key: UIControl {
     var releasePoint: CGPoint?
 
+    private weak var trackedKey: Key?
+    private var resolvesAtRelease = false
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if let keyboard = typingKeys, let touch = touches.first {
+            resolvesAtRelease = keyboard.resolvesAtRelease(self, at: touch.location(in: keyboard))
+        }
+        if resolvesAtRelease {
+            trackedKey = self
+            isHighlighted = true
+        } else {
+            super.touchesBegan(touches, with: event)
+        }
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard resolvesAtRelease, let keyboard = typingKeys, let touch = touches.first else {
+            super.touchesMoved(touches, with: event)
+            return
+        }
+        let next = keyboard.releaseKey(at: touch.location(in: keyboard))
+        if next !== trackedKey {
+            trackedKey?.isHighlighted = false
+            trackedKey = next
+            next?.isHighlighted = true
+        }
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if resolvesAtRelease { finishHighlight() } else { super.touchesCancelled(touches, with: event) }
+    }
+
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        releasePoint = touches.first?.location(in: self)
-        super.touchesEnded(touches, with: event)
-        releasePoint = nil
+        if resolvesAtRelease, let keyboard = typingKeys, let touch = touches.first {
+            finishHighlight()
+            let point = touch.location(in: keyboard)
+            if let key = keyboard.releaseKey(at: point) { keyboard.activate(key, at: point) }
+        } else {
+            releasePoint = touches.first?.location(in: self)
+            super.touchesEnded(touches, with: event)
+            releasePoint = nil
+        }
+    }
+
+    private func finishHighlight() {
+        trackedKey?.isHighlighted = false
+        trackedKey = nil
+        resolvesAtRelease = false
     }
 
     let output: String

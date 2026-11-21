@@ -60,6 +60,12 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        keys.keyPrior = { [weak self] in
+            guard let self, let input = WordInput(self.textDocumentProxy), self.typist.trail.end == Caret(self.textDocumentProxy),
+                  let prior = self.completions.vocabulary.keyPrior(for: input, trail: self.typist.trail, layout: self.keys.keyLayout)
+            else { return nil }
+            return (prior, self.completions.vocabulary.spread)
+        }
         typist.committed = { [completions, keys] in completions.vocabulary.learn($0, chosen: $1, layout: keys.keyLayout) }
         layout()
         requestSupplementaryLexicon { [weak self] lexicon in

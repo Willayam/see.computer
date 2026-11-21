@@ -39,7 +39,14 @@ private final class Pipeline {
         vocabulary.configure(languages, dictionaries: UITextChecker.availableLanguages)
         await withCheckedContinuation { continuation in vocabulary.load { continuation.resume() } }
         typist = Typist { [vocabulary, keys] in vocabulary.suggestions(for: $0, trail: $1, layout: keys.keyLayout) }
+        keys.keyPrior = { [weak self] in
+            guard let self, let input = WordInput(self.field), self.typist.trail.end == Caret(self.field),
+                  let prior = self.vocabulary.keyPrior(for: input, trail: self.typist.trail, layout: self.keys.keyLayout)
+            else { return nil }
+            return (prior, self.vocabulary.spread)
+        }
         typist.committed = { [vocabulary, keys] in vocabulary.learn($0, chosen: $1, layout: keys.keyLayout) }
+        keys.startDelete = { [unowned self] in self.typist.delete(in: self.field); self.keys.updateCase(for: self.field) }
         keys.insert = { [unowned self] output, point in
             self.typist.type(output, at: point, in: self.field)
             self.keys.updateCase(for: self.field)

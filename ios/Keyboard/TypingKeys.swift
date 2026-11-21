@@ -7,6 +7,8 @@ final class TypingKeys: UIStackView {
     private enum Page { case letters, numbers, symbols }
     private var page = Page.letters
     private var letterKeys: [Key] = []
+    private weak var spaceKey: Key?
+    private weak var deleteKey: Key?
     private var shiftKey: Key?
     private let enter = Key(symbol: "return.left", label: "Return", output: "\n")
     private var returnType: UIReturnKeyType?
@@ -16,6 +18,7 @@ final class TypingKeys: UIStackView {
     private var swedish = false
     private let globe = Key(symbol: "globe", label: "Next keyboard")
 
+    var keyPrior: (() -> (probabilities: [Double], spread: Double)?)?
     var moveCursor: ((Int) -> Void)?
     private var trackpadX: CGFloat = 0
     var insert: ((String, CGPoint?) -> Void)?
@@ -140,6 +143,7 @@ final class TypingKeys: UIStackView {
                     modifier.addTarget(self, action: #selector(changeSymbols), for: .touchUpInside)
                 }
                 let delete = Key(symbol: "delete.left", label: "Delete")
+                deleteKey = delete
                 delete.addTarget(self, action: #selector(deleteDown), for: .touchDown)
                 delete.addTarget(self, action: #selector(deleteUp), for: [.touchUpInside, .touchUpOutside, .touchCancel])
                 row.addArrangedSubview(modifier)
@@ -164,6 +168,7 @@ final class TypingKeys: UIStackView {
         let mode = Key(title: page == .letters ? "123" : "ABC")
         mode.addTarget(self, action: #selector(changePage), for: .touchUpInside)
         let space = Key(title: "", label: "Space", output: " ")
+        spaceKey = space
         space.addTarget(self, action: #selector(typed(_:)), for: .touchUpInside)
         let language = UILabel()
         language.text = swedish ? "SV" : "EN"
@@ -209,6 +214,59 @@ final class TypingKeys: UIStackView {
 
     /// A touch between keys goes to the nearest key, as on the system keyboard.
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        guard bounds.contains(point) else { return nil }
+        let hit = geometricHit(point, event: event)
+        guard let key = hit as? Key else { return hit }
+        return resolved(key, at: point)
+    }
+
+    private func resolved(_ key: Key, at point: CGPoint) -> Key {
+        guard page == .letters else { return key }
+        let rect = key.convert(key.bounds, to: self)
+        let isLetter = letterKeys.contains(key)
+        guard isLetter || key.output == " " || key === enter || key === shiftKey || key.accessibilityLabel == "Delete"
+        else { return key }
+        if isLetter && rect.insetBy(dx: rect.width * 0.2, dy: rect.height * 0.2).contains(point) { return key }
+        let functions = [spaceKey, enter, shiftKey, deleteKey].compactMap { $0 }
+        let nearby = functions.filter {
+            let f = $0.convert($0.bounds, to: self)
+            guard f.insetBy(dx: -8, dy: -8).contains(point) else { return false }
+            if point.y <= f.minY + 8 { return true }
+            if $0 === shiftKey { return point.x >= f.maxX - 8 }
+            if $0 === deleteKey { return point.x <= f.minX + 8 }
+            return false
+        }
+        guard !nearby.isEmpty, let prior = keyPrior?() else { return key }
+        let layout = keyLayout
+        let sigma = prior.spread * layout.pitch
+        let scale = 0.5 / (sigma * sigma)
+        func logPrior(_ i: Int) -> Double { log(0.95 * prior.probabilities[i] + 0.05 / 30) }
+        var best = -Double.infinity
+        var choice = key
+        for letter in letterKeys {
+            guard let ch = letter.output.first, let i = Lexicon.codes[ch], let c = layout.centers[i] else { continue }
+            let dx = point.x - c.x, dy = point.y - c.y
+            let cost = (dx * dx + dy * dy) * scale
+            let score = logPrior(i) - cost
+            if cost <= 10 && score > best { best = score; choice = letter }
+        }
+        for fn in nearby {
+            let score: Double
+            if fn === spaceKey {
+                score = logPrior(30) - layout.spaceCost(point, sigma: sigma)
+            } else {
+                let f = fn.convert(fn.bounds, to: self).insetBy(dx: 10, dy: 10)
+                let dx = max(0, f.minX - point.x, point.x - f.maxX)
+                let dy = max(0, f.minY - point.y, point.y - f.maxY)
+                let p = fn === enter ? 0.002 + 0.1 * prior.probabilities[30] : (fn === deleteKey ? 0.05 : 0.002)
+                score = log(p) - (dx * dx + dy * dy) * scale
+            }
+            if score > best { best = score; choice = fn }
+        }
+        return choice
+    }
+
+    private func geometricHit(_ point: CGPoint, event: UIEvent?) -> UIView? {
         let hit = super.hitTest(point, with: event)
         guard let hit, !(hit is Key), hit !== preview, !hit.isDescendant(of: preview) else { return hit }
         var nearest: (key: Key, distance: CGFloat)?
@@ -240,11 +298,36 @@ final class TypingKeys: UIStackView {
         return nil
     }
 
+    func resolvesAtRelease(_ key: Key, at point: CGPoint) -> Bool {
+        guard page == .letters else { return false }
+        if key === deleteKey {
+            let rect = key.convert(key.bounds, to: self)
+            return point.y <= rect.minY + 8 || point.x <= rect.minX + 8
+        }
+        return key === spaceKey || key === enter || key === shiftKey || letterKeys.contains(key)
+    }
+
+    func releaseKey(at point: CGPoint) -> Key? {
+        guard let key = hitTest(point, with: nil) as? Key,
+              key === deleteKey || resolvesAtRelease(key, at: point) else { return nil }
+        return key
+    }
+
     /// A finished touch at a point in this view, as the touch system delivers it.
     func tap(at point: CGPoint) {
         var view = hitTest(point, with: nil)
         while let candidate = view, candidate !== self, !(candidate is Key) { view = candidate.superview }
         guard let key = view as? Key else { return }
+        activate(key, at: point)
+    }
+
+    func activate(_ key: Key, at point: CGPoint) {
+        if key === globe { return }
+        if key === deleteKey {
+            startDelete?()
+            endDelete?()
+            return
+        }
         key.releasePoint = key.convert(point, from: self)
         defer { key.releasePoint = nil }
         // Calls the targets directly. sendActions needs a UIApplication, which the simulator harness lacks.

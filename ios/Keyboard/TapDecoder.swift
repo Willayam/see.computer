@@ -168,6 +168,18 @@ final class TapDecoder {
         }.prefix(160).map { $0.0 }
     }
 
+    func addPrior(to prior: inout [Double], weight: Double) {
+        for state in layers.last! {
+            let p = exp(weight - state.cost)
+            for child in lexicon.children(state.node) {
+                prior[lexicon.letter(child)] += p * lexicon.mass(child)
+            }
+            if let word = lexicon.terminal(state.node) {
+                prior[30] += p * exp(lexicon.unigram(word))
+            }
+        }
+    }
+
     func candidates(costs next: [[Double]], omissions: [Double], textOnly: Bool, previous: Int?, spaces: [Double], lostSpace: Double) -> [Reading: Double] {
         // Text without touch geometry keeps the existing preference for collapsing repeats.
         let repeatPenalty = textOnly ? 3.8 : slipCost
