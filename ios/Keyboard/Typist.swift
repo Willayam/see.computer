@@ -72,7 +72,7 @@ final class Typist {
         lastLetter != nil && lastLetter == Caret(proxy)
     }
 
-    private var swipeEdit: (caret: Caret, candidates: [String], prefix: String)?
+    private var swipeEdit: (caret: Caret, candidates: [String], prefix: String, addedTrailingSpace: Bool)?
 
     private var precedingSwipe: (caret: Caret, choices: [SwipeChoice])?
     private var swipeUndo: (inserted: String, original: String)?
@@ -117,9 +117,11 @@ final class Typist {
                 swipeUndo = (inserted + prefix + word, original)
             }
         }
-        proxy.insertText(prefix + word)
+        let trailingSpace = proxy.documentContextAfterInput?.first?.isLetter == true
+        proxy.insertText(prefix + word + (trailingSpace ? " " : ""))
+        if trailingSpace { proxy.adjustTextPosition(byCharacterOffset: -1) }
         if let caret = Caret(proxy), caret.before.hasSuffix(prefix + word) {
-            swipeEdit = (caret, choices, prefix)
+            swipeEdit = (caret, choices, prefix, trailingSpace)
             precedingSwipe = (caret, ranked)
         }
     }
@@ -143,7 +145,7 @@ final class Typist {
             let original = edit.candidates[0]
             replaceSuffix(original, with: candidate, in: proxy)
             if let caret = Caret(proxy), caret.before.hasSuffix(edit.prefix + candidate) {
-                swipeEdit = (caret, [candidate], edit.prefix)
+                swipeEdit = (caret, [candidate], edit.prefix, edit.addedTrailingSpace)
                 if let undo, undo.inserted.hasSuffix(original) {
                     swipeUndo = (String(undo.inserted.dropLast(original.count)) + candidate, undo.original)
                 }
@@ -242,6 +244,12 @@ final class Typist {
         if let edit = swipeEdit, edit.caret == Caret(proxy) {
             let undo = swipeUndo
             forget()
+            if edit.addedTrailingSpace, edit.caret.after?.first == " " {
+                proxy.adjustTextPosition(byCharacterOffset: 1)
+                guard let moved = Caret(proxy), moved.field == edit.caret.field,
+                      moved.before == edit.caret.before + " " else { return }
+                proxy.deleteBackward()
+            }
             if let undo, edit.caret.before.hasSuffix(undo.inserted) {
                 replaceSuffix(undo.inserted, with: undo.original, in: proxy)
             } else {
