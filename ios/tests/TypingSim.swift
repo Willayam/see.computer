@@ -206,7 +206,7 @@ private func wordDistance(_ reference: [String], _ hypothesis: [String]) -> Int 
 }
 
 @MainActor
-private func type(_ sentence: String, on pipeline: Pipeline, level: Level, seed: String, tally: inout Tally, swipe: Bool) -> Bool {
+private func type(_ sentence: String, on pipeline: Pipeline, level: Level, seed: String, tally: inout Tally, swipe: Bool, straight: Bool) -> Bool {
     let keys = pipeline.keys
     var random = Generator(seed)
     pipeline.newField()
@@ -256,10 +256,22 @@ private func type(_ sentence: String, on pipeline: Pipeline, level: Level, seed:
             let key = String(c).lowercased()
             if key == previous { continue }
             guard let target = center(key) else { return false }
-            via.append(noisy(target))
+            via.append(straight ? noisy(target) : target)
             previous = key
         }
         guard !via.isEmpty else { return false }
+        let centers = via
+        if !straight && centers.count > 1 {
+            for i in centers.indices {
+                let a = centers[max(0, i - 1)], b = centers[max(i, 1)]
+                let dx = b.x - a.x, dy = b.y - a.y
+                let scale = level.spread * pitch / max(1, hypot(dx, dy))
+                let along = 1.2 * random.gaussian() * scale
+                let across = 0.75 * random.gaussian() * scale
+                via[i].x += along * dx - across * dy
+                via[i].y += along * dy + across * dx
+            }
+        }
         let speed = (10 + 10 * random.next()) * pitch
         let hz = 60 + 60 * random.next()
         if via.count > 1 {
@@ -270,12 +282,25 @@ private func type(_ sentence: String, on pipeline: Pipeline, level: Level, seed:
             }
         }
         var points = [via[0]]
-        for (a,b) in zip(via, via.dropFirst()) {
+        func slows(at i: Int) -> Bool {
+            if straight || i == 0 || i == centers.count - 1 { return true }
+            let a = centers[i-1], b = centers[i], c = centers[i+1]
+            let dx = b.x-a.x, dy = b.y-a.y, ex = c.x-b.x, ey = c.y-b.y
+            return dx*ex + dy*ey < 0.8 * hypot(dx,dy) * hypot(ex,ey)
+        }
+        for i in via.indices.dropLast() {
+            let a = via[i], b = via[i+1]
+            let bow = straight || level.spread == 0 ? 0 : random.gaussian() * (level.name == "steady" ? 0.03 : 0.06)
+            let slowStart = slows(at: i), slowEnd = slows(at: i + 1)
             let count = max(2, Int(ceil(hypot(b.x-a.x,b.y-a.y) / speed * hz)))
             for step in 1...count {
                 let u = Double(step) / Double(count)
-                let t = u*u*(3-2*u)
-                points.append(CGPoint(x: a.x + t*(b.x-a.x), y: a.y + t*(b.y-a.y)))
+                var t = u*u*(3-2*u)
+                if !slowStart { t += u*(1-u)*(1-u) }
+                if !slowEnd { t -= u*u*(1-u) }
+                let offset = 4*t*(1-t)*bow
+                points.append(CGPoint(x: a.x + t*(b.x-a.x) - offset*(b.y-a.y),
+                                      y: a.y + t*(b.y-a.y) + offset*(b.x-a.x)))
             }
         }
         let radius = level.spread == 0 ? 0 : Int(2 + 2 * random.next())
@@ -355,6 +380,9 @@ enum TypingSim {
             exit(2)
         }
         let swipe = option("--mode") == "swipe"
+        let gesture = option("--gesture") ?? "curved"
+        guard ["straight", "curved"].contains(gesture) else { exit(2) }
+        let straight = gesture == "straight"
         let set = option("--set") ?? "dev"
         let mode = option("--languages") ?? "bilingual"
         let languages: TypingLanguages = mode == "english" ? .english : .bilingual
@@ -384,7 +412,7 @@ enum TypingSim {
                     exit(1)
                 }
                 for (index, sentence) in text.split(separator: "\n").map(String.init).enumerated() {
-                    guard type(sentence, on: pipeline, level: level, seed: "\(level.name)/\(language)/\(index)", tally: &tally, swipe: swipe) else {
+                    guard type(sentence, on: pipeline, level: level, seed: "\(level.name)/\(language)/\(index)", tally: &tally, swipe: swipe, straight: straight) else {
                         tally.skipped += 1
                         continue
                     }
