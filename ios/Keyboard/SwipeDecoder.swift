@@ -66,7 +66,8 @@ struct SwipeDecoder {
         guard timedPath.count >= 2 else { return geometric }
         let timed = candidates(along: timedPath, passingLetters: false, in: lex, after: previous)
         var scores = Dictionary(geometric, uniquingKeysWith: max)
-        for (word, score) in timed {
+        for (word, timedScore) in timed {
+            let score = timedScore + (timedPath.count > path.count ? 1.5 : 0)
             if let prior = scores[word] {
                 let best = max(prior, score)
                 scores[word] = best + log1p(exp(min(prior, score) - best))
