@@ -94,6 +94,14 @@ final class StartBar: UIControl {
 }
 
 final class Key: UIControl {
+    var releasePoint: CGPoint?
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        releasePoint = touches.first?.location(in: self)
+        super.touchesEnded(touches, with: event)
+        releasePoint = nil
+    }
+
     let output: String
     private var titleLabel: UILabel?
     private var symbolView: UIImageView?

@@ -18,7 +18,7 @@ final class TypingKeys: UIStackView {
 
     var moveCursor: ((Int) -> Void)?
     private var trackpadX: CGFloat = 0
-    var insert: ((String) -> Void)?
+    var insert: ((String, CGPoint?) -> Void)?
     var startDelete: (() -> Void)?
     var endDelete: (() -> Void)?
 
@@ -229,6 +229,8 @@ final class TypingKeys: UIStackView {
         var view = hitTest(point, with: nil)
         while let candidate = view, candidate !== self, !(candidate is Key) { view = candidate.superview }
         guard let key = view as? Key else { return }
+        key.releasePoint = key.convert(point, from: self)
+        defer { key.releasePoint = nil }
         // Calls the targets directly. sendActions needs a UIApplication, which the simulator harness lacks.
         for case let target as NSObject in key.allTargets {
             for action in key.actions(forTarget: target, forControlEvent: .touchUpInside) ?? [] {
@@ -252,7 +254,7 @@ final class TypingKeys: UIStackView {
     @objc private func typed(_ key: Key) {
         lastShift = .distantPast
         let value = page == .letters && uppercase ? key.output.uppercased() : key.output
-        insert?(value)
+        insert?(value, key.releasePoint.map { key.convert($0, to: self) })
         if page != .letters && (value == " " || value == "’") {
             page = .letters
             rebuild()

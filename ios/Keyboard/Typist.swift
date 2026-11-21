@@ -15,9 +15,21 @@ struct Caret: Equatable {
     }
 }
 
+struct Tap: Equatable {
+    let typed: Character
+    let shifted: Bool
+    let point: CGPoint?
+}
+
+struct TapTrail: Equatable {
+    var taps: [Tap] = []
+    var end: Caret?
+}
+
 /// The edits a tap on the typing keys makes, and what the next tap may undo.
 @MainActor
 final class Typist {
+    private(set) var trail = TapTrail()
     private var lastSpace: (time: TimeInterval, caret: Caret)?
     private var lastLetter: Caret?
     private var suggestionSpace: Caret?
@@ -33,6 +45,7 @@ final class Typist {
     }
 
     func forget() {
+        trail = TapTrail()
         lastSpace = nil
         lastLetter = nil
         lastCorrection = nil
@@ -48,8 +61,9 @@ final class Typist {
         if addSpace || next == " " { suggestionSpace = Caret(proxy) }
     }
 
-    func type(_ output: String, in proxy: UITextDocumentProxy) {
+    func type(_ output: String, at point: CGPoint?, in proxy: UITextDocumentProxy) {
         let caret = Caret(proxy)
+        let priorTrail = caret != nil && caret == trail.end ? trail : TapTrail()
         let previousSpace = lastSpace
         let followsLetter = caret != nil && caret == lastLetter
         let punctuation = output.count == 1 && ".,!?;:".contains(output)
@@ -71,6 +85,13 @@ final class Typist {
         } else {
             proxy.insertText(output == "’" && proxy.smartQuotesType == .no ? "'" : output)
         }
+        if let letter = output.first, output.count == 1, WordInput.wordCharacter(letter),
+           let start = caret, let end = Caret(proxy), start.field == end.field, start.after == end.after,
+           end.before.hasSuffix(output) {
+            trail = priorTrail
+            trail.taps.append(Tap(typed: Character(output.lowercased()), shifted: letter.isUppercase, point: point))
+            trail.end = end
+        }
         if output.count == 1, output.first?.isLetter == true {
             lastLetter = Caret(proxy)
         } else if output == " ", let prior = caret?.before.last, prior.isLetter || prior.isNumber,
@@ -80,12 +101,20 @@ final class Typist {
     }
 
     func delete(in proxy: UITextDocumentProxy) {
+        let prior = trail
+        let owned = prior.end != nil && prior.end == Caret(proxy)
         let correction = lastCorrection
         forget()
         if let correction, correction.caret == Caret(proxy) {
             replaceSuffix(correction.inserted, with: correction.original, in: proxy)
         } else {
             proxy.deleteBackward()
+            if owned, prior.taps.count > 1, let end = Caret(proxy), let start = prior.end,
+               start.field == end.field, start.after == end.after, start.before.dropLast() == end.before {
+                trail = prior
+                trail.taps.removeLast()
+                trail.end = end
+            }
         }
     }
 

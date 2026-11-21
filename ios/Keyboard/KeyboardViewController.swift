@@ -585,10 +585,10 @@ final class KeyboardViewController: UIInputViewController {
         updateTypingContext()
     }
 
-    private func typed(_ output: String) {
+    private func typed(_ output: String, at point: CGPoint?) {
         guard isActive, keys.isUserInteractionEnabled else { return }
         prepareForManualEdit()
-        typist.type(output, in: textDocumentProxy)
+        typist.type(output, at: point, in: textDocumentProxy)
         rememberEditedField()
         updateTypingContext()
     }
@@ -663,7 +663,7 @@ final class KeyboardViewController: UIInputViewController {
             self?.updateTypingContext()
         }
         completions.accept = { [weak self] input, candidate in self?.chooseSuggestion(input, candidate) }
-        keys.insert = { [weak self] in self?.typed($0) }
+        keys.insert = { [weak self] in self?.typed($0, at: $1) }
         keys.startDelete = { [weak self] in self?.deleteDown() }
         keys.endDelete = { [weak self] in self?.deleteUp() }
 
