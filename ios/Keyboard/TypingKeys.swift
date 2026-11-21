@@ -47,7 +47,7 @@ final class TypingKeys: UIStackView {
             finishSwipe(samples)
         } else if resolvesAtRelease(origin) {
             let lastKey = samples.reversed().lazy.compactMap { self.releaseKey(at: $0.point) }.first
-            release(from: origin, to: lastKey ?? origin, at: last.point)
+            release(from: origin, last: lastKey ?? origin, at: last.point)
         } else if origin === deleteKey {
             let held = max(0, last.time - first.time - Self.deleteRepeatDelay)
             let repeats = Int(held / Self.deleteRepeatInterval)
