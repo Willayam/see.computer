@@ -98,6 +98,7 @@ final class Key: UIControl {
 
     private weak var trackedKey: Key?
     private var resolvesAtRelease = false
+    var hasActiveTouch: Bool { resolvesAtRelease || isTracking }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         resolvesAtRelease = typingKeys?.resolvesAtRelease(self) ?? false

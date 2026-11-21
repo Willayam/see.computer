@@ -228,7 +228,8 @@ final class TypingKeys: UIStackView {
             }
             return characterKeys.min { distance(to: $0) < distance(to: $1) } ?? hit
         }
-        return resolved(key, at: point)
+        let choice = resolved(key, at: point)
+        return choice.hasActiveTouch ? key : choice
     }
 
     private func resolved(_ key: Key, at point: CGPoint) -> Key {
