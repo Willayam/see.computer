@@ -307,7 +307,9 @@ final class TypingVocabulary {
                 costs[index][letter] - costs[index][codes[index]] <= 3
             }
         }
+        // A known two-letter word that only lacks letters at its end stays as typed. The strip offers the longer word.
         if let best, best.0.lowercased() != word, !protectedWords.contains(word),
+            !(literal.isFinite && word.count <= 2 && best.0.lowercased().hasPrefix(word)),
             typed.dropFirst() == typed.dropFirst().lowercased(), input.sentenceStart || typed.first?.isUppercase != true || shiftedName
         {
             var threshold = literal + 1
