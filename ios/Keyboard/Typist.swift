@@ -103,8 +103,8 @@ final class Typist {
             let inserted = replacement + output
             replaceSuffix(prefix + input.word, with: inserted, in: proxy)
             if let end = Caret(proxy), end.before.hasSuffix(inserted) {
-                let original = joint == nil ? input.word : previousWord!.output + " " + input.word
-                lastCorrection = (end, inserted, original)
+                let original = joint == nil ? input.word : previousWord!.input.word + " " + input.word
+                if replacement != original { lastCorrection = (end, inserted, original) }
             }
         } else {
             proxy.insertText(output == "’" && proxy.smartQuotesType == .no ? "'" : output)
