@@ -64,7 +64,17 @@ struct SwipeDecoder {
     func candidates(in lex: Lexicon, after previous: Int?) -> [(String, Double)] {
         let geometric = candidates(along: path, passingLetters: true, in: lex, after: previous)
         guard timedPath.count >= 2 else { return geometric }
-        return geometric + candidates(along: timedPath, passingLetters: false, in: lex, after: previous)
+        let timed = candidates(along: timedPath, passingLetters: false, in: lex, after: previous)
+        var scores = Dictionary(geometric, uniquingKeysWith: max)
+        for (word, score) in timed {
+            if let prior = scores[word] {
+                let best = max(prior, score)
+                scores[word] = best + log1p(exp(min(prior, score) - best))
+            } else {
+                scores[word] = score
+            }
+        }
+        return scores.map { ($0.key, $0.value) }
     }
 
     private func candidates(along path: [CGPoint], passingLetters: Bool, in lex: Lexicon,
