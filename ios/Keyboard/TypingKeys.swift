@@ -23,10 +23,11 @@ final class TypingKeys: UIStackView {
     private let globe = Key(symbol: "globe", label: "Next keyboard")
 
     var keyPrior: (() -> (probabilities: [Double], spread: Double)?)?
+    var allowsSwipe: () -> Bool = { true }
     var onSwipe: (([SwipeSample], Bool, Bool) -> Void)?
 
     func canSwipe(from key: Key) -> Bool {
-        page == .letters && letterKeys.contains(key) && onSwipe != nil
+        page == .letters && letterKeys.contains(key) && onSwipe != nil && allowsSwipe()
     }
 
     struct StrokeTravel {

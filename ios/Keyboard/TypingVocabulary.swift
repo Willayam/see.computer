@@ -11,15 +11,19 @@ struct WordInput: Equatable {
 
     static func wordCharacter(_ c: Character) -> Bool { c.isLetter || c == "'" || c == "’" }
 
+    static func allowsCorrection(in proxy: UITextDocumentProxy) -> Bool {
+        guard proxy.autocorrectionType != .no, proxy.isSecureTextEntry != true else { return false }
+        switch proxy.keyboardType {
+        case .URL, .emailAddress, .numberPad, .decimalPad, .phonePad, .asciiCapableNumberPad, .numbersAndPunctuation: return false
+        default: return true
+        }
+    }
+
     init?(_ proxy: UITextDocumentProxy) {
-        guard proxy.autocorrectionType != .no, proxy.isSecureTextEntry != true,
-              proxy.selectedText?.isEmpty != false, let before = proxy.documentContextBeforeInput,
+        guard Self.allowsCorrection(in: proxy), proxy.selectedText?.isEmpty != false,
+              let before = proxy.documentContextBeforeInput,
               proxy.documentContextAfterInput?.first.map({ Self.wordCharacter($0) || $0.isNumber || $0 == "_" }) != true
         else { return nil }
-        switch proxy.keyboardType {
-        case .URL, .emailAddress, .numberPad, .decimalPad, .phonePad, .asciiCapableNumberPad, .numbersAndPunctuation: return nil
-        default: break
-        }
         let token = before.suffix(128).reversed().prefix(while: Self.wordCharacter)
         word = String(token.reversed()).trimmingCharacters(in: CharacterSet(charactersIn: "'’"))
         let leading = before.dropLast(word.count)
