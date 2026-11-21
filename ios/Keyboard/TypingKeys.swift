@@ -148,9 +148,9 @@ final class TypingKeys: UIStackView {
                 delete.addTarget(self, action: #selector(deleteDown), for: .touchDown)
                 delete.addTarget(self, action: #selector(deleteUp), for: [.touchUpInside, .touchUpOutside, .touchCancel])
                 row.addArrangedSubview(modifier)
-                row.addArrangedSubview(UIView())
+                row.addArrangedSubview(rowSpacer())
                 row.addArrangedSubview(cluster)
-                row.addArrangedSubview(UIView())
+                row.addArrangedSubview(rowSpacer())
                 row.addArrangedSubview(delete)
                 modifier.widthAnchor.constraint(equalTo: row.widthAnchor, multiplier: page == .letters && swedish ? 0.105 : 0.118, constant: 5).isActive = true
                 delete.widthAnchor.constraint(equalTo: modifier.widthAnchor).isActive = true
@@ -159,9 +159,9 @@ final class TypingKeys: UIStackView {
             }
             cluster.centerXAnchor.constraint(equalTo: row.centerXAnchor).isActive = true
             if index < 2 && controls.count < columns {
-                let left = UIView()
+                let left = rowSpacer()
                 row.insertArrangedSubview(left, at: 0)
-                row.addArrangedSubview(UIView())
+                row.addArrangedSubview(rowSpacer())
             }
             let fraction: CGFloat = page != .letters && index == 2 ? 0.70 : CGFloat(controls.count) / CGFloat(columns)
             cluster.widthAnchor.constraint(equalTo: row.widthAnchor, multiplier: fraction).isActive = true
@@ -336,6 +336,13 @@ final class TypingKeys: UIStackView {
                 target.perform(Selector(action), with: key)
             }
         }
+    }
+
+    private func rowSpacer() -> UIView {
+        let spacer = UIView()
+        // The remote keyboard host only forwards taps on rendered content.
+        spacer.backgroundColor = Key.touchSurfaceColor
+        return spacer
     }
 
     private func addRow() -> UIStackView {

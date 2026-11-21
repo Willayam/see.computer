@@ -94,6 +94,7 @@ final class StartBar: UIControl {
 }
 
 final class Key: UIControl {
+    static let touchSurfaceColor = UIColor(white: 0.5, alpha: 0.02)
     var releasePoint: CGPoint?
 
     private weak var trackedKey: Key?
@@ -155,7 +156,7 @@ final class Key: UIControl {
         super.init(frame: .zero)
         // The host hit-tests a remote keyboard surface. Give the touch cell a
         // continuous surface even where the inset keycap leaves a gutter.
-        backgroundColor = UIColor(white: 0.5, alpha: 0.02)
+        backgroundColor = Self.touchSurfaceColor
         face = keyFace(radius: 8, in: self, inset: CGSize(width: 3, height: 5.5))
         let content: UIView?
         if let symbol {
