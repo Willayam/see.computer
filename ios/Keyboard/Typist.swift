@@ -68,6 +68,18 @@ final class Typist {
         self.suggestions = suggestions
     }
 
+    static func capitalizes(after before: String, mode: UITextAutocapitalizationType?) -> Bool {
+        switch mode {
+        case .allCharacters: return true
+        case .words: return before.last?.isWhitespace ?? true
+        case .sentences:
+            let trimmed = before.trimmingCharacters(in: .whitespaces)
+            return trimmed.isEmpty || trimmed.last?.isNewline == true ||
+                (before.last?.isWhitespace == true && trimmed.last.map { ".!?".contains($0) } == true)
+        default: return false
+        }
+    }
+
     func canCorrect(_ proxy: UITextDocumentProxy) -> Bool {
         lastLetter != nil && lastLetter == Caret(proxy)
     }
@@ -94,20 +106,21 @@ final class Typist {
     }
 
     func insertSwipe(_ prediction: SwipePrediction, uppercase: Bool, locked: Bool, in proxy: UITextDocumentProxy) {
+        let before = proxy.documentContextBeforeInput ?? ""
+        let closingQuote = before.last == "'" && before.dropLast().last.map { $0.isLetter || $0.isNumber } == true
+        let prefix = before.last.map { $0.isWhitespace || (WordInput.opensWord($0) && !closingQuote) ? "" : " " } ?? ""
+        let capitalize = uppercase || (!prefix.isEmpty && Self.capitalizes(after: before + prefix, mode: proxy.autocapitalizationType))
         let ranked = prediction.words.map { choice -> SwipeChoice in
             let word = choice.word
             let text = proxy.smartQuotesType == .no ? word : word.replacingOccurrences(of: "'", with: "’")
             let cased = locked || proxy.autocapitalizationType == .allCharacters ? text.uppercased()
-                : uppercase ? text.prefix(1).uppercased() + text.dropFirst() : text
+                : capitalize ? text.prefix(1).uppercased() + text.dropFirst() : text
             return SwipeChoice(word: cased, score: choice.score)
         }
         let choices = ranked.prefix(3).map(\.word)
         guard let word = choices.first else { return }
         let previous = precedingChoices(in: proxy).first?.word
         forget()
-        let before = proxy.documentContextBeforeInput ?? ""
-        let closingQuote = before.last == "'" && before.dropLast().last.map { $0.isLetter || $0.isNumber } == true
-        let prefix = before.last.map { $0.isWhitespace || (WordInput.opensWord($0) && !closingQuote) ? "" : " " } ?? ""
         if let replacement = prediction.previous, let previous, let before = proxy.documentContextBeforeInput {
             let separator = before.last == " " ? " " : ""
             if before.hasSuffix(previous + separator) {

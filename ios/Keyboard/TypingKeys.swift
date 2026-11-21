@@ -129,16 +129,7 @@ final class TypingKeys: UIStackView {
         }
         guard !capsLock else { return }
         let before = proxy.documentContextBeforeInput ?? ""
-        let capitals: Bool
-        switch proxy.autocapitalizationType {
-        case .allCharacters: capitals = true
-        case .words: capitals = before.last?.isWhitespace ?? true
-        case .sentences:
-            let trimmed = before.trimmingCharacters(in: .whitespaces)
-            capitals = trimmed.isEmpty || trimmed.last?.isNewline == true ||
-                (before.last?.isWhitespace == true && trimmed.last.map { ".!?".contains($0) } == true)
-        default: capitals = false
-        }
+        let capitals = Typist.capitalizes(after: before, mode: proxy.autocapitalizationType)
         if capitals != uppercase { setUppercase(capitals) }
     }
 
