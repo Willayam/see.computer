@@ -298,18 +298,15 @@ final class TypingKeys: UIStackView {
         return nil
     }
 
-    func resolvesAtRelease(_ key: Key, at point: CGPoint) -> Bool {
-        guard page == .letters else { return false }
-        if key === deleteKey {
-            let rect = key.convert(key.bounds, to: self)
-            return point.y <= rect.minY + 8 || point.x <= rect.minX + 8
-        }
+    func resolvesAtRelease(_ key: Key) -> Bool {
+        // Delete is chosen at touch down by hitTest, so a hold anywhere on it repeats.
+        guard page == .letters, key !== deleteKey else { return false }
         return key === spaceKey || key === enter || key === shiftKey || letterKeys.contains(key)
     }
 
     func releaseKey(at point: CGPoint) -> Key? {
         guard let key = hitTest(point, with: nil) as? Key,
-              key === deleteKey || resolvesAtRelease(key, at: point) else { return nil }
+              key === deleteKey || resolvesAtRelease(key) else { return nil }
         return key
     }
 

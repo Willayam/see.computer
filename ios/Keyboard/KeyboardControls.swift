@@ -100,9 +100,7 @@ final class Key: UIControl {
     private var resolvesAtRelease = false
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if let keyboard = typingKeys, let touch = touches.first {
-            resolvesAtRelease = keyboard.resolvesAtRelease(self, at: touch.location(in: keyboard))
-        }
+        resolvesAtRelease = typingKeys?.resolvesAtRelease(self) ?? false
         if resolvesAtRelease {
             trackedKey = self
             isHighlighted = true
