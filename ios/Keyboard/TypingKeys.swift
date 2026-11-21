@@ -230,7 +230,8 @@ final class TypingKeys: UIStackView {
         let functions = [spaceKey, enter, shiftKey, deleteKey].compactMap { $0 }
         let nearby = functions.filter {
             let f = $0.convert($0.bounds, to: self)
-            guard f.insetBy(dx: -8, dy: -8).contains(point) else { return false }
+            // A function key only competes for touches on itself, so a letter's cell never deletes or sends.
+            guard $0 === key, f.contains(point) else { return false }
             if point.y <= f.minY + 8 { return true }
             if $0 === shiftKey { return point.x >= f.maxX - 8 }
             if $0 === deleteKey { return point.x <= f.minX + 8 }
@@ -308,6 +309,13 @@ final class TypingKeys: UIStackView {
         guard let key = hitTest(point, with: nil) as? Key,
               key === deleteKey || resolvesAtRelease(key) else { return nil }
         return key
+    }
+
+    /// A touch that began on `origin` and ended on `key`. Sliding off shift onto a letter types it in capitals.
+    func release(from origin: Key, to key: Key?, at point: CGPoint) {
+        guard let key else { return }
+        if origin === shiftKey, key !== origin, letterKeys.contains(key), !uppercase { shift() }
+        activate(key, at: point)
     }
 
     /// A finished touch at a point in this view, as the touch system delivers it.

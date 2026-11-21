@@ -158,6 +158,8 @@ def pack_model(language, model):
     def quant(p, scale, limit):
         return min(limit, round(-math.log(max(p, 1e-30)) * scale))
 
+    # Lexicon.swift reads node offsets as 24 bits and word ids as 20 bits.
+    assert len(nodes) < 1 << 24 and len(vocab) < 1 << 20, (len(nodes), len(vocab))
     node_data = bytearray(8 * (len(nodes) + 1))
     bits.append(len(nodes))
     for i in reversed(range(len(nodes))):

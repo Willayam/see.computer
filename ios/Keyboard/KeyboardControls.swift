@@ -110,16 +110,15 @@ final class Key: UIControl {
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard resolvesAtRelease, let keyboard = typingKeys, let touch = touches.first else {
+        guard resolvesAtRelease else {
             super.touchesMoved(touches, with: event)
             return
         }
-        let next = keyboard.releaseKey(at: touch.location(in: keyboard))
-        if next !== trackedKey {
-            trackedKey?.isHighlighted = false
-            trackedKey = next
-            next?.isHighlighted = true
-        }
+        guard let keyboard = typingKeys, let touch = touches.first,
+              let next = keyboard.releaseKey(at: touch.location(in: keyboard)), next !== trackedKey else { return }
+        trackedKey?.isHighlighted = false
+        trackedKey = next
+        next.isHighlighted = true
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -127,15 +126,18 @@ final class Key: UIControl {
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if resolvesAtRelease, let keyboard = typingKeys, let touch = touches.first {
-            finishHighlight()
-            let point = touch.location(in: keyboard)
-            if let key = keyboard.releaseKey(at: point) { keyboard.activate(key, at: point) }
-        } else {
+        guard resolvesAtRelease else {
             releasePoint = touches.first?.location(in: self)
             super.touchesEnded(touches, with: event)
             releasePoint = nil
+            return
         }
+        // A release that drifts off the keyboard types the key the finger was last on.
+        let last = trackedKey
+        finishHighlight()
+        guard let keyboard = typingKeys, let touch = touches.first else { return }
+        let point = touch.location(in: keyboard)
+        keyboard.release(from: self, to: keyboard.releaseKey(at: point) ?? last, at: point)
     }
 
     private func finishHighlight() {

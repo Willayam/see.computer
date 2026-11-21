@@ -15,7 +15,9 @@ struct Lexicon {
         func field(_ i: Int) -> Int {
             mapped.withUnsafeBytes { Int($0.loadUnaligned(fromByteOffset: i * 4, as: UInt32.self)) }
         }
-        guard field(1) == 1, field(11) + 31 * 31 * 31 == mapped.count else { return nil }
+        let sections = (5...11).map(field)
+        guard field(1) == 1, sections[0] >= 64, zip(sections, sections.dropFirst()).allSatisfy({ $0 <= $1 }),
+              field(11) + 31 * 31 * 31 == mapped.count else { return nil }
         data = mapped
         sentenceStart = field(3)
         nodes = field(5)
