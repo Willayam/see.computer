@@ -120,13 +120,13 @@ final class TypingVocabulary {
         }
     }
 
-    private func languageWeights(_ input: WordInput) -> [Double] {
+    private func languageWeights(_ previousWords: [String]) -> [Double] {
         var weight = Array(repeating: 0.0, count: languages.count)
         if languages.count == 2, let first = tables[languages[0].code], let second = tables[languages[1].code] {
             func frequency(_ w: String, _ lex: Lexicon) -> Double {
                 lex.node(w).flatMap(lex.terminal).map { exp(lex.unigram($0)) } ?? 0
             }
-            let evidence = input.previous.reduce(0.0) { odds, previous in
+            let evidence = previousWords.reduce(0.0) { odds, previous in
                 odds * 0.7 + log((frequency(previous, first) + 2e-6) / (frequency(previous, second) + 2e-6))
             }
             let p = 1 / (1 + exp(-max(-6, min(6, evidence))))
@@ -145,6 +145,26 @@ final class TypingVocabulary {
         }
     }
 
+    func swipe(_ samples: [SwipeSample], layout: KeyLayout, before: String) -> [String] {
+        let sentence = before.suffix(128).reversed().prefix { !$0.isNewline && !".!?".contains($0) }.reversed()
+        let previous = sentence.split { !WordInput.wordCharacter($0) }.suffix(4).map {
+            String($0).lowercased().replacingOccurrences(of: "’", with: "'")
+        }
+        let decoder = SwipeDecoder(samples: samples, layout: layout)
+        let weights = languageWeights(previous)
+        var scores = [String: Double]()
+        for (i, language) in languages.enumerated() {
+            guard let lex = tables[language.code] else { continue }
+            let prior = previous.isEmpty ? lex.sentenceStart : previous.last.flatMap(lex.node).flatMap(lex.terminal)
+            for (word, score) in decoder.candidates(in: lex, after: prior) {
+                scores[word] = max(scores[word] ?? -.infinity, score + weights[i])
+            }
+        }
+        return scores.keys.sorted {
+            scores[$0] == scores[$1] ? $0 < $1 : scores[$0]! > scores[$1]!
+        }.prefix(3).map { $0 }
+    }
+
     func reconsider(_ held: Typist.HeldWord, input: WordInput, trail: TapTrail, chosen: String, layout: KeyLayout) -> String? {
         let first = held.input.word, second = input.word
         guard !held.output.contains(" "), !chosen.contains(" "), second.first?.isLowercase == true,
@@ -161,7 +181,7 @@ final class TypingVocabulary {
         guard rows.count == taps.count else { return nil }
         let spaces = taps.map { layout.spaceCost($0.point, sigma: sigma) }
         let usual = (held.output + " " + chosen).lowercased().replacingOccurrences(of: "’", with: "'")
-        let weight = languageWeights(held.input)
+        let weight = languageWeights(held.input.previous)
         var usualScore: Double?, best = -Double.infinity, bestText = ""
         for (i, lang) in languages.enumerated() {
             guard let lex = tables[lang.code] else { continue }
@@ -272,7 +292,7 @@ final class TypingVocabulary {
         let literalCost = zip(costs, codes).reduce(0.0) { $0 + $1.0[$1.1] }
         var literal = -Double.infinity, unknown = -Double.infinity
         var candidates: [(String, Double)] = [], completions: [(String, Double)] = []
-        let weight = languageWeights(input)
+        let weight = languageWeights(input.previous)
         lastWeights = weight
         for (index, language) in languages.enumerated() {
             guard let lex = tables[language.code] else { continue }
