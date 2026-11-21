@@ -61,7 +61,7 @@ enum TypingVocabularyChecks {
         vocabulary.configure(.bilingual, dictionaries: ["en_US"])
         precondition(suggestions("Vi ses imorg").titles.contains("imorgon"))
         precondition(suggestions("Jag ").titles.contains("har"))
-        precondition(suggestions("Vi ses itne").automatic == nil)
+        precondition(suggestions("Vi ses itne").automatic == "inte")
         print("English and Swedish typing checks passed")
     }
 }

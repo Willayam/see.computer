@@ -94,6 +94,58 @@ final class StartBar: UIControl {
 }
 
 final class Key: UIControl {
+    static let touchSurfaceColor = UIColor(white: 0.5, alpha: 0.02)
+    var releasePoint: CGPoint?
+
+    private weak var trackedKey: Key?
+    private var resolvesAtRelease = false
+    var hasActiveTouch: Bool { resolvesAtRelease || isTracking }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        resolvesAtRelease = typingKeys?.resolvesAtRelease(self) ?? false
+        if resolvesAtRelease {
+            trackedKey = self
+            isHighlighted = true
+        } else {
+            super.touchesBegan(touches, with: event)
+        }
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard resolvesAtRelease else {
+            super.touchesMoved(touches, with: event)
+            return
+        }
+        guard let keyboard = typingKeys, let touch = touches.first,
+              let next = keyboard.releaseKey(at: touch.location(in: keyboard)), next !== trackedKey else { return }
+        trackedKey?.isHighlighted = false
+        trackedKey = next
+        next.isHighlighted = true
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if resolvesAtRelease { finishHighlight() } else { super.touchesCancelled(touches, with: event) }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard resolvesAtRelease else {
+            releasePoint = touches.first?.location(in: self)
+            super.touchesEnded(touches, with: event)
+            releasePoint = nil
+            return
+        }
+        let last = trackedKey
+        finishHighlight()
+        guard let keyboard = typingKeys, let touch = touches.first else { return }
+        keyboard.release(from: self, last: last, at: touch.location(in: keyboard))
+    }
+
+    private func finishHighlight() {
+        trackedKey?.isHighlighted = false
+        trackedKey = nil
+        resolvesAtRelease = false
+    }
+
     let output: String
     private var titleLabel: UILabel?
     private var symbolView: UIImageView?
@@ -104,7 +156,7 @@ final class Key: UIControl {
         super.init(frame: .zero)
         // The host hit-tests a remote keyboard surface. Give the touch cell a
         // continuous surface even where the inset keycap leaves a gutter.
-        backgroundColor = UIColor(white: 0.5, alpha: 0.02)
+        backgroundColor = Self.touchSurfaceColor
         face = keyFace(radius: 8, in: self, inset: CGSize(width: 3, height: 5.5))
         let content: UIView?
         if let symbol {

@@ -2,7 +2,9 @@ import UIKit
 
 /// Correction and prediction buttons share their candidates with the space key.
 final class CompletionStrip: UIStackView {
-    private let vocabulary = TypingVocabulary()
+    let vocabulary = TypingVocabulary(store: TypingLanguages.store)
+    private var trail = TapTrail()
+    private var layout = KeyLayout()
     private var input: WordInput?
     private var shownInput: WordInput?
     private var cached: WordSuggestions?
@@ -48,9 +50,12 @@ final class CompletionStrip: UIStackView {
         refresh()
     }
 
-    func update(for proxy: UITextDocumentProxy, canCorrect: Bool) {
+    func update(for proxy: UITextDocumentProxy, trail: TapTrail, layout: KeyLayout, canCorrect: Bool) {
         let current = WordInput(proxy)
-        guard input != current || self.canCorrect != canCorrect else { return }
+        let owned = trail.end != nil && trail.end == Caret(proxy) ? trail : TapTrail()
+        guard input != current || self.canCorrect != canCorrect || self.trail != owned || self.layout != layout else { return }
+        self.trail = owned
+        self.layout = layout
         self.canCorrect = canCorrect
         input = current
         refresh()
@@ -67,16 +72,16 @@ final class CompletionStrip: UIStackView {
         // validated against the field before its candidate can be applied.
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.input == input else { return }
-            self.setTitles(self.suggestions(for: input))
+            self.setTitles(self.suggestions(for: input, trail: self.trail, layout: self.layout))
         }
         pending = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.035, execute: work)
     }
 
-    func suggestions(for word: WordInput) -> WordSuggestions {
-        if input == word, let cached { return cached }
-        let result = vocabulary.suggestions(for: word)
-        if input == word { cached = result }
+    func suggestions(for word: WordInput, trail: TapTrail, layout: KeyLayout) -> WordSuggestions {
+        if input == word && self.trail == trail && self.layout == layout, let cached { return cached }
+        let result = vocabulary.suggestions(for: word, trail: trail, layout: layout)
+        if input == word && self.trail == trail && self.layout == layout { cached = result }
         return result
     }
 
