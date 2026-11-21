@@ -75,8 +75,10 @@ final class TapDecoder {
     struct Reading: Hashable {
         let first: Int?
         let last: Int
+        var compound = false
     }
     private struct State {
+        var compound = false
         var first: Int? = nil
         let node: Int
         let cost: Double
@@ -93,7 +95,12 @@ final class TapDecoder {
     private var doubleCost = -log(0.005)
     private var layers = [[State(node: 0, cost: 0, slips: 0)]]
 
-    init(lexicon: Lexicon) { self.lexicon = lexicon }
+    private let compounds: Bool
+
+    init(lexicon: Lexicon, compounds: Bool = false) {
+        self.lexicon = lexicon
+        self.compounds = compounds
+    }
 
     private func advance(_ index: Int) -> [State] {
         let row = costs[index]
@@ -101,11 +108,12 @@ final class TapDecoder {
         let cutoff = (layer.map(\.cost).min() ?? 0) + 9
         var states: [Int: State] = [:]
         var first: Int?
+        var compound = false
         func add(_ node: Int, _ cost: Double, _ slips: Int) {
             guard cost.isFinite else { return }
-            let key = (((first ?? -1) + 1) << 28) + node * 3 + slips
+            let key = (((first ?? -1) + 1) << 28) + node * 6 + slips * 2 + (compound ? 1 : 0)
             if cost < states[key]?.cost ?? .infinity {
-                states[key] = State(first: first, node: node, cost: cost, slips: slips)
+                states[key] = State(compound: compound, first: first, node: node, cost: cost, slips: slips)
             }
         }
         var sources = layer
@@ -118,7 +126,15 @@ final class TapDecoder {
                 sources.append(State(first: word, node: 0, cost: base + lostSpace, slips: state.slips))
             }
         }
+        if compounds && index >= 3 {
+            for state in layer where state.first == nil {
+                guard let word = lexicon.terminal(state.node) else { continue }
+                let cost = state.cost - lexicon.logProbability(word, after: previous) + 4.6
+                sources.append(State(compound: true, first: word, node: 0, cost: cost, slips: state.slips))
+            }
+        }
         for state in sources {
+            compound = state.compound
             first = state.first
             let canSlip = state.slips < 2 && state.cost <= cutoff
             for child in lexicon.children(state.node) {
@@ -142,6 +158,7 @@ final class TapDecoder {
             let earlier = layers[index - 1]
             let cutoff = (earlier.map(\.cost).min() ?? 0) + 9
             for state in earlier where state.slips < 2 && state.cost <= cutoff {
+                compound = state.compound
                 first = state.first
                 for child in lexicon.children(state.node) {
                     let a = lexicon.letter(child)
@@ -164,6 +181,7 @@ final class TapDecoder {
             if $0.1 != $1.1 { return $0.1 < $1.1 }
             if $0.0.node != $1.0.node { return $0.0.node < $1.0.node }
             if $0.0.first != $1.0.first { return ($0.0.first ?? -1) < ($1.0.first ?? -1) }
+            if $0.0.compound != $1.0.compound { return !$0.0.compound }
             return $0.0.slips < $1.0.slips
         }.prefix(160).map { $0.0 }
     }
@@ -226,13 +244,13 @@ final class TapDecoder {
         var result: [Reading: Double] = [:]
         for state in layers.last! {
             if let id = lexicon.terminal(state.node) {
-                let reading = Reading(first: state.first, last: id)
+                let reading = Reading(first: state.first, last: id, compound: state.compound)
                 result[reading] = min(result[reading] ?? .infinity, state.cost)
             }
             if state.slips >= 2 { continue }
             for child in lexicon.children(state.node) {
                 if let id = lexicon.terminal(child) {
-                    let reading = Reading(first: state.first, last: id)
+                    let reading = Reading(first: state.first, last: id, compound: state.compound)
                 result[reading] = min(result[reading] ?? .infinity, state.cost + omissions[lexicon.letter(child)])
                 }
             }

@@ -85,7 +85,9 @@ final class TypingVocabulary {
             let loaded = Self.tables
             DispatchQueue.main.async {
                 self.tables = loaded
-                self.decoders = loaded.mapValues { TapDecoder(lexicon: $0) }
+                self.decoders = loaded.reduce(into: [:]) { decoders, entry in
+                    decoders[entry.key] = TapDecoder(lexicon: entry.value, compounds: entry.key == "sv")
+                }
                 completion()
             }
         }
@@ -170,6 +172,13 @@ final class TypingVocabulary {
         if let usualScore {
             guard best - usualScore >= 2 else { return nil }
         } else if bestText.contains(" ") || held.space.y >= layout.space.minY + 8 { return nil }
+        if let split = bestText.firstIndex(of: " "), let lex = tables["sv"],
+           languages.contains(where: { $0.code == "sv" }) {
+            let parts = [String(bestText[..<split]).lowercased(), String(bestText[bestText.index(after: split)...]).lowercased()]
+            for literal in [first.lowercased(), second.lowercased()] where parts.joined() == literal {
+                if parts.allSatisfy({ lex.node($0).flatMap(lex.terminal) != nil }) { return nil }
+            }
+        }
         if first.first?.isUppercase == true { bestText = bestText.prefix(1).uppercased() + bestText.dropFirst() }
         return input.smartQuotes ? bestText.replacingOccurrences(of: "'", with: "’") : bestText
     }
@@ -262,8 +271,16 @@ final class TypingVocabulary {
                     costs: costs, omissions: layout.omissionCosts(spread: spread), textOnly: suffix.allSatisfy { $0.point == nil },
                     previous: prev, spaces: spaces, lostSpace: offset == 0 && matches ? layout.lostSpaceCost(sigma: sigma) : .infinity)
                 ?? [:]
-            var ranked = readings.map { reading, cost in
-                (reading, context + lex.logProbability(reading.last, after: reading.first ?? prev) - cost)
+            var ranked = readings.compactMap { reading, cost -> (TapDecoder.Reading, Double)? in
+                if reading.compound {
+                    guard word.count >= 7, let first = reading.first,
+                          lex.text(first).count >= 3, lex.text(reading.last).count >= 3 else { return nil }
+                }
+                if word.count >= 7, let first = reading.first, !reading.compound,
+                   readings[TapDecoder.Reading(first: first, last: reading.last, compound: true)] != nil,
+                   lex.text(first).count >= 3, lex.text(reading.last).count >= 3,
+                   lex.text(first) + lex.text(reading.last) == word { return nil }
+                return (reading, context + (reading.compound ? lex.unigram(reading.last) : lex.logProbability(reading.last, after: reading.first ?? prev)) - cost)
             }
             ranked.sort {
                 if $0.1 != $1.1 { return $0.1 > $1.1 }
@@ -271,8 +288,8 @@ final class TypingVocabulary {
                 return $0.0.last < $1.0.last
             }
             for (reading, value) in ranked.prefix(4) {
-                let lead = reading.first.map { lex.displayForm(lex.text($0)) + " " } ?? ""
-                candidates.append((lead + lex.displayForm(lex.text(reading.last)), value))
+                let lead = reading.first.map { lex.displayForm(lex.text($0)) + (reading.compound ? "" : " ") } ?? ""
+                candidates.append((lead + (reading.compound ? lex.text(reading.last) : lex.displayForm(lex.text(reading.last))), value))
             }
             for next in decoders[language.code]?.completions(limit: 4) ?? [] {
                 let text = lex.text(next.id)
