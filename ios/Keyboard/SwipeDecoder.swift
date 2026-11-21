@@ -93,14 +93,14 @@ struct SwipeDecoder {
                         let cost = state.cost + penalty
                         if segment == end, depth > 0, let id = lex.terminal(child) {
                             let score = lex.logProbability(id, after: previous) - cost
-                            if top.count < 3 || score > top.last!.score {
+                            if top.count < 6 || score > top.last!.score {
                                 if let index = top.firstIndex(where: { $0.id == id }) {
                                     if top[index].score >= score { return }
                                     top.remove(at: index)
                                 }
                                 top.append((id, score))
                                 top.sort { $0.score > $1.score }
-                                if top.count > 3 { top.removeLast() }
+                                if top.count > 6 { top.removeLast() }
                             }
                         }
                         let rank = cost - 3 * Double(segment) - lex.best(child) * 0.45

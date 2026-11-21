@@ -101,7 +101,7 @@ final class Typist {
                 : uppercase ? text.prefix(1).uppercased() + text.dropFirst() : text
             return SwipeChoice(word: cased, score: choice.score)
         }
-        let choices = ranked.map(\.word)
+        let choices = ranked.prefix(3).map(\.word)
         guard let word = choices.first else { return }
         let previous = precedingChoices(in: proxy).first?.word
         forget()

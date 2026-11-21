@@ -209,7 +209,7 @@ final class TypingVocabulary {
         }
         return scores.keys.sorted {
             scores[$0] == scores[$1] ? $0 < $1 : scores[$0]! > scores[$1]!
-        }.prefix(3).map { SwipeChoice(word: $0, score: scores[$0]!) }
+        }.prefix(6).map { SwipeChoice(word: $0, score: scores[$0]!) }
     }
 
     func reconsider(_ held: Typist.HeldWord, input: WordInput, trail: TapTrail, chosen: String, layout: KeyLayout) -> String? {
