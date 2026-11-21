@@ -66,10 +66,10 @@ private final class Pipeline {
                 }.min { $0.1 < $1.1 }!.0
                 return Lexicon.alphabet[letter]
             }
-            let word = String([nearest(samples.first!.point), nearest(samples.last!.point)])
+            let words = endpoints ? [String([nearest(samples.first!.point), nearest(samples.last!.point)])] :
+                self.vocabulary.swipe(samples, layout: layout, before: self.field.text)
             self.swipeNanos.append(DispatchTime.now().uptimeNanoseconds - start)
-            if let last = self.field.text.last, !last.isWhitespace { self.field.insertText(" ") }
-            self.field.insertText(word)
+            self.typist.insertSwipe(words, uppercase: upper, locked: locked, in: self.field)
             self.keys.updateCase(for: self.field)
         }
     }

@@ -56,7 +56,32 @@ final class Typist {
         lastLetter != nil && lastLetter == Caret(proxy)
     }
 
+    private var swipeEdit: (caret: Caret, candidates: [String], prefix: String)?
+
+    func swipeChoices(in proxy: UITextDocumentProxy) -> [String]? {
+        guard let edit = swipeEdit, edit.caret == Caret(proxy) else { return nil }
+        return edit.candidates
+    }
+
+    func insertSwipe(_ words: [String], uppercase: Bool, locked: Bool, in proxy: UITextDocumentProxy) {
+        let choices = words.map { word -> String in
+            let text = proxy.smartQuotesType == .no ? word : word.replacingOccurrences(of: "'", with: "’")
+            if locked || proxy.autocapitalizationType == .allCharacters { return text.uppercased() }
+            return uppercase ? text.prefix(1).uppercased() + text.dropFirst() : text
+        }
+        guard let word = choices.first else { return }
+        forget()
+        let prefix = proxy.documentContextBeforeInput?.last.map {
+            $0.isWhitespace || "([{\"“‘«".contains($0) ? "" : " "
+        } ?? ""
+        proxy.insertText(prefix + word)
+        if let caret = Caret(proxy), caret.before.hasSuffix(prefix + word) {
+            swipeEdit = (caret, choices, prefix)
+        }
+    }
+
     func forget() {
+        swipeEdit = nil
         held = nil
         trail = TapTrail()
         lastSpace = nil
@@ -66,6 +91,14 @@ final class Typist {
     }
 
     func choose(_ input: WordInput, _ candidate: String, in proxy: UITextDocumentProxy) {
+        if let edit = swipeEdit, edit.caret == Caret(proxy), edit.candidates.contains(candidate) {
+            forget()
+            replaceSuffix(input.word, with: candidate, in: proxy)
+            if let caret = Caret(proxy), caret.before.hasSuffix(edit.prefix + candidate) {
+                swipeEdit = (caret, [candidate], edit.prefix)
+            }
+            return
+        }
         if trail.end == Caret(proxy) { committed?(trail, candidate) }
         forget()
         let next = proxy.documentContextAfterInput?.first
@@ -132,6 +165,11 @@ final class Typist {
     }
 
     func delete(in proxy: UITextDocumentProxy) {
+        if let edit = swipeEdit, edit.caret == Caret(proxy) {
+            forget()
+            replaceSuffix(edit.prefix + edit.candidates[0], with: "", in: proxy)
+            return
+        }
         let prior = trail
         let owned = prior.end != nil && prior.end == Caret(proxy)
         let correction = lastCorrection

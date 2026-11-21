@@ -161,7 +161,7 @@ final class KeyboardViewController: UIInputViewController {
 
     private func updateTypingContext() {
         keys.updateCase(for: textDocumentProxy)
-        completions.update(for: textDocumentProxy, trail: typist.trail, layout: keys.keyLayout, canCorrect: typist.canCorrect(textDocumentProxy))
+        completions.update(for: textDocumentProxy, trail: typist.trail, layout: keys.keyLayout, canCorrect: typist.canCorrect(textDocumentProxy), swipeChoices: typist.swipeChoices(in: textDocumentProxy))
     }
 
     override func selectionDidChange(_ textInput: UITextInput?) {
@@ -671,6 +671,15 @@ final class KeyboardViewController: UIInputViewController {
             self?.updateTypingContext()
         }
         completions.accept = { [weak self] input, candidate in self?.chooseSuggestion(input, candidate) }
+        keys.onSwipe = { [weak self] samples, upper, locked in
+            guard let self, self.isActive, self.keys.isUserInteractionEnabled else { return }
+            self.prepareForManualEdit()
+            let words = self.completions.vocabulary.swipe(samples, layout: self.keys.keyLayout,
+                before: self.textDocumentProxy.documentContextBeforeInput ?? "")
+            self.typist.insertSwipe(words, uppercase: upper, locked: locked, in: self.textDocumentProxy)
+            self.rememberEditedField()
+            self.updateTypingContext()
+        }
         keys.insert = { [weak self] in self?.typed($0, at: $1) }
         keys.startDelete = { [weak self] in self?.deleteDown() }
         keys.endDelete = { [weak self] in self?.deleteUp() }

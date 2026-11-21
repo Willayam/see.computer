@@ -26,6 +26,10 @@ final class TypingKeys: UIStackView {
         page == .letters && letterKeys.contains(key) && onSwipe != nil
     }
 
+    func crossesSwipeThreshold(_ point: CGPoint, from start: CGPoint, key: Key) -> Bool {
+        hypot(point.x - start.x, point.y - start.y) > key.bounds.width / 2
+    }
+
     func finishSwipe(_ samples: [SwipeSample]) {
         lastShift = .distantPast
         onSwipe?(samples, uppercase, capsLock)
@@ -35,7 +39,7 @@ final class TypingKeys: UIStackView {
     func swipe(_ samples: [SwipeSample]) {
         guard let first = samples.first, let last = samples.last else { return }
         if let origin = hitTest(first.point, with: nil) as? Key, canSwipe(from: origin),
-           samples.contains(where: { hypot($0.point.x - first.point.x, $0.point.y - first.point.y) > origin.bounds.width / 2 }) {
+           samples.contains(where: { crossesSwipeThreshold($0.point, from: first.point, key: origin) }) {
             finishSwipe(samples)
         } else {
             tap(at: last.point)
