@@ -213,6 +213,17 @@ final class TypingVocabulary {
             append(expansion)
             return result
         }
+        if !protectedWords.contains(word), typed.first?.isLowercase == true, typed.dropFirst().first?.isUppercase == true,
+           typed.dropFirst(2).allSatisfy({ !$0.isUppercase }) {
+            let swapped = String(typed.prefix(2).reversed()) + typed.dropFirst(2)
+            if languages.contains(where: { lang in
+                guard let lex = tables[lang.code] else { return false }
+                return lex.node(swapped.lowercased()).flatMap(lex.terminal) != nil
+            }) {
+                result.automatic = swapped
+                append(swapped)
+            }
+        }
         let codes = word.compactMap { Lexicon.codes[$0] }
         guard codes.count == word.count else { return result }
         let suffix = Array(trail.taps.suffix(codes.count))
