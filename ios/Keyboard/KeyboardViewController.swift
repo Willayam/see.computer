@@ -28,24 +28,7 @@ final class KeyboardViewController: UIInputViewController {
     private var markWasVisible = false
     private let cancel = CloseButton()
     private let keys = TypingKeys()
-    /// Destructive edits require the same field, selection and surrounding text.
-    private struct Caret: Equatable {
-        let field: UUID
-        let before: String
-        let after: String?
-
-        init?(_ proxy: UITextDocumentProxy) {
-            guard proxy.selectedText?.isEmpty != false, let before = proxy.documentContextBeforeInput else { return nil }
-            guard let identifier = SeeDocumentIdentifier(proxy) else { return nil }
-            field = identifier
-            self.before = before
-            after = proxy.documentContextAfterInput
-        }
-    }
-    private var lastSpace: (time: TimeInterval, caret: Caret)?
-    private var lastLetter: Caret?
-    private var suggestionSpace: Caret?
-    private var lastCorrection: (caret: Caret, inserted: String, original: String)?
+    private lazy var typist = Typist { [completions] in completions.suggestions(for: $0) }
     private var deleteRepeat: Timer?
     private var pendingInsert = false
     private var activatedAt = Date.distantPast
@@ -170,7 +153,7 @@ final class KeyboardViewController: UIInputViewController {
 
     private func updateTypingContext() {
         keys.updateCase(for: textDocumentProxy)
-        completions.update(for: textDocumentProxy, canCorrect: lastLetter != nil && lastLetter == Caret(textDocumentProxy))
+        completions.update(for: textDocumentProxy, canCorrect: typist.canCorrect(textDocumentProxy))
     }
 
     override func selectionDidChange(_ textInput: UITextInput?) {
@@ -590,30 +573,14 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func forgetTypingPosition() {
-        lastSpace = nil
-        lastLetter = nil
-        lastCorrection = nil
-        suggestionSpace = nil
-    }
-
-    private func replaceSuffix(_ original: String, with replacement: String) {
-        let shared = zip(original, replacement).prefix { $0.0 == $0.1 }.count
-        for _ in original.dropFirst(shared) { textDocumentProxy.deleteBackward() }
-        let tail = String(replacement.dropFirst(shared))
-        if !tail.isEmpty { textDocumentProxy.insertText(tail) }
+        typist.forget()
     }
 
     private func chooseSuggestion(_ input: WordInput, _ candidate: String) {
         guard isActive, keys.isUserInteractionEnabled, WordInput(textDocumentProxy) == input else { return }
         prepareForManualEdit()
-        let proxy = textDocumentProxy
-        guard WordInput(proxy) == input else { return }
-        forgetTypingPosition()
-        let next = proxy.documentContextAfterInput?.first
-        let addSpace = next == nil || next.map { !$0.isWhitespace && !".,!?;:)]}".contains($0) } == true
-        replaceSuffix(input.word, with: candidate + (addSpace ? " " : ""))
-        if next == " " { proxy.adjustTextPosition(byCharacterOffset: 1) }
-        if addSpace || next == " " { suggestionSpace = Caret(proxy) }
+        guard WordInput(textDocumentProxy) == input else { return }
+        typist.choose(input, candidate, in: textDocumentProxy)
         rememberEditedField()
         updateTypingContext()
     }
@@ -621,35 +588,7 @@ final class KeyboardViewController: UIInputViewController {
     private func typed(_ output: String) {
         guard isActive, keys.isUserInteractionEnabled else { return }
         prepareForManualEdit()
-        let proxy = textDocumentProxy
-        let caret = Caret(proxy)
-        let previousSpace = lastSpace
-        let followsLetter = caret != nil && caret == lastLetter
-        let punctuation = output.count == 1 && ".,!?;:".contains(output)
-        let removeSpace = punctuation && caret != nil && caret == suggestionSpace && caret?.before.last == " "
-        forgetTypingPosition()
-        let now = ProcessInfo.processInfo.systemUptime
-        if output == " ", let previousSpace, now - previousSpace.time < 0.45, caret == previousSpace.caret {
-            replaceSuffix(" ", with: ". ")
-        } else {
-            if removeSpace { proxy.deleteBackward() }
-            if followsLetter, output == " " || punctuation,
-               let input = WordInput(proxy), !input.word.isEmpty, let correction = completions.suggestions(for: input).automatic {
-                let inserted = correction + output
-                replaceSuffix(input.word, with: inserted)
-                if let end = Caret(proxy), end.before.hasSuffix(inserted) {
-                    lastCorrection = (end, inserted, input.word)
-                }
-            } else {
-                proxy.insertText(output == "’" && proxy.smartQuotesType == .no ? "'" : output)
-            }
-            if output.count == 1, output.first?.isLetter == true {
-                lastLetter = Caret(proxy)
-            } else if output == " ", let prior = caret?.before.last, prior.isLetter || prior.isNumber,
-                      let end = Caret(proxy), end.before.last == " " {
-                lastSpace = (now, end)
-            }
-        }
+        typist.type(output, in: textDocumentProxy)
         rememberEditedField()
         updateTypingContext()
     }
@@ -657,13 +596,7 @@ final class KeyboardViewController: UIInputViewController {
     private func deleteCharacter() {
         guard isActive, keys.isUserInteractionEnabled else { return }
         prepareForManualEdit()
-        let correction = lastCorrection
-        forgetTypingPosition()
-        if let correction, correction.caret == Caret(textDocumentProxy) {
-            replaceSuffix(correction.inserted, with: correction.original)
-        } else {
-            textDocumentProxy.deleteBackward()
-        }
+        typist.delete(in: textDocumentProxy)
         rememberEditedField()
         updateTypingContext()
     }

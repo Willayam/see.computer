@@ -10,7 +10,7 @@ final class TypingKeys: UIStackView {
     private var shiftKey: Key?
     private let enter = Key(symbol: "return.left", label: "Return", output: "\n")
     private var returnType: UIReturnKeyType?
-    private var uppercase = false
+    private(set) var uppercase = false
     private var capsLock = false
     private var lastShift = Date.distantPast
     private var swedish = false
@@ -188,6 +188,31 @@ final class TypingKeys: UIStackView {
             moveCursor?(steps)
             trackpadX += CGFloat(steps) * 8
         default: break
+        }
+    }
+
+    /// Where a key sits in this view, found by what it types or by its label.
+    func frame(of key: String) -> CGRect? {
+        var pending: [UIView] = [self]
+        while let view = pending.popLast() {
+            if let control = view as? Key, !control.isHidden, control.output == key || control.accessibilityLabel == key {
+                return control.convert(control.bounds, to: self)
+            }
+            pending += view.subviews
+        }
+        return nil
+    }
+
+    /// A finished touch at a point in this view, as the touch system delivers it.
+    func tap(at point: CGPoint) {
+        var view = hitTest(point, with: nil)
+        while let candidate = view, candidate !== self, !(candidate is Key) { view = candidate.superview }
+        guard let key = view as? Key else { return }
+        // Calls the targets directly. sendActions needs a UIApplication, which the simulator harness lacks.
+        for case let target as NSObject in key.allTargets {
+            for action in key.actions(forTarget: target, forControlEvent: .touchUpInside) ?? [] {
+                target.perform(Selector(action), with: key)
+            }
         }
     }
 
