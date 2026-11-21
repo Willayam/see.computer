@@ -46,18 +46,11 @@ struct SwipeDecoder {
             }
         }
         anchors.append(points.count - 1)
-        var fits = true
+        turns = [points[0]]
         for (a, b) in zip(anchors, anchors.dropFirst()) {
-            let start = points[a], dx = points[b].x - start.x, dy = points[b].y - start.y
-            let length = max(0.001, dx * dx + dy * dy)
-            for j in (a + 1)..<b {
-                let x = points[j].x - start.x, y = points[j].y - start.y
-                let t = min(1, max(0, (x * dx + y * dy) / length))
-                if hypot(x - t * dx, y - t * dy) > 0.7 { fits = false; break }
-            }
-            if !fits { break }
+            simplify(a, b, depth: 0)
         }
-        timedPath = fits ? anchors.map { points[$0] } : []
+        timedPath = turns
     }
 
     private struct State {
