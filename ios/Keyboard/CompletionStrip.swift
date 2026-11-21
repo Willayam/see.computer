@@ -11,14 +11,15 @@ final class CompletionStrip: UIStackView {
     private var cached: WordSuggestions?
     private var canCorrect = false
     private var pending: DispatchWorkItem?
-    private let choices = (0..<3).map { _ in UIButton(type: .system) }
+    private let choices = (0..<3).map { _ in UIButton(type: .custom) }
     var accept: ((WordInput, String) -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         distribution = .fillEqually
         for (index, button) in choices.enumerated() {
-            button.tintColor = .label
+            button.setTitleColor(.label, for: .normal)
+            button.setTitleColor(UIColor.label.withAlphaComponent(0.5), for: .highlighted)
             button.titleLabel?.font = .systemFont(ofSize: 16)
             button.titleLabel?.lineBreakMode = .byTruncatingTail
             button.addTarget(self, action: #selector(chosen(_:)), for: .touchUpInside)
@@ -54,6 +55,11 @@ final class CompletionStrip: UIStackView {
     func update(for proxy: UITextDocumentProxy, trail: TapTrail, layout: KeyLayout, canCorrect: Bool, swipeChoices: [String]?) {
         let current = WordInput(proxy)
         let owned = trail.end != nil && trail.end == Caret(proxy) ? trail : TapTrail()
+        if let shownInput,
+           shownInput.field != (current?.field ?? SeeDocumentIdentifier(proxy)) ||
+           (current == nil && (!WordInput.allowsCorrection(in: proxy) || proxy.selectedText?.isEmpty == false)) {
+            setTitles(WordSuggestions(), for: nil)
+        }
         guard self.swipeChoices != swipeChoices || input != current || self.canCorrect != canCorrect || self.trail != owned || self.layout != layout else { return }
         self.swipeChoices = swipeChoices
         self.trail = owned
@@ -66,19 +72,18 @@ final class CompletionStrip: UIStackView {
     private func refresh() {
         cached = nil
         pending?.cancel()
-        guard let input else {
-            setTitles(WordSuggestions())
+        pending = nil
+        let input = self.input
+        if let input, let swipeChoices {
+            setTitles(WordSuggestions(titles: swipeChoices), for: input)
             return
         }
-        if let swipeChoices {
-            setTitles(WordSuggestions(titles: swipeChoices))
-            return
-        }
-        // Keep the previous row visible during a fast key sequence. A tap is
-        // validated against the field before its candidate can be applied.
+        // Coalesce temporary context loss while the host is applying an edit.
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.input == input else { return }
-            self.setTitles(self.suggestions(for: input, trail: self.trail, layout: self.layout))
+            self.pending = nil
+            let result = input.map { self.suggestions(for: $0, trail: self.trail, layout: self.layout) } ?? WordSuggestions()
+            self.setTitles(result, for: input)
         }
         pending = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.035, execute: work)
@@ -91,7 +96,7 @@ final class CompletionStrip: UIStackView {
         return result
     }
 
-    private func setTitles(_ result: WordSuggestions) {
+    private func setTitles(_ result: WordSuggestions, for input: WordInput?) {
         shownInput = input
         for (index, button) in choices.enumerated() {
             let value = result.titles.indices.contains(index) ? result.titles[index] : nil
@@ -106,7 +111,7 @@ final class CompletionStrip: UIStackView {
     }
 
     @objc private func chosen(_ button: UIButton) {
-        guard let shownInput, let candidate = button.accessibilityLabel else { return }
+        guard pending == nil, let shownInput, shownInput == input, let candidate = button.accessibilityLabel else { return }
         accept?(shownInput, candidate)
     }
 }
