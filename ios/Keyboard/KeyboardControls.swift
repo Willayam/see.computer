@@ -111,6 +111,7 @@ final class Key: UIControl {
         stroke.append(sample)
         if !swiping {
             guard travel.isWordGesture(at: sample.point, previous: stroke[stroke.count - 2].point, from: self, on: keyboard) else { return }
+            guard keyboard.beginSwipe(from: self) else { return }
             swiping = true
             trackedKey?.isHighlighted = false
             trackedKey = nil
@@ -132,6 +133,7 @@ final class Key: UIControl {
 
     private func endStroke() {
         stroke.removeAll(keepingCapacity: true)
+        if swiping { typingKeys?.endSwipe(from: self) }
         swiping = false
         travel = TypingKeys.StrokeTravel()
         guard let layer = trailLayer else { return }

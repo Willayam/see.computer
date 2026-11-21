@@ -26,8 +26,27 @@ final class TypingKeys: UIStackView {
     var allowsSwipe: () -> Bool = { true }
     var onSwipe: (([SwipeSample], Bool, Bool) -> Void)?
 
+    private weak var activeSwipe: Key?
+    private var pendingReleases: [(origin: Key, key: Key, point: CGPoint)] = []
+
+    func beginSwipe(from key: Key) -> Bool {
+        guard activeSwipe == nil else { return false }
+        activeSwipe = key
+        return true
+    }
+
+    func endSwipe(from key: Key) {
+        guard activeSwipe === key else { return }
+        activeSwipe = nil
+        let releases = pendingReleases
+        pendingReleases.removeAll()
+        for release in releases {
+            activateRelease(from: release.origin, key: release.key, at: release.point)
+        }
+    }
+
     func canSwipe(from key: Key) -> Bool {
-        page == .letters && letterKeys.contains(key) && onSwipe != nil && allowsSwipe()
+        activeSwipe == nil && page == .letters && letterKeys.contains(key) && onSwipe != nil && allowsSwipe()
     }
 
     struct StrokeTravel {
@@ -352,6 +371,14 @@ final class TypingKeys: UIStackView {
     func release(from origin: Key, last: Key?, at point: CGPoint) {
         guard let key = releaseKey(at: point) ?? last.flatMap({ letterKeys.contains($0) ? $0 : nil }),
               key !== enter || origin === enter else { return }
+        if activeSwipe != nil {
+            pendingReleases.append((origin, key, point))
+        } else {
+            activateRelease(from: origin, key: key, at: point)
+        }
+    }
+
+    private func activateRelease(from origin: Key, key: Key, at point: CGPoint) {
         if origin === shiftKey, key !== origin, letterKeys.contains(key), !uppercase { shift() }
         activate(key, at: point)
     }
