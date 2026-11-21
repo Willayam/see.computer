@@ -311,9 +311,12 @@ final class TypingKeys: UIStackView {
         return key
     }
 
-    /// A touch that began on `origin` and ended on `key`. Sliding off shift onto a letter types it in capitals.
-    func release(from origin: Key, to key: Key?, at point: CGPoint) {
-        guard let key else { return }
+    /// A touch that began on `origin`, was last over `last`, and ended at `point`.
+    /// Sliding off shift onto a letter types it in capitals. A release that drifts off the keys
+    /// types the letter the finger was last on, and return fires only from a touch that began on it.
+    func release(from origin: Key, last: Key?, at point: CGPoint) {
+        guard let key = releaseKey(at: point) ?? last.flatMap({ letterKeys.contains($0) ? $0 : nil }),
+              key !== enter || origin === enter else { return }
         if origin === shiftKey, key !== origin, letterKeys.contains(key), !uppercase { shift() }
         activate(key, at: point)
     }

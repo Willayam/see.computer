@@ -132,12 +132,10 @@ final class Key: UIControl {
             releasePoint = nil
             return
         }
-        // A release that drifts off the keyboard types the key the finger was last on.
         let last = trackedKey
         finishHighlight()
         guard let keyboard = typingKeys, let touch = touches.first else { return }
-        let point = touch.location(in: keyboard)
-        keyboard.release(from: self, to: keyboard.releaseKey(at: point) ?? last, at: point)
+        keyboard.release(from: self, last: last, at: touch.location(in: keyboard))
     }
 
     private func finishHighlight() {
