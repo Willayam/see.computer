@@ -6,7 +6,8 @@ final class TypingKeys: UIStackView {
     let preview = KeyPreview()
     private enum Page { case letters, numbers, symbols }
     private var page = Page.letters
-    private var letterKeys: [Key] = []
+    private var characterKeys: [Key] = []
+    private var letterKeys: [Key] { page == .letters ? characterKeys : [] }
     private weak var spaceKey: Key?
     private weak var deleteKey: Key?
     private var shiftKey: Key?
@@ -117,7 +118,7 @@ final class TypingKeys: UIStackView {
         endDelete?()
         preview.removeFromSuperview()
         arrangedSubviews.forEach { $0.removeFromSuperview() }
-        letterKeys = []
+        characterKeys = []
         shiftKey = nil
         let rows: [String]
         switch page {
@@ -131,7 +132,7 @@ final class TypingKeys: UIStackView {
             let cluster = UIStackView(arrangedSubviews: controls)
             cluster.distribution = .fillEqually
             let columns = page == .letters && swedish ? 11 : 10
-            if page == .letters { letterKeys += controls }
+            characterKeys += controls
             if index == 2 {
                 let modifier: Key
                 if page == .letters {
@@ -215,8 +216,18 @@ final class TypingKeys: UIStackView {
     /// A touch between keys goes to the nearest key, as on the system keyboard.
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         guard bounds.contains(point) else { return nil }
-        let hit = geometricHit(point, event: event)
-        guard let key = hit as? Key else { return hit }
+        let hit = super.hitTest(point, with: event)
+        guard let key = hit as? Key else {
+            guard let hit, hit !== preview, !hit.isDescendant(of: preview) else { return hit }
+            // Spacers extend the nearest character cell. A gap must never activate a function key.
+            func distance(to key: Key) -> CGFloat {
+                let frame = key.convert(key.bounds, to: self)
+                let dx = max(frame.minX - point.x, 0, point.x - frame.maxX)
+                let dy = max(frame.minY - point.y, 0, point.y - frame.maxY)
+                return dx * dx + dy * dy
+            }
+            return characterKeys.min { distance(to: $0) < distance(to: $1) } ?? hit
+        }
         return resolved(key, at: point)
     }
 
@@ -265,26 +276,6 @@ final class TypingKeys: UIStackView {
             if score > best { best = score; choice = fn }
         }
         return choice
-    }
-
-    private func geometricHit(_ point: CGPoint, event: UIEvent?) -> UIView? {
-        let hit = super.hitTest(point, with: event)
-        guard let hit, !(hit is Key), hit !== preview, !hit.isDescendant(of: preview) else { return hit }
-        var nearest: (key: Key, distance: CGFloat)?
-        var pending: [UIView] = [self]
-        while let view = pending.popLast() {
-            if let key = view as? Key {
-                guard !key.isHidden else { continue }
-                let frame = key.convert(key.bounds, to: self)
-                let dx = max(frame.minX - point.x, 0, point.x - frame.maxX)
-                let dy = max(frame.minY - point.y, 0, point.y - frame.maxY)
-                let distance = dx * dx + dy * dy
-                if distance < nearest?.distance ?? .infinity { nearest = (key, distance) }
-            } else {
-                pending += view.subviews
-            }
-        }
-        return nearest?.key ?? hit
     }
 
     /// Where a key sits in this view, found by what it types or by its label.
