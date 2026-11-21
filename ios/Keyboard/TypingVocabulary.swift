@@ -149,6 +149,10 @@ final class TypingVocabulary {
         let costs = codes.enumerated().map { i, code in
             layout.costs(letter: code, point: matches && i >= offset ? suffix[i - offset].point : nil, spread: spread)
         }
+        let sigma = spread * layout.pitch
+        let spaces = codes.indices.map { i in
+            layout.spaceCost(matches && i >= offset ? suffix[i - offset].point : nil, sigma: sigma)
+        }
         let literalCost = zip(costs, codes).reduce(0.0) { $0 + $1.0[$1.1] }
         var literal = -Double.infinity, unknown = -Double.infinity
         var candidates: [(String, Double)] = [], completions: [(String, Double)] = []
@@ -181,13 +185,21 @@ final class TypingVocabulary {
             unknown = max(unknown, context + lex.unknown(word))
             let readings =
                 decoders[language.code]?.candidates(
-                    costs: costs, omissions: layout.omissionCosts(spread: spread), textOnly: suffix.allSatisfy { $0.point == nil })
+                    costs: costs, omissions: layout.omissionCosts(spread: spread), textOnly: suffix.allSatisfy { $0.point == nil },
+                    previous: prev, spaces: spaces, lostSpace: offset == 0 && matches ? layout.lostSpaceCost(sigma: sigma) : .infinity)
                 ?? [:]
-            var ranked: [(Int, Double)] = readings.map { id, cost in (id, score(id) - cost) }
-            ranked.sort {
-                $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1
+            var ranked = readings.map { reading, cost in
+                (reading, context + lex.logProbability(reading.last, after: reading.first ?? prev) - cost)
             }
-            for (id, value) in ranked.prefix(4) { candidates.append((lex.displayForm(lex.text(id)), value)) }
+            ranked.sort {
+                if $0.1 != $1.1 { return $0.1 > $1.1 }
+                if $0.0.first != $1.0.first { return ($0.0.first ?? -1) < ($1.0.first ?? -1) }
+                return $0.0.last < $1.0.last
+            }
+            for (reading, value) in ranked.prefix(4) {
+                let lead = reading.first.map { lex.displayForm(lex.text($0)) + " " } ?? ""
+                candidates.append((lead + lex.displayForm(lex.text(reading.last)), value))
+            }
             for (rank, next) in lex.completions(word, limit: 3).enumerated() {
                 completions.append((lex.displayForm(next), context - Double(rank) * 0.1))
             }

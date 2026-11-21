@@ -39,6 +39,7 @@ final class TypingKeys: UIStackView {
         var layout = KeyLayout()
         layout.pitch = max(first.bounds.width, 1)
         layout.reach = bounds
+        layout.space = frame(of: "Space") ?? .zero
         for key in letterKeys {
             if let ch = key.output.first, let i = Lexicon.codes[ch] {
                 let rect = key.convert(key.bounds, to: self)
