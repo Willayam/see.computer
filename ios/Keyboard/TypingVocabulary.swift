@@ -125,12 +125,22 @@ final class TypingVocabulary {
         let literalCost = zip(costs,codes).reduce(0.0) { $0 + $1.0[$1.1] }
         var literal = -Double.infinity, unknown = -Double.infinity
         var candidates: [(String, Double)] = [], completions: [(String, Double)] = []
-        for language in languages {
-            guard let lex = tables[language.code] else { continue }
-            let prev = input.previous.last.flatMap(lex.node).flatMap(lex.terminal)
-            let context = input.previous.reduce(0.0) { evidence, word in
-                evidence*0.55 + log((lex.node(word).flatMap(lex.terminal).map { exp(lex.unigram($0)) } ?? 0) + 0.00002)
+        var weight = Array(repeating: 0.0, count: languages.count)
+        if languages.count == 2, let first = tables[languages[0].code], let second = tables[languages[1].code] {
+            func frequency(_ w: String, _ lex: Lexicon) -> Double {
+                lex.node(w).flatMap(lex.terminal).map { exp(lex.unigram($0)) } ?? 0
             }
+            let evidence = input.previous.reduce(0.0) { odds, previous in
+                odds*0.7 + log((frequency(previous,first)+2e-6)/(frequency(previous,second)+2e-6))
+            }
+            let p = 1 / (1 + exp(-max(-6,min(6,evidence))))
+            weight = [log(p),log1p(-p)]
+        }
+        for (index, language) in languages.enumerated() {
+            guard let lex = tables[language.code] else { continue }
+            let prev = input.sentenceStart ? lex.sentenceStart : input.previous.last.flatMap(lex.node).flatMap(lex.terminal)
+            let context = weight[index]
+            func score(_ id: Int) -> Double { context + lex.logProbability(id, after: prev) }
             if word.isEmpty {
                 if let prev {
                     for (rank, next) in lex.followers(prev, limit: 3).enumerated() {
@@ -139,8 +149,8 @@ final class TypingVocabulary {
                 }
                 continue
             }
-            if let id = lex.node(word).flatMap(lex.terminal) { literal = max(literal,lex.unigram(id)) }
-            unknown = max(unknown,lex.unknown(word))
+            if let id = lex.node(word).flatMap(lex.terminal) { literal = max(literal, score(id)) }
+            unknown = max(unknown,context + lex.unknown(word))
             var readings = TapDecoder(lexicon: lex).candidates(costs: costs)
             if suffix.allSatisfy({ $0.point == nil }) {
                 // Text-only input retains the keyboard's repeated-letter and transposition corrections.
@@ -151,7 +161,7 @@ final class TypingVocabulary {
                     if let id = lex.node(String(variant)).flatMap(lex.terminal) { readings.append((id, letters[i] == letters[i-1] ? 3.8 : 5.3)) }
                 }
             }
-            for (id,cost) in readings { candidates.append((lex.text(id),lex.unigram(id)-cost)) }
+            for (id,cost) in readings { candidates.append((lex.text(id),score(id)-cost)) }
             for (rank,next) in lex.completions(word, limit: 3).enumerated() {
                 completions.append((next, context - Double(rank)*0.1))
             }
