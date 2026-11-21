@@ -87,9 +87,10 @@ final class Typist {
         }
         if let letter = output.first, output.count == 1, WordInput.wordCharacter(letter),
            let start = caret, let end = Caret(proxy), start.field == end.field, start.after == end.after,
-           end.before.hasSuffix(output) {
+           end.before == start.before + output {
             trail = priorTrail
             trail.taps.append(Tap(typed: Character(output.lowercased()), shifted: letter.isUppercase, point: point))
+            if trail.taps.count > 36 { trail.taps.removeFirst() }
             trail.end = end
         }
         if output.count == 1, output.first?.isLetter == true {

@@ -33,8 +33,9 @@ final class TypingKeys: UIStackView {
 
     required init(coder: NSCoder) { fatalError("not used") }
 
+    private var lastLetterLayout = KeyLayout()
     var keyLayout: KeyLayout {
-        guard let first = letterKeys.first else { return KeyLayout() }
+        guard let first = letterKeys.first else { return lastLetterLayout }
         var layout = KeyLayout()
         layout.pitch = max(first.bounds.width, 1)
         layout.reach = bounds
@@ -290,6 +291,7 @@ final class TypingKeys: UIStackView {
     }
 
     @objc private func changePage() {
+        if page == .letters { lastLetterLayout = keyLayout }
         page = page == .letters ? .numbers : .letters
         rebuild()
     }

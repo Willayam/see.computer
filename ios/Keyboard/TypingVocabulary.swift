@@ -48,6 +48,7 @@ struct WordSuggestions {
 final class TypingVocabulary {
     private nonisolated static let tables = ["en": Lexicon(language: "en"), "sv": Lexicon(language: "sv")].compactMapValues { $0 }
     private var tables: [String: Lexicon] = [:]
+    private var decoders: [String: TapDecoder] = [:]
     private let checker = UITextChecker()
     private typealias Language = (code: String, dictionary: String?)
     private var languages: [Language] = []
@@ -59,6 +60,7 @@ final class TypingVocabulary {
             let loaded = Self.tables
             DispatchQueue.main.async {
                 self.tables = loaded
+                self.decoders = loaded.mapValues { TapDecoder(lexicon: $0) }
                 completion()
             }
         }
@@ -92,7 +94,7 @@ final class TypingVocabulary {
     }
 
     func suggestions(for input: WordInput) -> WordSuggestions {
-        suggestions(for: input, trail: TapTrail(), layout: KeyLayout())
+        suggestions(for: input, trail: TapTrail(), layout: .standard(swedish: languages.contains { $0.code == "sv" }))
     }
 
     func suggestions(for input: WordInput, trail: TapTrail, layout: KeyLayout) -> WordSuggestions {
@@ -101,7 +103,7 @@ final class TypingVocabulary {
         var result = WordSuggestions(titles: typed.isEmpty ? [] : [typed])
         func display(_ candidate: String) -> String {
             var text = candidate
-            if typed.first?.isUppercase == true || candidate == "i" || candidate.hasPrefix("i'") {
+            if typed.first?.isUppercase == true {
                 text = candidate.prefix(1).uppercased() + candidate.dropFirst()
             }
             return input.smartQuotes ? text.replacingOccurrences(of: "'", with: "’") : text
@@ -120,9 +122,9 @@ final class TypingVocabulary {
         let matches = word.hasSuffix(String(suffix.map { $0.typed }).replacingOccurrences(of: "’", with: "'"))
         let offset = codes.count - suffix.count
         let costs = codes.enumerated().map { i, code in
-            layout.costs(letter: code, point: matches && i >= offset ? suffix[i-offset].point : nil)
+            layout.costs(letter: code, point: matches && i >= offset ? suffix[i - offset].point : nil)
         }
-        let literalCost = zip(costs,codes).reduce(0.0) { $0 + $1.0[$1.1] }
+        let literalCost = zip(costs, codes).reduce(0.0) { $0 + $1.0[$1.1] }
         var literal = -Double.infinity, unknown = -Double.infinity
         var candidates: [(String, Double)] = [], completions: [(String, Double)] = []
         var weight = Array(repeating: 0.0, count: languages.count)
@@ -131,51 +133,54 @@ final class TypingVocabulary {
                 lex.node(w).flatMap(lex.terminal).map { exp(lex.unigram($0)) } ?? 0
             }
             let evidence = input.previous.reduce(0.0) { odds, previous in
-                odds*0.7 + log((frequency(previous,first)+2e-6)/(frequency(previous,second)+2e-6))
+                odds * 0.7 + log((frequency(previous, first) + 2e-6) / (frequency(previous, second) + 2e-6))
             }
-            let p = 1 / (1 + exp(-max(-6,min(6,evidence))))
-            weight = [log(p),log1p(-p)]
+            let p = 1 / (1 + exp(-max(-6, min(6, evidence))))
+            weight = [log(p), log1p(-p)]
         }
         for (index, language) in languages.enumerated() {
             guard let lex = tables[language.code] else { continue }
-            let prev = input.sentenceStart ? lex.sentenceStart : input.previous.last.flatMap(lex.node).flatMap(lex.terminal)
+            let prev =
+                input.sentenceStart ? lex.sentenceStart : input.previous.last.flatMap(lex.node).flatMap(lex.terminal)
             let context = weight[index]
             func score(_ id: Int) -> Double { context + lex.logProbability(id, after: prev) }
             if word.isEmpty {
                 if let prev {
                     for (rank, next) in lex.followers(prev, limit: 3).enumerated() {
-                        completions.append((next, context - Double(rank)*0.1))
+                        completions.append((lex.displayForm(next), context - Double(rank) * 0.1))
                     }
                 }
                 continue
             }
             if let id = lex.node(word).flatMap(lex.terminal) { literal = max(literal, score(id)) }
-            unknown = max(unknown,context + lex.unknown(word))
-            var readings = TapDecoder(lexicon: lex).candidates(costs: costs)
-            if suffix.allSatisfy({ $0.point == nil }) {
-                // Text-only input retains the keyboard's repeated-letter and transposition corrections.
-                let letters = Array(word)
-                for i in letters.indices.dropFirst() {
-                    var variant = letters
-                    if letters[i] == letters[i-1] { variant.remove(at: i) } else { variant.swapAt(i,i-1) }
-                    if let id = lex.node(String(variant)).flatMap(lex.terminal) { readings.append((id, letters[i] == letters[i-1] ? 3.8 : 5.3)) }
-                }
+            unknown = max(unknown, context + lex.unknown(word))
+            let readings =
+                decoders[language.code]?.candidates(
+                    costs: costs, omissions: layout.omissionCosts, textOnly: suffix.allSatisfy { $0.point == nil })
+                ?? [:]
+            var ranked: [(Int, Double)] = readings.map { id, cost in (id, score(id) - cost) }
+            ranked.sort {
+                $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1
             }
-            for (id,cost) in readings { candidates.append((lex.text(id),score(id)-cost)) }
-            for (rank,next) in lex.completions(word, limit: 3).enumerated() {
-                completions.append((next, context - Double(rank)*0.1))
+            for (id, value) in ranked.prefix(4) { candidates.append((lex.displayForm(lex.text(id)), value)) }
+            for (rank, next) in lex.completions(word, limit: 3).enumerated() {
+                completions.append((lex.displayForm(next), context - Double(rank) * 0.1))
             }
         }
         candidates.sort { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }
-        if let best = candidates.first, best.0 != word, !protectedWords.contains(word),
-           typed.dropFirst() == typed.dropFirst().lowercased(), input.sentenceStart || typed.first?.isUppercase != true {
+        if let best = candidates.first, best.0.lowercased() != word, !protectedWords.contains(word),
+            typed.dropFirst() == typed.dropFirst().lowercased(), input.sentenceStart || typed.first?.isUppercase != true
+        {
             var threshold = literal + 1
             if !literal.isFinite {
                 threshold = unknown + log(input.sentenceStart ? 0.03 : 0.01)
                 let range = NSRange(word.startIndex..., in: word)
                 if languages.compactMap(\.dictionary).contains(where: {
-                    checker.rangeOfMisspelledWord(in: word, range: range, startingAt: 0, wrap: false, language: $0).location == NSNotFound
-                }) { threshold = max(-16,threshold) }
+                    checker.rangeOfMisspelledWord(in: word, range: range, startingAt: 0, wrap: false, language: $0)
+                        .location == NSNotFound
+                }) {
+                    threshold = max(-16, threshold)
+                }
                 threshold += 2
             }
             if best.1 >= threshold - literalCost {
