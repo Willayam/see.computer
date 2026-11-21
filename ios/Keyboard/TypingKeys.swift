@@ -191,6 +191,27 @@ final class TypingKeys: UIStackView {
         }
     }
 
+    /// A touch between keys goes to the nearest key, as on the system keyboard.
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        guard let hit, !(hit is Key), hit !== preview, !hit.isDescendant(of: preview) else { return hit }
+        var nearest: (key: Key, distance: CGFloat)?
+        var pending: [UIView] = [self]
+        while let view = pending.popLast() {
+            if let key = view as? Key {
+                guard !key.isHidden else { continue }
+                let frame = key.convert(key.bounds, to: self)
+                let dx = max(frame.minX - point.x, 0, point.x - frame.maxX)
+                let dy = max(frame.minY - point.y, 0, point.y - frame.maxY)
+                let distance = dx * dx + dy * dy
+                if distance < nearest?.distance ?? .infinity { nearest = (key, distance) }
+            } else {
+                pending += view.subviews
+            }
+        }
+        return nearest?.key ?? hit
+    }
+
     /// Where a key sits in this view, found by what it types or by its label.
     func frame(of key: String) -> CGRect? {
         var pending: [UIView] = [self]
