@@ -33,6 +33,20 @@ final class TypingKeys: UIStackView {
 
     required init(coder: NSCoder) { fatalError("not used") }
 
+    var keyLayout: KeyLayout {
+        guard let first = letterKeys.first else { return KeyLayout() }
+        var layout = KeyLayout()
+        layout.pitch = max(first.bounds.width, 1)
+        layout.reach = bounds
+        for key in letterKeys {
+            if let ch = key.output.first, let i = Lexicon.codes[ch] {
+                let rect = key.convert(key.bounds, to: self)
+                layout.centers[i] = CGPoint(x: rect.midX, y: rect.midY)
+            }
+        }
+        return layout
+    }
+
     func connectGlobe(to controller: UIInputViewController) {
         globe.addTarget(controller, action: #selector(UIInputViewController.handleInputModeList(from:with:)), for: .allTouchEvents)
     }

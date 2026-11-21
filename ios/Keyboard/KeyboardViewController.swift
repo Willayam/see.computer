@@ -28,7 +28,7 @@ final class KeyboardViewController: UIInputViewController {
     private var markWasVisible = false
     private let cancel = CloseButton()
     private let keys = TypingKeys()
-    private lazy var typist = Typist { [completions] in completions.suggestions(for: $0) }
+    private lazy var typist = Typist { [completions, keys] in completions.suggestions(for: $0, trail: $1, layout: keys.keyLayout) }
     private var deleteRepeat: Timer?
     private var pendingInsert = false
     private var activatedAt = Date.distantPast
@@ -153,7 +153,7 @@ final class KeyboardViewController: UIInputViewController {
 
     private func updateTypingContext() {
         keys.updateCase(for: textDocumentProxy)
-        completions.update(for: textDocumentProxy, canCorrect: typist.canCorrect(textDocumentProxy))
+        completions.update(for: textDocumentProxy, trail: typist.trail, layout: keys.keyLayout, canCorrect: typist.canCorrect(textDocumentProxy))
     }
 
     override func selectionDidChange(_ textInput: UITextInput?) {

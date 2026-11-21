@@ -32,7 +32,7 @@ Tap **Dictate** above the letters, talk, then tap **Done** in the same spot. Or 
 
 The bold suggestion is what space or punctuation will accept. Tap the quoted spelling to keep it, or press backspace immediately after a correction to restore what you typed. Tap a suggestion to finish a word or insert the next one. In bilingual mode the recent words help rank suggestions, and a spelling recognized in either language can stay. The keyboard also uses the iPhone’s text replacements and the names iOS shares with it.
 
-Prefix and next-word suggestions use bundled counts from Mozilla’s CC0 English and Swedish Sentence Collector data. The keyboard uses the field’s current text on device. To rebuild the counts from the pinned source, run `python3 ios/scripts/build-typing-vocabulary.py` from the repository root. [Common Voice data sources](https://github.com/common-voice/common-voice/tree/1b139004ffcff2ad9f7907a984397730992f237c/server/data)
+The keyboard scores nearby keys using English and Swedish word frequencies from the AOSP dictionaries, Leipzig news and web corpora, and Mozilla Common Voice. The bundled models run on device. Rebuild them with `python3 ios/scripts/build-typing-lexicon.py /path/to/cache`. [Data sources and licenses](THIRD_PARTY_NOTICES.md)
 
 The words appear in the text field as you talk, underlined until the take is done, and the final text replaces them. If a field stops holding them, because the cursor moved, the rest show on the keyboard.
 

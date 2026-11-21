@@ -1,40 +1,5 @@
 import UIKit
 
-private struct WordTable {
-    var counts: [String: Int] = [:]
-    var following: [String: [String]] = [:]
-    private var prefixes: [String: [String]] = [:]
-    private var total = 0
-
-    init(language: String) {
-        guard let url = Bundle.main.url(forResource: "words-\(language)", withExtension: "tsv"),
-              let data = try? String(contentsOf: url, encoding: .utf8) else { return }
-        for line in data.split(separator: "\n") {
-            let columns = line.split(separator: "\t")
-            guard columns.count >= 2, let count = Int(columns[1]) else { continue }
-            let word = String(columns[0])
-            counts[word] = count
-            total += count
-            if columns.count > 2 { following[word] = columns.dropFirst(2).map(String.init) }
-            // The file is in frequency order, so each bucket is too.
-            prefixes[String(word.prefix(2)), default: []].append(word)
-            if word.count > 1 {
-                let first = String(word.prefix(1))
-                if prefixes[first, default: []].count < 8 { prefixes[first, default: []].append(word) }
-            }
-        }
-    }
-
-    func completions(_ prefix: String) -> [String] {
-        let bucket = prefixes[String(prefix.prefix(2))] ?? []
-        return Array(bucket.lazy.filter { $0 != prefix && $0.hasPrefix(prefix) }.prefix(3))
-    }
-
-    func frequency(_ word: String) -> Double {
-        Double(counts[word] ?? 0) / Double(max(total, 1))
-    }
-}
-
 struct WordInput: Equatable {
     let field: UUID
     let word: String
@@ -81,8 +46,8 @@ struct WordSuggestions {
 
 @MainActor
 final class TypingVocabulary {
-    private nonisolated static let tables = ["en": WordTable(language: "en"), "sv": WordTable(language: "sv")]
-    private var tables: [String: WordTable] = [:]
+    private nonisolated static let tables = ["en": Lexicon(language: "en"), "sv": Lexicon(language: "sv")].compactMapValues { $0 }
+    private var tables: [String: Lexicon] = [:]
     private let checker = UITextChecker()
     private typealias Language = (code: String, dictionary: String?)
     private var languages: [Language] = []
@@ -126,130 +91,90 @@ final class TypingVocabulary {
         }
     }
 
-    private func orderedLanguages(for input: WordInput) -> [Language] {
-        guard languages.count == 2, !input.previous.isEmpty else { return languages }
-        // Recent words carry the most weight when the user changes languages mid-message.
-        let evidence = input.previous.reduce(0.0) { score, word in
-            let first = tables[languages[0].code]?.frequency(word) ?? 0
-            let second = tables[languages[1].code]?.frequency(word) ?? 0
-            return score * 0.55 + log((first + 0.00002) / (second + 0.00002))
-        }
-        return evidence < -0.4 ? languages.reversed() : languages
+    func suggestions(for input: WordInput) -> WordSuggestions {
+        suggestions(for: input, trail: TapTrail(), layout: KeyLayout())
     }
 
-    func suggestions(for input: WordInput) -> WordSuggestions {
-        let ordered = orderedLanguages(for: input)
+    func suggestions(for input: WordInput, trail: TapTrail, layout: KeyLayout) -> WordSuggestions {
         let typed = input.word
         let word = typed.lowercased().replacingOccurrences(of: "’", with: "'")
         var result = WordSuggestions(titles: typed.isEmpty ? [] : [typed])
-        func display(_ candidate: String, language: String) -> String {
-            var value = candidate
-            if typed.first?.isUppercase == true || (language == "en" && (value == "i" || value.hasPrefix("i'"))) {
-                value = value.prefix(1).uppercased() + value.dropFirst()
+        func display(_ candidate: String) -> String {
+            var text = candidate
+            if typed.first?.isUppercase == true || candidate == "i" || candidate.hasPrefix("i'") {
+                text = candidate.prefix(1).uppercased() + candidate.dropFirst()
             }
-            return input.smartQuotes ? value.replacingOccurrences(of: "'", with: "’") : value
+            return input.smartQuotes ? text.replacingOccurrences(of: "'", with: "’") : text
         }
-        func append(_ candidate: String) {
-            if result.titles.count < 3, !result.titles.contains(candidate) { result.titles.append(candidate) }
-        }
-        if word.isEmpty {
-            guard let previous = input.previous.last else { return result }
-            for language in ordered {
-                for candidate in tables[language.code]?.following[previous] ?? [] {
-                    append(display(candidate, language: language.code))
-                }
-            }
-            return result
+        func append(_ title: String) {
+            if result.titles.count < 3 && !result.titles.contains(title) { result.titles.append(title) }
         }
         if let expansion = shortcuts[word] {
             result.automatic = expansion
             append(expansion)
             return result
         }
-
-        let range = NSRange(word.startIndex..., in: word)
-        let misspelled = word.count >= 3 && !protectedWords.contains(word) && ordered.allSatisfy { language in
-            guard let dictionary = language.dictionary else { return false }
-            return checker.rangeOfMisspelledWord(in: word, range: range, startingAt: 0, wrap: false, language: dictionary).location != NSNotFound
+        let codes = word.compactMap { Lexicon.codes[$0] }
+        guard codes.count == word.count else { return result }
+        let suffix = Array(trail.taps.suffix(codes.count))
+        let matches = word.hasSuffix(String(suffix.map { $0.typed }).replacingOccurrences(of: "’", with: "'"))
+        let offset = codes.count - suffix.count
+        let costs = codes.enumerated().map { i, code in
+            layout.costs(letter: code, point: matches && i >= offset ? suffix[i-offset].point : nil)
         }
-        var guesses: [String: Double] = [:]
-        if misspelled {
-            let repeated = Self.removingRepeatedLetters(in: word)
-            for (index, language) in ordered.enumerated() {
-                guard let dictionary = language.dictionary else { continue }
-                let table = tables[language.code]
-                let spellings = checker.guesses(forWordRange: range, in: word, language: dictionary) ?? []
-                let repeatedCandidates = repeated.filter { table?.counts[$0] != nil }
-                let list = repeatedCandidates + spellings.prefix(6)
-                for (rank, candidate) in list.enumerated() where candidate.allSatisfy(WordInput.wordCharacter) {
-                    let lower = candidate.lowercased()
-                    let frequency = (table?.frequency(lower) ?? 0) * 100_000
-                    let contextBonus = input.previous.last.flatMap { table?.following[$0] }?.contains(lower) == true ? 1.5 : 0
-                    let distanceBonus: Double
-                    if repeatedCandidates.contains(lower) {
-                        distanceBonus = 4
-                    } else {
-                        distanceBonus = Self.transposed(word, lower) ? 2.5 : 0
+        let literalCost = zip(costs,codes).reduce(0.0) { $0 + $1.0[$1.1] }
+        var literal = -Double.infinity, unknown = -Double.infinity
+        var candidates: [(String, Double)] = [], completions: [(String, Double)] = []
+        for language in languages {
+            guard let lex = tables[language.code] else { continue }
+            let prev = input.previous.last.flatMap(lex.node).flatMap(lex.terminal)
+            let context = input.previous.reduce(0.0) { evidence, word in
+                evidence*0.55 + log((lex.node(word).flatMap(lex.terminal).map { exp(lex.unigram($0)) } ?? 0) + 0.00002)
+            }
+            if word.isEmpty {
+                if let prev {
+                    for (rank, next) in lex.followers(prev, limit: 3).enumerated() {
+                        completions.append((next, context - Double(rank)*0.1))
                     }
-                    let score = log1p(frequency) + contextBonus + distanceBonus - Double(rank) * 0.35 - Double(index) * 1.2
-                    let title = display(candidate, language: language.code)
-                    guesses[title] = max(guesses[title] ?? -.infinity, score)
+                }
+                continue
+            }
+            if let id = lex.node(word).flatMap(lex.terminal) { literal = max(literal,lex.unigram(id)) }
+            unknown = max(unknown,lex.unknown(word))
+            var readings = TapDecoder(lexicon: lex).candidates(costs: costs)
+            if suffix.allSatisfy({ $0.point == nil }) {
+                // Text-only input retains the keyboard's repeated-letter and transposition corrections.
+                let letters = Array(word)
+                for i in letters.indices.dropFirst() {
+                    var variant = letters
+                    if letters[i] == letters[i-1] { variant.remove(at: i) } else { variant.swapAt(i,i-1) }
+                    if let id = lex.node(String(variant)).flatMap(lex.terminal) { readings.append((id, letters[i] == letters[i-1] ? 3.8 : 5.3)) }
                 }
             }
-        }
-        let ranked = guesses.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
-        if let best = ranked.first, best.value >= 2.5, best.value - (ranked.dropFirst().first?.value ?? -.infinity) >= 0.85,
-           (typed == typed.lowercased() || (input.sentenceStart && typed.dropFirst() == typed.dropFirst().lowercased())),
-           Self.closeSpelling(word, best.key.lowercased().replacingOccurrences(of: "’", with: "'")) {
-            result.automatic = best.key
-            append(best.key)
-        }
-        for language in ordered {
-            let table = tables[language.code]
-            let predicted = input.previous.last.flatMap { table?.following[$0] } ?? []
-            for candidate in predicted where candidate != word && candidate.hasPrefix(word) { append(display(candidate, language: language.code)) }
-            for candidate in table?.completions(word) ?? [] { append(display(candidate, language: language.code)) }
-            if result.titles.count == 3 { break }
-        }
-        for guess in ranked { append(guess.key) }
-        return result
-    }
-
-    private static func transposed(_ a: String, _ b: String) -> Bool {
-        guard a.count == b.count else { return false }
-        let pairs = Array(zip(a, b))
-        guard let i = pairs.firstIndex(where: { $0.0 != $0.1 }), i + 1 < pairs.count else { return false }
-        return pairs[i].0 == pairs[i + 1].1 && pairs[i].1 == pairs[i + 1].0 &&
-            pairs.dropFirst(i + 2).allSatisfy { $0.0 == $0.1 }
-    }
-
-    private static func removingRepeatedLetters(in word: String) -> [String] {
-        var words: [String] = []
-        var previous: Character?
-        for index in word.indices {
-            if word[index] == previous { words.append(String(word[..<index] + word[word.index(after: index)...])) }
-            previous = word[index]
-        }
-        return words
-    }
-
-    private static func closeSpelling(_ a: String, _ b: String) -> Bool {
-        if transposed(a, b) || removingRepeatedLetters(in: a).contains(b) { return true }
-        // Shortening a partial word such as "tomo" to "too" rarely helps.
-        if a.count <= 4 && b.count < a.count { return false }
-        let limit = a.count >= 7 ? 2 : 1
-        guard abs(a.count - b.count) <= limit else { return false }
-        let target = Array(b)
-        var row = Array(0...target.count)
-        for (i, letter) in a.enumerated() {
-            var diagonal = row[0]
-            row[0] = i + 1
-            for j in target.indices {
-                let above = row[j + 1]
-                row[j + 1] = min(above + 1, row[j] + 1, diagonal + (letter == target[j] ? 0 : 1))
-                diagonal = above
+            for (id,cost) in readings { candidates.append((lex.text(id),lex.unigram(id)-cost)) }
+            for (rank,next) in lex.completions(word, limit: 3).enumerated() {
+                completions.append((next, context - Double(rank)*0.1))
             }
         }
-        return row[target.count] <= limit
+        candidates.sort { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }
+        if let best = candidates.first, best.0 != word, !protectedWords.contains(word),
+           typed.dropFirst() == typed.dropFirst().lowercased(), input.sentenceStart || typed.first?.isUppercase != true {
+            var threshold = literal + 1
+            if !literal.isFinite {
+                threshold = unknown + log(input.sentenceStart ? 0.03 : 0.01)
+                let range = NSRange(word.startIndex..., in: word)
+                if languages.compactMap(\.dictionary).contains(where: {
+                    checker.rangeOfMisspelledWord(in: word, range: range, startingAt: 0, wrap: false, language: $0).location == NSNotFound
+                }) { threshold = max(-16,threshold) }
+                threshold += 2
+            }
+            if best.1 >= threshold - literalCost {
+                result.automatic = display(best.0)
+                append(display(best.0))
+            }
+        }
+        for next in completions.sorted(by: { $0.1 > $1.1 }) { append(display(next.0)) }
+        for next in candidates.prefix(3) { append(display(next.0)) }
+        return result
     }
 }

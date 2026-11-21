@@ -34,9 +34,9 @@ final class Typist {
     private var lastLetter: Caret?
     private var suggestionSpace: Caret?
     private var lastCorrection: (caret: Caret, inserted: String, original: String)?
-    private let suggestions: (WordInput) -> WordSuggestions
+    private let suggestions: (WordInput, TapTrail) -> WordSuggestions
 
-    init(suggestions: @escaping (WordInput) -> WordSuggestions) {
+    init(suggestions: @escaping (WordInput, TapTrail) -> WordSuggestions) {
         self.suggestions = suggestions
     }
 
@@ -76,7 +76,7 @@ final class Typist {
         }
         if removeSpace { proxy.deleteBackward() }
         if followsLetter, output == " " || punctuation,
-           let input = WordInput(proxy), !input.word.isEmpty, let correction = suggestions(input).automatic {
+           let input = WordInput(proxy), !input.word.isEmpty, let correction = suggestions(input, priorTrail).automatic {
             let inserted = correction + output
             replaceSuffix(input.word, with: inserted, in: proxy)
             if let end = Caret(proxy), end.before.hasSuffix(inserted) {

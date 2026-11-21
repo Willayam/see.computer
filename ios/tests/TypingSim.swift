@@ -38,7 +38,7 @@ private final class Pipeline {
         keys.layoutIfNeeded()
         vocabulary.configure(languages, dictionaries: UITextChecker.availableLanguages)
         await withCheckedContinuation { continuation in vocabulary.load { continuation.resume() } }
-        typist = Typist { [vocabulary] in vocabulary.suggestions(for: $0) }
+        typist = Typist { [vocabulary, keys] in vocabulary.suggestions(for: $0, trail: $1, layout: keys.keyLayout) }
         keys.insert = { [unowned self] output, point in
             self.typist.type(output, at: point, in: self.field)
             self.keys.updateCase(for: self.field)
@@ -63,7 +63,7 @@ private final class Pipeline {
     func suggestions() -> [String] {
         guard let input = WordInput(field) else { return [] }
         let start = DispatchTime.now().uptimeNanoseconds
-        let titles = vocabulary.suggestions(for: input).titles
+        let titles = vocabulary.suggestions(for: input, trail: typist.trail, layout: keys.keyLayout).titles
         suggestionNanos.append(DispatchTime.now().uptimeNanoseconds - start)
         return titles
     }
