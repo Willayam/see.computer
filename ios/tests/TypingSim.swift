@@ -39,6 +39,7 @@ private final class Pipeline {
         vocabulary.configure(languages, dictionaries: UITextChecker.availableLanguages)
         await withCheckedContinuation { continuation in vocabulary.load { continuation.resume() } }
         typist = Typist { [vocabulary, keys] in vocabulary.suggestions(for: $0, trail: $1, layout: keys.keyLayout) }
+        typist.committed = { [vocabulary, keys] in vocabulary.learn($0, chosen: $1, layout: keys.keyLayout) }
         keys.insert = { [unowned self] output, point in
             self.typist.type(output, at: point, in: self.field)
             self.keys.updateCase(for: self.field)

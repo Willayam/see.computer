@@ -55,6 +55,31 @@ final class TypingVocabulary {
     private var shortcuts: [String: String] = [:]
     private var protectedWords = Set<String>()
 
+    private let store: UserDefaults?
+    private var residual: Double
+    private var count: Double
+    var spread: Double { min(0.4, max(0.1, sqrt((residual + 5) / (2 * (count + 40))))) }
+
+    init(store: UserDefaults? = nil) {
+        self.store = store
+        let saved = store?.dictionary(forKey: "typingResiduals")
+        residual = saved?["sum"] as? Double ?? 0
+        count = saved?["count"] as? Double ?? 0
+    }
+
+    func learn(_ trail: TapTrail, chosen: String, layout: KeyLayout) {
+        let letters = chosen.lowercased()
+        guard letters.count == trail.taps.count, !letters.contains(" ") else { return }
+        for (tap, letter) in zip(trail.taps, letters) {
+            guard let point = tap.point, let code = Lexicon.codes[letter], let center = layout.centers[code] else { continue }
+            let distance = hypot(point.x - center.x, point.y - center.y) / layout.pitch
+            guard distance <= 1.6 else { continue }
+            residual = residual * 0.999 + distance * distance
+            count = count * 0.999 + 1
+        }
+        store?.set(["sum": residual, "count": count], forKey: "typingResiduals")
+    }
+
     func load(completion: @escaping () -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             let loaded = Self.tables
@@ -122,7 +147,7 @@ final class TypingVocabulary {
         let matches = word.hasSuffix(String(suffix.map { $0.typed }).replacingOccurrences(of: "’", with: "'"))
         let offset = codes.count - suffix.count
         let costs = codes.enumerated().map { i, code in
-            layout.costs(letter: code, point: matches && i >= offset ? suffix[i - offset].point : nil)
+            layout.costs(letter: code, point: matches && i >= offset ? suffix[i - offset].point : nil, spread: spread)
         }
         let literalCost = zip(costs, codes).reduce(0.0) { $0 + $1.0[$1.1] }
         var literal = -Double.infinity, unknown = -Double.infinity
@@ -156,7 +181,7 @@ final class TypingVocabulary {
             unknown = max(unknown, context + lex.unknown(word))
             let readings =
                 decoders[language.code]?.candidates(
-                    costs: costs, omissions: layout.omissionCosts, textOnly: suffix.allSatisfy { $0.point == nil })
+                    costs: costs, omissions: layout.omissionCosts(spread: spread), textOnly: suffix.allSatisfy { $0.point == nil })
                 ?? [:]
             var ranked: [(Int, Double)] = readings.map { id, cost in (id, score(id) - cost) }
             ranked.sort {

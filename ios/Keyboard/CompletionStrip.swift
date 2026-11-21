@@ -2,7 +2,7 @@ import UIKit
 
 /// Correction and prediction buttons share their candidates with the space key.
 final class CompletionStrip: UIStackView {
-    private let vocabulary = TypingVocabulary()
+    let vocabulary = TypingVocabulary(store: TypingLanguages.store)
     private var trail = TapTrail()
     private var layout = KeyLayout()
     private var input: WordInput?

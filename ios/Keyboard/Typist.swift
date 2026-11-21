@@ -34,6 +34,7 @@ final class Typist {
     private var lastLetter: Caret?
     private var suggestionSpace: Caret?
     private var lastCorrection: (caret: Caret, inserted: String, original: String)?
+    var committed: ((TapTrail, String) -> Void)?
     private let suggestions: (WordInput, TapTrail) -> WordSuggestions
 
     init(suggestions: @escaping (WordInput, TapTrail) -> WordSuggestions) {
@@ -53,6 +54,7 @@ final class Typist {
     }
 
     func choose(_ input: WordInput, _ candidate: String, in proxy: UITextDocumentProxy) {
+        if trail.end == Caret(proxy) { committed?(trail, candidate) }
         forget()
         let next = proxy.documentContextAfterInput?.first
         let addSpace = next == nil || next.map { !$0.isWhitespace && !".,!?;:)]}".contains($0) } == true
@@ -75,8 +77,11 @@ final class Typist {
             return
         }
         if removeSpace { proxy.deleteBackward() }
+        let input = followsLetter && (output == " " || punctuation) ? WordInput(proxy) : nil
+        let correction = input.flatMap { suggestions($0, priorTrail).automatic }
+        if let input { committed?(priorTrail, correction ?? input.word) }
         if followsLetter, output == " " || punctuation,
-           let input = WordInput(proxy), !input.word.isEmpty, let correction = suggestions(input, priorTrail).automatic {
+           let input, !input.word.isEmpty, let correction {
             let inserted = correction + output
             replaceSuffix(input.word, with: inserted, in: proxy)
             if let end = Caret(proxy), end.before.hasSuffix(inserted) {

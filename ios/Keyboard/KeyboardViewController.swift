@@ -60,6 +60,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        typist.committed = { [completions, keys] in completions.vocabulary.learn($0, chosen: $1, layout: keys.keyLayout) }
         layout()
         requestSupplementaryLexicon { [weak self] lexicon in
             DispatchQueue.main.async { self?.completions.use(lexicon) }

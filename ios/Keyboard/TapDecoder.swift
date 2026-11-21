@@ -26,14 +26,15 @@ struct KeyLayout: Equatable {
         return layout
     }
 
-    func costs(letter: Int, point: CGPoint?) -> [Double] {
+    func costs(letter: Int, point: CGPoint?, spread: Double) -> [Double] {
         guard let center = centers[letter] else {
             var costs = Array(repeating: Double.infinity, count: centers.count)
             costs[letter] = 0
             return costs
         }
         let p = point ?? center
-        let scale = 8 / (pitch * pitch)
+        let sigma = pitch * (point == nil ? 0.25 : spread)
+        let scale = 0.5 / (sigma * sigma)
         return centers.map {
             guard let center = $0 else { return .infinity }
             let x = center.x - p.x
@@ -42,8 +43,8 @@ struct KeyLayout: Equatable {
         }
     }
 
-    var omissionCosts: [Double] {
-        let sigma = pitch * 0.25
+    func omissionCosts(spread: Double) -> [Double] {
+        let sigma = pitch * spread
         func inside(_ center: CGFloat, _ low: CGFloat, _ high: CGFloat) -> Double {
             let scale = sigma * sqrt(2.0)
             return 0.5 * (erf((high - center) / scale) - erf((low - center) / scale))
