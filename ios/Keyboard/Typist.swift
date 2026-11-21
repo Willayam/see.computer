@@ -7,7 +7,9 @@ struct Caret: Equatable {
     let after: String?
 
     init?(_ proxy: UITextDocumentProxy) {
-        guard proxy.selectedText?.isEmpty != false, let before = proxy.documentContextBeforeInput else { return nil }
+        // Some hosts report an empty field as no context rather than as an empty string.
+        guard proxy.selectedText?.isEmpty != false,
+              let before = proxy.documentContextBeforeInput ?? (proxy.hasText ? nil : "") else { return nil }
         guard let identifier = SeeDocumentIdentifier(proxy) else { return nil }
         field = identifier
         self.before = before
