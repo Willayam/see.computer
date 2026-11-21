@@ -66,6 +66,7 @@ final class KeyboardViewController: UIInputViewController {
             else { return nil }
             return (prior, self.completions.vocabulary.spread)
         }
+        typist.reviseSwipe = completions.vocabulary.reviseSwipe
         typist.reconsider = { [completions, keys] in completions.vocabulary.reconsider($0, input: $1, trail: $2, chosen: $3, layout: keys.keyLayout) }
         typist.committed = { [completions, keys] in completions.vocabulary.learn($0, chosen: $1, layout: keys.keyLayout) }
         layout()
@@ -160,8 +161,9 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func updateTypingContext() {
+        typist.checkSwipePosition(in: textDocumentProxy)
         keys.updateCase(for: textDocumentProxy)
-        completions.update(for: textDocumentProxy, trail: typist.trail, layout: keys.keyLayout, canCorrect: typist.canCorrect(textDocumentProxy))
+        completions.update(for: textDocumentProxy, trail: typist.trail, layout: keys.keyLayout, canCorrect: typist.canCorrect(textDocumentProxy), swipeChoices: typist.swipeChoices(in: textDocumentProxy))
     }
 
     override func selectionDidChange(_ textInput: UITextInput?) {
@@ -614,8 +616,8 @@ final class KeyboardViewController: UIInputViewController {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         deleteCharacter()
         deleteRepeat?.invalidate()
-        deleteRepeat = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self] _ in
-            self?.deleteRepeat = Timer.scheduledTimer(withTimeInterval: 0.09, repeats: true) { [weak self] _ in
+        deleteRepeat = Timer.scheduledTimer(withTimeInterval: TypingKeys.deleteRepeatDelay, repeats: false) { [weak self] _ in
+            self?.deleteRepeat = Timer.scheduledTimer(withTimeInterval: TypingKeys.deleteRepeatInterval, repeats: true) { [weak self] _ in
                 self?.deleteCharacter()
             }
         }
@@ -671,6 +673,23 @@ final class KeyboardViewController: UIInputViewController {
             self?.updateTypingContext()
         }
         completions.accept = { [weak self] input, candidate in self?.chooseSuggestion(input, candidate) }
+        keys.allowsSwipe = { [weak self] in
+            guard let self else { return false }
+            return WordInput.allowsCorrection(in: self.textDocumentProxy)
+        }
+        keys.onSwipe = { [weak self] samples, upper, locked, shortWord in
+            guard let self, self.isActive, self.keys.isUserInteractionEnabled else { return false }
+            self.prepareForManualEdit()
+            guard WordInput.allowsCorrection(in: self.textDocumentProxy) else { return false }
+            if shortWord != nil && !self.typist.startsSwipeWord(in: self.textDocumentProxy) { return false }
+            let words = self.completions.vocabulary.swipe(samples, layout: self.keys.keyLayout,
+                before: self.textDocumentProxy.documentContextBeforeInput ?? "", previousChoices: self.typist.precedingChoices(in: self.textDocumentProxy))
+            if let shortWord, words.words.first?.word.lowercased() != shortWord { return false }
+            self.typist.insertSwipe(words, uppercase: upper, locked: locked, in: self.textDocumentProxy)
+            self.rememberEditedField()
+            self.updateTypingContext()
+            return true
+        }
         keys.insert = { [weak self] in self?.typed($0, at: $1) }
         keys.startDelete = { [weak self] in self?.deleteDown() }
         keys.endDelete = { [weak self] in self?.deleteUp() }

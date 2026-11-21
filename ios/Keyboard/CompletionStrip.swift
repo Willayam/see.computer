@@ -7,6 +7,7 @@ final class CompletionStrip: UIStackView {
     private var layout = KeyLayout()
     private var input: WordInput?
     private var shownInput: WordInput?
+    private var swipeChoices: [String]?
     private var cached: WordSuggestions?
     private var canCorrect = false
     private var pending: DispatchWorkItem?
@@ -50,10 +51,11 @@ final class CompletionStrip: UIStackView {
         refresh()
     }
 
-    func update(for proxy: UITextDocumentProxy, trail: TapTrail, layout: KeyLayout, canCorrect: Bool) {
+    func update(for proxy: UITextDocumentProxy, trail: TapTrail, layout: KeyLayout, canCorrect: Bool, swipeChoices: [String]?) {
         let current = WordInput(proxy)
         let owned = trail.end != nil && trail.end == Caret(proxy) ? trail : TapTrail()
-        guard input != current || self.canCorrect != canCorrect || self.trail != owned || self.layout != layout else { return }
+        guard self.swipeChoices != swipeChoices || input != current || self.canCorrect != canCorrect || self.trail != owned || self.layout != layout else { return }
+        self.swipeChoices = swipeChoices
         self.trail = owned
         self.layout = layout
         self.canCorrect = canCorrect
@@ -66,6 +68,10 @@ final class CompletionStrip: UIStackView {
         pending?.cancel()
         guard let input else {
             setTitles(WordSuggestions())
+            return
+        }
+        if let swipeChoices {
+            setTitles(WordSuggestions(titles: swipeChoices))
             return
         }
         // Keep the previous row visible during a fast key sequence. A tap is

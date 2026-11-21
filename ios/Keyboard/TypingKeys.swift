@@ -3,6 +3,9 @@ import UIKit
 /// The letter rows stay in place while dictation runs. Only a page or language
 /// change rebuilds them, so changing case never interrupts a touch.
 final class TypingKeys: UIStackView {
+    static let deleteRepeatDelay: TimeInterval = 0.45
+    static let deleteRepeatInterval: TimeInterval = 0.09
+
     let preview = KeyPreview()
     private enum Page { case letters, numbers, symbols }
     private var page = Page.letters
@@ -20,6 +23,100 @@ final class TypingKeys: UIStackView {
     private let globe = Key(symbol: "globe", label: "Next keyboard")
 
     var keyPrior: (() -> (probabilities: [Double], spread: Double)?)?
+    var allowsSwipe: () -> Bool = { true }
+    var onSwipe: (([SwipeSample], Bool, Bool, String?) -> Bool)?
+
+    private weak var activeSwipe: Key?
+    private var pendingReleases: [(origin: Key, key: Key, point: CGPoint)] = []
+
+    func beginSwipe(from key: Key) -> Bool {
+        guard activeSwipe == nil else { return false }
+        activeSwipe = key
+        return true
+    }
+
+    func endSwipe(from key: Key) {
+        guard activeSwipe === key else { return }
+        activeSwipe = nil
+        let releases = pendingReleases
+        pendingReleases.removeAll()
+        for release in releases {
+            activateRelease(from: release.origin, key: release.key, at: release.point)
+        }
+    }
+
+    func canSwipe(from key: Key) -> Bool {
+        activeSwipe == nil && page == .letters && letterKeys.contains(key) && onSwipe != nil && allowsSwipe()
+    }
+
+    struct StrokeTravel {
+        private var neighbor: Key?
+        private var crossedSeveralKeys = false
+        private var reachedPitch = false
+
+        mutating func isWordGesture(at point: CGPoint, start: CGPoint, from key: Key, on keyboard: TypingKeys) -> Bool {
+            let cell = key.convert(key.bounds, to: keyboard)
+            if hypot(point.x - start.x, point.y - start.y) >= cell.width { reachedPitch = true }
+            if !cell.contains(point), let next = keyboard.releaseKey(at: point),
+               next !== key, keyboard.letterKeys.contains(next) {
+                // Sparse samples can jump over an intervening cell.
+                let nextCell = next.convert(next.bounds, to: keyboard)
+                if (neighbor != nil && neighbor !== next) || !cell.insetBy(dx: -1, dy: -1).intersects(nextCell) {
+                    crossedSeveralKeys = true
+                }
+                neighbor = next
+            }
+            return reachedPitch && crossedSeveralKeys
+        }
+    }
+
+    func finishSwipe(_ samples: [SwipeSample]) {
+        lastShift = .distantPast
+        _ = onSwipe?(samples, uppercase, capsLock, nil)
+    }
+
+    private static let commonPairs: Set<String> = [
+        "am", "an", "as", "at", "be", "by", "do", "go", "he", "if", "in", "is", "it", "me", "my",
+        "no", "of", "on", "or", "so", "to", "up", "us", "we", "av", "de", "du", "då", "en", "er",
+        "ej", "få", "ge", "ha", "ja", "ju", "ni", "nu", "ny", "ok", "om", "på", "sa", "se", "så", "ta", "vi", "är", "åt", "öl"
+    ]
+
+    func finishShortSwipe(_ samples: [SwipeSample], from origin: Key) -> Bool {
+        guard canSwipe(from: origin), let start = samples.first?.point, let point = samples.last?.point,
+              let end = releaseKey(at: point), end !== origin, letterKeys.contains(end) else { return false }
+        let cell = origin.convert(origin.bounds, to: self)
+        let target = end.convert(end.bounds, to: self)
+        guard !cell.contains(point), target.contains(point),
+              hypot(point.x - start.x, point.y - start.y) >= cell.width * 0.6 else { return false }
+        let pair = origin.output + end.output
+        guard Self.commonPairs.contains(pair), onSwipe?(samples, uppercase, capsLock, pair) == true else { return false }
+        lastShift = .distantPast
+        return true
+    }
+
+    /// Replay the same start-key and travel checks used by touch delivery.
+    func swipe(_ samples: [SwipeSample]) {
+        guard let first = samples.first, let last = samples.last else { return }
+        guard let origin = hitTest(first.point, with: nil) as? Key else { return }
+        var travel = StrokeTravel()
+        if canSwipe(from: origin), samples.dropFirst().contains(where: {
+            travel.isWordGesture(at: $0.point, start: first.point, from: origin, on: self)
+        }) {
+            finishSwipe(samples)
+        } else if finishShortSwipe(samples, from: origin) {
+            return
+        } else if resolvesAtRelease(origin) {
+            let lastKey = samples.reversed().lazy.compactMap { self.releaseKey(at: $0.point) }.first
+            release(from: origin, last: lastKey ?? origin, at: last.point)
+        } else if origin === deleteKey {
+            let held = max(0, last.time - first.time - Self.deleteRepeatDelay)
+            let repeats = Int(held / Self.deleteRepeatInterval)
+            for _ in 0...repeats { activate(origin, at: first.point) }
+        } else if origin === hitTest(last.point, with: nil) {
+            activate(origin, at: first.point)
+        }
+    }
+
     var moveCursor: ((Int) -> Void)?
     private var trackpadX: CGFloat = 0
     var insert: ((String, CGPoint?) -> Void)?
@@ -92,16 +189,7 @@ final class TypingKeys: UIStackView {
         }
         guard !capsLock else { return }
         let before = proxy.documentContextBeforeInput ?? ""
-        let capitals: Bool
-        switch proxy.autocapitalizationType {
-        case .allCharacters: capitals = true
-        case .words: capitals = before.last?.isWhitespace ?? true
-        case .sentences:
-            let trimmed = before.trimmingCharacters(in: .whitespaces)
-            capitals = trimmed.isEmpty || trimmed.last?.isNewline == true ||
-                (before.last?.isWhitespace == true && trimmed.last.map { ".!?".contains($0) } == true)
-        default: capitals = false
-        }
+        let capitals = Typist.capitalizes(after: before, mode: proxy.autocapitalizationType)
         if capitals != uppercase { setUppercase(capitals) }
     }
 
@@ -309,6 +397,14 @@ final class TypingKeys: UIStackView {
     func release(from origin: Key, last: Key?, at point: CGPoint) {
         guard let key = releaseKey(at: point) ?? last.flatMap({ letterKeys.contains($0) ? $0 : nil }),
               key !== enter || origin === enter else { return }
+        if activeSwipe != nil {
+            pendingReleases.append((origin, key, point))
+        } else {
+            activateRelease(from: origin, key: key, at: point)
+        }
+    }
+
+    private func activateRelease(from origin: Key, key: Key, at point: CGPoint) {
         if origin === shiftKey, key !== origin, letterKeys.contains(key), !uppercase { shift() }
         activate(key, at: point)
     }

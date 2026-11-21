@@ -7,17 +7,23 @@ struct WordInput: Equatable {
     let sentenceStart: Bool
     let smartQuotes: Bool
 
+    static func opensWord(_ c: Character) -> Bool { "([{\"“‘'«".contains(c) }
+
     static func wordCharacter(_ c: Character) -> Bool { c.isLetter || c == "'" || c == "’" }
 
+    static func allowsCorrection(in proxy: UITextDocumentProxy) -> Bool {
+        guard proxy.autocorrectionType != .no, proxy.isSecureTextEntry != true else { return false }
+        switch proxy.keyboardType {
+        case .URL, .emailAddress, .numberPad, .decimalPad, .phonePad, .asciiCapableNumberPad, .numbersAndPunctuation: return false
+        default: return true
+        }
+    }
+
     init?(_ proxy: UITextDocumentProxy) {
-        guard proxy.autocorrectionType != .no, proxy.isSecureTextEntry != true,
-              proxy.selectedText?.isEmpty != false, let before = proxy.documentContextBeforeInput,
+        guard Self.allowsCorrection(in: proxy), proxy.selectedText?.isEmpty != false,
+              let before = proxy.documentContextBeforeInput,
               proxy.documentContextAfterInput?.first.map({ Self.wordCharacter($0) || $0.isNumber || $0 == "_" }) != true
         else { return nil }
-        switch proxy.keyboardType {
-        case .URL, .emailAddress, .numberPad, .decimalPad, .phonePad, .asciiCapableNumberPad, .numbersAndPunctuation: return nil
-        default: break
-        }
         let token = before.suffix(128).reversed().prefix(while: Self.wordCharacter)
         word = String(token.reversed()).trimmingCharacters(in: CharacterSet(charactersIn: "'’"))
         let leading = before.dropLast(word.count)
@@ -25,7 +31,7 @@ struct WordInput: Equatable {
             guard before.last?.isWhitespace == true else { return nil }
         } else {
             guard word.count <= 36, before.hasSuffix(word),
-                  leading.last.map({ $0.isWhitespace || "(\"“‘'[«".contains($0) }) ?? true else { return nil }
+                  leading.last.map({ $0.isWhitespace || Self.opensWord($0) }) ?? true else { return nil }
         }
         let prior = leading.trimmingCharacters(in: .whitespaces)
         sentenceStart = prior.isEmpty || prior.last?.isNewline == true || prior.last.map { ".!?".contains($0) } == true
@@ -120,13 +126,13 @@ final class TypingVocabulary {
         }
     }
 
-    private func languageWeights(_ input: WordInput) -> [Double] {
+    private func languageWeights(_ previousWords: [String]) -> [Double] {
         var weight = Array(repeating: 0.0, count: languages.count)
         if languages.count == 2, let first = tables[languages[0].code], let second = tables[languages[1].code] {
             func frequency(_ w: String, _ lex: Lexicon) -> Double {
                 lex.node(w).flatMap(lex.terminal).map { exp(lex.unigram($0)) } ?? 0
             }
-            let evidence = input.previous.reduce(0.0) { odds, previous in
+            let evidence = previousWords.reduce(0.0) { odds, previous in
                 odds * 0.7 + log((frequency(previous, first) + 2e-6) / (frequency(previous, second) + 2e-6))
             }
             let p = 1 / (1 + exp(-max(-6, min(6, evidence))))
@@ -145,6 +151,71 @@ final class TypingVocabulary {
         }
     }
 
+    func swipe(_ samples: [SwipeSample], layout: KeyLayout, before: String,
+               previousChoices: [SwipeChoice] = []) -> SwipePrediction {
+        let decoder = SwipeDecoder(samples: samples, layout: layout)
+        let usual = rankedSwipe(decoder, before: before)
+        var prediction = SwipePrediction(words: usual, previous: nil)
+        let trimmed = before.last == " " ? String(before.dropLast()) : before
+        guard let first = previousChoices.first, trimmed.hasSuffix(first.word),
+              let current = usual.first, canReviseSwipe(first.word) else { return prediction }
+        let prefix = trimmed.dropLast(first.word.count)
+        var best = first.score + current.score + 0.8
+        for alternative in previousChoices.dropFirst() {
+            let next = rankedSwipe(decoder, before: prefix + alternative.word)
+            guard let score = next.first?.score else { continue }
+            let joint = alternative.score + score
+            if joint > best {
+                best = joint
+                prediction = SwipePrediction(words: next, previous: alternative.word)
+            }
+        }
+        return prediction
+    }
+
+    private func canReviseSwipe(_ word: String) -> Bool {
+        !protectedWords.contains(word.lowercased()) && shortcuts[word.lowercased()] == nil
+    }
+
+    func reviseSwipe(_ choices: [SwipeChoice], followedBy next: String) -> String? {
+        guard let first = choices.first, canReviseSwipe(first.word) else { return nil }
+        func likelihood(_ word: String) -> Double {
+            let previous = word.lowercased().replacingOccurrences(of: "’", with: "'")
+            let following = next.lowercased().replacingOccurrences(of: "’", with: "'")
+            return languages.compactMap { language -> Double? in
+                guard let lex = tables[language.code], let id = lex.node(following).flatMap(lex.terminal)
+                else { return nil }
+                return lex.logProbability(id, after: lex.node(previous).flatMap(lex.terminal))
+            }.max() ?? 0
+        }
+        var best = first.score + likelihood(first.word) + 0.8
+        var replacement: String?
+        for alternative in choices.dropFirst() {
+            let score = alternative.score + likelihood(alternative.word)
+            if score > best { best = score; replacement = alternative.word }
+        }
+        return replacement
+    }
+
+    private func rankedSwipe(_ decoder: SwipeDecoder, before: String) -> [SwipeChoice] {
+        let sentence = before.suffix(128).reversed().prefix { !$0.isNewline && !".!?".contains($0) }.reversed()
+        let previous = sentence.split { !WordInput.wordCharacter($0) }.suffix(4).map {
+            String($0).lowercased().replacingOccurrences(of: "’", with: "'")
+        }
+        let weights = languageWeights(previous)
+        var scores = [String: Double]()
+        for (i, language) in languages.enumerated() {
+            guard let lex = tables[language.code] else { continue }
+            let prior = previous.isEmpty ? lex.sentenceStart : previous.last.flatMap(lex.node).flatMap(lex.terminal)
+            for (word, score) in decoder.candidates(in: lex, after: prior) {
+                scores[word] = max(scores[word] ?? -.infinity, score + weights[i])
+            }
+        }
+        return scores.keys.sorted {
+            scores[$0] == scores[$1] ? $0 < $1 : scores[$0]! > scores[$1]!
+        }.prefix(6).map { SwipeChoice(word: $0, score: scores[$0]!) }
+    }
+
     func reconsider(_ held: Typist.HeldWord, input: WordInput, trail: TapTrail, chosen: String, layout: KeyLayout) -> String? {
         let first = held.input.word, second = input.word
         guard !held.output.contains(" "), !chosen.contains(" "), second.first?.isLowercase == true,
@@ -161,7 +232,7 @@ final class TypingVocabulary {
         guard rows.count == taps.count else { return nil }
         let spaces = taps.map { layout.spaceCost($0.point, sigma: sigma) }
         let usual = (held.output + " " + chosen).lowercased().replacingOccurrences(of: "’", with: "'")
-        let weight = languageWeights(held.input)
+        let weight = languageWeights(held.input.previous)
         var usualScore: Double?, best = -Double.infinity, bestText = ""
         for (i, lang) in languages.enumerated() {
             guard let lex = tables[lang.code] else { continue }
@@ -272,7 +343,7 @@ final class TypingVocabulary {
         let literalCost = zip(costs, codes).reduce(0.0) { $0 + $1.0[$1.1] }
         var literal = -Double.infinity, unknown = -Double.infinity
         var candidates: [(String, Double)] = [], completions: [(String, Double)] = []
-        let weight = languageWeights(input)
+        let weight = languageWeights(input.previous)
         lastWeights = weight
         for (index, language) in languages.enumerated() {
             guard let lex = tables[language.code] else { continue }

@@ -97,6 +97,54 @@ final class Key: UIControl {
     static let touchSurfaceColor = UIColor(white: 0.5, alpha: 0.02)
     var releasePoint: CGPoint?
 
+    private var stroke = [SwipeSample]()
+    private var swiping = false
+    private var travel = TypingKeys.StrokeTravel()
+    private var trailLayer: CAShapeLayer?
+
+    private func record(_ touch: UITouch, on keyboard: TypingKeys) {
+        guard !stroke.isEmpty else { return }
+        let sample = SwipeSample(point: touch.location(in: keyboard), time: touch.timestamp)
+        if stroke.count >= 512 {
+            stroke = stride(from: 0, to: stroke.count, by: 2).map { stroke[$0] }
+        }
+        stroke.append(sample)
+        if !swiping {
+            guard travel.isWordGesture(at: sample.point, start: stroke[0].point, from: self, on: keyboard) else { return }
+            guard keyboard.beginSwipe(from: self) else { return }
+            swiping = true
+            trackedKey?.isHighlighted = false
+            trackedKey = nil
+            let layer = CAShapeLayer()
+            layer.strokeColor = UIColor.systemBlue.withAlphaComponent(0.65).cgColor
+            layer.fillColor = nil
+            layer.lineWidth = 2.5
+            layer.lineJoin = .round
+            layer.lineCap = .round
+            keyboard.layer.addSublayer(layer)
+            trailLayer = layer
+        }
+        let tail = stroke.reversed().prefix { sample.time - $0.time <= 0.16 }.reversed()
+        let line = UIBezierPath()
+        if let first = tail.first { line.move(to: first.point) }
+        for point in tail.dropFirst() { line.addLine(to: point.point) }
+        trailLayer?.path = line.cgPath
+    }
+
+    private func endStroke() {
+        stroke.removeAll(keepingCapacity: true)
+        if swiping { typingKeys?.endSwipe(from: self) }
+        swiping = false
+        travel = TypingKeys.StrokeTravel()
+        guard let layer = trailLayer else { return }
+        trailLayer = nil
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.15)
+        CATransaction.setCompletionBlock { layer.removeFromSuperlayer() }
+        layer.opacity = 0
+        CATransaction.commit()
+    }
+
     private weak var trackedKey: Key?
     private var resolvesAtRelease = false
     var hasActiveTouch: Bool { resolvesAtRelease || isTracking }
@@ -104,6 +152,9 @@ final class Key: UIControl {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         resolvesAtRelease = typingKeys?.resolvesAtRelease(self) ?? false
         if resolvesAtRelease {
+            if let keyboard = typingKeys, keyboard.canSwipe(from: self), let touch = touches.first {
+                stroke = [SwipeSample(point: touch.location(in: keyboard), time: touch.timestamp)]
+            }
             trackedKey = self
             isHighlighted = true
         } else {
@@ -116,14 +167,16 @@ final class Key: UIControl {
             super.touchesMoved(touches, with: event)
             return
         }
-        guard let keyboard = typingKeys, let touch = touches.first,
-              let next = keyboard.releaseKey(at: touch.location(in: keyboard)), next !== trackedKey else { return }
+        guard let keyboard = typingKeys, let touch = touches.first else { return }
+        record(touch, on: keyboard)
+        guard !swiping, let next = keyboard.releaseKey(at: touch.location(in: keyboard)), next !== trackedKey else { return }
         trackedKey?.isHighlighted = false
         trackedKey = next
         next.isHighlighted = true
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        endStroke()
         if resolvesAtRelease { finishHighlight() } else { super.touchesCancelled(touches, with: event) }
     }
 
@@ -133,6 +186,19 @@ final class Key: UIControl {
             super.touchesEnded(touches, with: event)
             releasePoint = nil
             return
+        }
+        defer { endStroke() }
+        if let keyboard = typingKeys, let touch = touches.first {
+            record(touch, on: keyboard)
+            if swiping {
+                finishHighlight()
+                keyboard.finishSwipe(stroke)
+                return
+            }
+            if keyboard.finishShortSwipe(stroke, from: self) {
+                finishHighlight()
+                return
+            }
         }
         let last = trackedKey
         finishHighlight()
