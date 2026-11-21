@@ -263,8 +263,9 @@ final class TypingVocabulary {
                 let lead = reading.first.map { lex.displayForm(lex.text($0)) + " " } ?? ""
                 candidates.append((lead + lex.displayForm(lex.text(reading.last)), value))
             }
-            for (rank, next) in lex.completions(word, limit: 3).enumerated() {
-                completions.append((lex.displayForm(next), context - Double(rank) * 0.1))
+            for next in decoders[language.code]?.completions(limit: 4) ?? [] {
+                let text = lex.text(next.id)
+                if text.count > word.count { completions.append((lex.displayForm(text), context + next.score)) }
             }
         }
         candidates.sort { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }
@@ -288,8 +289,10 @@ final class TypingVocabulary {
                 append(display(best.0))
             }
         }
-        for next in completions.sorted(by: { $0.1 > $1.1 }) { append(display(next.0)) }
-        for next in candidates.prefix(3) { append(display(next.0)) }
+        if let alternate = candidates.first(where: { display($0.0) != typed }) { append(display(alternate.0)) }
+        for next in (completions + candidates).sorted(by: { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }) {
+            append(display(next.0))
+        }
         return result
     }
 }

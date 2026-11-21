@@ -168,6 +168,35 @@ final class TapDecoder {
         }.prefix(160).map { $0.0 }
     }
 
+    func completions(limit: Int) -> [(id: Int, score: Double)] {
+        var top: [(id: Int, score: Double)] = []
+        let prefixes = layers.last!.filter { $0.first == nil && $0.node != 0 }
+            .sorted { lexicon.best($0.node) - $0.cost > lexicon.best($1.node) - $1.cost }
+        for state in prefixes {
+            var pending = Array(lexicon.children(state.node))
+            while let node = pending.popLast() {
+                if top.count == limit && lexicon.best(node) + 0.3 - state.cost < top.last!.score { continue }
+                if let id = lexicon.terminal(node) {
+                    let score = lexicon.unigram(id) - state.cost
+                    if top.count < limit || score >= top.last!.score {
+                        if let existing = top.firstIndex(where: { $0.id == id }) {
+                            if top[existing].score >= score {
+                                pending.append(contentsOf: lexicon.children(node))
+                                continue
+                            }
+                            top.remove(at: existing)
+                        }
+                        let index = top.firstIndex { score > $0.score || (score == $0.score && id < $0.id) } ?? top.count
+                        top.insert((id, score), at: index)
+                        if top.count > limit { top.removeLast() }
+                    }
+                }
+                pending.append(contentsOf: lexicon.children(node))
+            }
+        }
+        return top
+    }
+
     func addPrior(to prior: inout [Double], weight: Double) {
         for state in layers.last! {
             let p = exp(weight - state.cost)
