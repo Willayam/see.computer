@@ -178,7 +178,7 @@ fn split_names_from_plain_words(swap: Swap, words: &Words) -> Vec<Swap> {
 }
 
 /// Letters as they are said: lowercase, digits spelled out, the rest dropped.
-fn spoken(text: &str) -> Vec<char> {
+pub(crate) fn spoken(text: &str) -> Vec<char> {
     const DIGITS: [&str; 10] = [
         "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
     ];
@@ -222,12 +222,16 @@ fn distance(a: &[char], b: &[char], gap: f32, swap: impl Fn(char, char) -> f32) 
 /// Measured 2026-11-05: at this limit all 27 labelled mishearings in the log
 /// pass, and 7% of 13,572 unrelated name pairs do. docs/dictionary.md has more.
 fn sounds_like(heard: &str, wrote: &str) -> bool {
-    const VOWELS: &str = "aeiouyåäö";
-    const NEIGHBOURS: [&str; 8] = ["bp", "dt", "gkcq", "fvw", "szcx", "mn", "lr", "jy"];
     let (mut a, mut b) = (spoken(heard), spoken(wrote));
     a.dedup();
     b.dedup();
-    let cost = distance(&a, &b, 0.75, |x, y| {
+    sound_cost(&a, &b) <= 0.5 * a.len().max(b.len()) as f32
+}
+
+pub(crate) fn sound_cost(a: &[char], b: &[char]) -> f32 {
+    const VOWELS: &str = "aeiouyåäö";
+    const NEIGHBOURS: [&str; 8] = ["bp", "dt", "gkcq", "fvw", "szcx", "mn", "lr", "jy"];
+    distance(a, b, 0.75, |x, y| {
         if x == y {
             0.0
         } else if VOWELS.contains(x) && VOWELS.contains(y) {
@@ -240,8 +244,7 @@ fn sounds_like(heard: &str, wrote: &str) -> bool {
         } else {
             1.0
         }
-    });
-    cost <= 0.5 * a.len().max(b.len()) as f32
+    })
 }
 
 /// A single owner thread keeps NSSpellChecker calls serial.
@@ -623,6 +626,90 @@ pub fn context_terms(text: &str, words: &Words) -> Vec<String> {
     // Stable, so equally frequent terms keep the order they were seen in.
     found.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     found.into_iter().map(|(term, _)| term).collect()
+}
+
+/// Every unusual word on screen and every pair a capitalized word opens, for
+/// matching a misheard span after decoding. Wider than `context_terms`: it
+/// keeps lowercase product words ("kanban") and two-word names ("Quillo Bot"),
+/// and does not care how often a word shows.
+pub fn screen_candidates(text: &str, words: &Words) -> Vec<String> {
+    let mut known: HashMap<String, bool> = HashMap::new();
+    let mut ordinary = |token: &str| {
+        let lower = token.to_lowercase();
+        *known
+            .entry(lower.clone())
+            .or_insert_with(|| ORDINARY.contains(&lower.as_str()) || words.knows_quickly(&lower))
+    };
+    // "The" and "New" open UI labels everywhere, but prose also shows them
+    // lowercase. A name never does.
+    let lowercase: HashSet<&str> = text
+        .split_whitespace()
+        .map(strip)
+        .filter(|token| token.chars().next().is_some_and(char::is_lowercase))
+        .collect();
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    let mut keep = |candidate: String, found: &mut Vec<String>| {
+        if seen.insert(candidate.to_lowercase()) {
+            found.push(candidate);
+        }
+    };
+    for line in text.lines() {
+        // "didn't" is a word, but its stem "didn" sounds like "don".
+        let tokens: Vec<&str> = line
+            .split_whitespace()
+            .map(|part| {
+                let whole = strip(part);
+                let stem = strip(whole.split(['\'', '’']).next().unwrap_or_default());
+                if stem.len() < whole.len() && stem.chars().all(char::is_lowercase) {
+                    ""
+                } else {
+                    stem
+                }
+            })
+            .collect();
+        let mut opens = true;
+        for (index, token) in tokens.iter().enumerate() {
+            let opened = opens;
+            opens = line
+                .split_whitespace()
+                .nth(index)
+                .is_some_and(|part| part.ends_with(['.', '!', '?', ':']));
+            let letters = token.chars().filter(|c| c.is_alphabetic()).count();
+            if letters < 3 || token.len() > 64 {
+                continue;
+            }
+            let plain = token.chars().all(char::is_alphabetic);
+            // A capital mid-sentence marks a name even when the word list
+            // knows the word: "Kindle", "Slack".
+            let capital_mid_sentence = !opened
+                && plain
+                && letters >= 4
+                && token.chars().next().is_some_and(char::is_uppercase)
+                && token.chars().skip(1).all(char::is_lowercase)
+                && !lowercase.contains(token.to_lowercase().as_str());
+            let unusual = capital_mid_sentence
+                || names_something(token, false, words)
+                || (plain && !ordinary(token));
+            if unusual {
+                keep((*token).to_owned(), &mut found);
+            }
+            let Some(next) = tokens.get(index + 1) else {
+                continue;
+            };
+            let capitalized = |word: &str| word.chars().next().is_some_and(char::is_uppercase);
+            if capitalized(token)
+                && plain
+                && next.chars().count() >= 2
+                && next.chars().all(char::is_alphabetic)
+                && (capitalized(next) || !ordinary(next))
+                && (unusual || !ordinary(next))
+            {
+                keep(format!("{token} {next}"), &mut found);
+            }
+        }
+    }
+    found
 }
 
 /// Short forms a window shows everywhere, and spoken words, that the word

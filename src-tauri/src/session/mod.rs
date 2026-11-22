@@ -24,6 +24,14 @@ pub enum EngineStatus {
     Broken,
 }
 
+type Screen = Sender<crate::ledger::Id>;
+
+struct LateJob {
+    job: JobId,
+    path: Option<PathBuf>,
+    screen: Option<Screen>,
+}
+
 pub enum Session {
     Idle,
     Dictating {
@@ -35,12 +43,14 @@ pub enum Session {
         capture_dir: Option<PathBuf>,
         captures: Vec<Capture>,
         active_clip: Option<ActiveClip>,
+        screen: Screen,
     },
     Transcribing {
         job: JobId,
         since: Instant,
         /// The whole utterance, saved to disk if the engine misses the deadline.
         audio: mic::Audio16k,
+        screen: Screen,
     },
     TranscribingTake {
         job: JobId,
@@ -48,6 +58,7 @@ pub enum Session {
         duration_ms: u64,
         since: Instant,
         audio: mic::Audio16k,
+        screen: Screen,
     },
     PackagingTake {
         turn: Turn,
@@ -203,7 +214,7 @@ struct Controller {
     empties: crate::saved::Saved,
     /// Jobs that outran the deadline, still owed their words, with the audio
     /// file that stands in for them if the engine never answers.
-    late: Vec<(JobId, Option<PathBuf>)>,
+    late: Vec<LateJob>,
     /// Every sample of the live take sent to the engine so far.
     heard: Vec<f32>,
     sharing: crate::sharing::Sharing,
@@ -335,7 +346,7 @@ impl Controller {
             }
             Msg::UpdateAborted => self.updating = false,
             Msg::Engine(engine::Event::Done(job, result))
-                if self.late.iter().any(|(late, _)| *late == job) =>
+                if self.late.iter().any(|late| late.job == job) =>
             {
                 self.late_done(job, result)
             }
@@ -440,7 +451,8 @@ impl Controller {
                             let armed = mic.arm();
                             self.heard.clear();
                             self.share_take = self.sharing.enabled();
-                            self.utterance = self.engine.begin_context(crate::context::begin());
+                            let (terms, screen) = crate::context::begin(self.ledger.clone());
+                            self.utterance = self.engine.begin_context(terms);
                             self.engine.warm();
                             self.show(Activity::Listening);
                             Session::Dictating {
@@ -450,6 +462,7 @@ impl Controller {
                                 capture_dir: self.recorder.session_dir().ok(),
                                 captures: Vec::new(),
                                 active_clip: None,
+                                screen,
                             }
                         }
                         None => Session::Idle,
@@ -463,6 +476,7 @@ impl Controller {
                     capture_dir,
                     captures,
                     active_clip: None,
+                    screen,
                     ..
                 },
                 Msg::MainReleased,
@@ -499,6 +513,7 @@ impl Controller {
                                 job,
                                 since: Instant::now(),
                                 audio: whole,
+                                screen,
                             }
                         }
                         Err(error) => {
@@ -519,6 +534,7 @@ impl Controller {
                     capture_dir,
                     captures,
                     active_clip: None,
+                    screen,
                     ..
                 },
                 Msg::MainReleased,
@@ -554,6 +570,7 @@ impl Controller {
                             duration_ms,
                             since: Instant::now(),
                             audio: whole.unwrap_or_else(|| mic::Audio16k::silence(0.0)),
+                            screen,
                         }
                     }
                     Some(Err(_)) | None => {
@@ -597,6 +614,7 @@ impl Controller {
                     mut capture_dir,
                     mut captures,
                     active_clip,
+                    screen,
                 },
                 Msg::ShotTaken(at),
             ) => {
@@ -611,6 +629,7 @@ impl Controller {
                     capture_dir,
                     captures,
                     active_clip,
+                    screen,
                 }
             }
             (
@@ -621,6 +640,7 @@ impl Controller {
                     capture_dir,
                     captures,
                     active_clip,
+                    screen,
                 },
                 Msg::ClipStarted(at),
             ) => {
@@ -657,6 +677,7 @@ impl Controller {
                     capture_dir,
                     captures,
                     active_clip,
+                    screen,
                 }
             }
             (
@@ -667,6 +688,7 @@ impl Controller {
                     capture_dir,
                     captures,
                     active_clip,
+                    screen,
                 },
                 Msg::ClipEnded(at),
             ) => self.close_dictating_clip(
@@ -677,6 +699,7 @@ impl Controller {
                     capture_dir,
                     captures,
                     active_clip,
+                    screen,
                 },
                 at,
             ),
@@ -716,7 +739,11 @@ impl Controller {
                 Msg::Engine(engine::Event::Done(done, _result)),
             ) if job != done => state,
             (
-                Session::Transcribing { audio: whole, .. },
+                Session::Transcribing {
+                    audio: whole,
+                    screen,
+                    ..
+                },
                 Msg::Engine(engine::Event::Done(_, result)),
             ) => {
                 if let Some(why) = match &result {
@@ -739,6 +766,7 @@ impl Controller {
                         let id = self.ledger.mint();
                         if let Some(audio) = audio {
                             self.ledger.dictated(&id, text.as_str(), audio);
+                            let _ = screen.send(id.clone());
                         }
                         self.ledger
                             .context(&id, &self.engine.context_used(), text.as_str());
@@ -896,6 +924,7 @@ impl Controller {
             mut capture_dir,
             mut captures,
             active_clip,
+            screen,
         } = state
         else {
             return state;
@@ -929,6 +958,7 @@ impl Controller {
             capture_dir,
             captures,
             active_clip: None,
+            screen,
         }
     }
 
@@ -983,8 +1013,10 @@ impl Controller {
         ) {
             let from = session_label(&self.session);
             match std::mem::replace(&mut self.session, Session::Idle) {
-                Session::Transcribing { job, audio, .. } => {
-                    self.keep_late(job, &audio);
+                Session::Transcribing {
+                    job, audio, screen, ..
+                } => {
+                    self.keep_late(job, &audio, screen);
                     self.finish(Notice::Saved);
                 }
                 Session::TranscribingTake {
@@ -992,11 +1024,12 @@ impl Controller {
                     take,
                     duration_ms,
                     audio,
+                    screen,
                     ..
                 } => {
                     // The screenshots and video are already on disk, so the
                     // take is packaged now and its narration follows alone.
-                    self.keep_late(job, &audio);
+                    self.keep_late(job, &audio, screen);
                     self.session =
                         self.spawn_take_package(take, duration_ms, engine::Transcription::empty());
                 }
@@ -1045,19 +1078,23 @@ impl Controller {
     /// Stops waiting on a job without giving up on it. Its words still come
     /// back as an ordinary `Done`, and the audio on disk covers an engine that
     /// never answers, for a retry from the menu.
-    fn keep_late(&mut self, job: JobId, audio: &mic::Audio16k) {
+    fn keep_late(&mut self, job: JobId, audio: &mic::Audio16k, screen: Screen) {
         let path = self.saved.keep(audio).ok();
-        self.late.push((job, path));
+        self.late.push(LateJob {
+            job,
+            path,
+            screen: Some(screen),
+        });
     }
 
     /// Words that missed their deadline. They are filed like any dictation but
     /// not pasted, because the cursor has likely moved on, so the pill holds
     /// them for a copy when nothing else is on screen.
     fn late_done(&mut self, job: JobId, result: Result<engine::Transcription, EngineError>) {
-        let Some(index) = self.late.iter().position(|(late, _)| *late == job) else {
+        let Some(index) = self.late.iter().position(|late| late.job == job) else {
             return;
         };
-        let (_, path) = self.late.remove(index);
+        let LateJob { path, screen, .. } = self.late.remove(index);
         let outcome = match result {
             Ok(engine::Transcription {
                 text: Some(text),
@@ -1068,6 +1105,9 @@ impl Controller {
                 let id = self.ledger.mint();
                 if let Some(audio) = audio {
                     self.ledger.dictated(&id, text.as_str(), audio);
+                    if let Some(screen) = screen {
+                        let _ = screen.send(id);
+                    }
                 }
                 self.history.record(text.as_str(), spoken);
                 if matches!(self.session, Session::Idle) {
@@ -1116,7 +1156,7 @@ impl Controller {
             if self
                 .late
                 .iter()
-                .any(|(_, late)| late.as_ref() == Some(&path))
+                .any(|late| late.path.as_ref() == Some(&path))
             {
                 waiting += 1;
                 continue;
@@ -1135,7 +1175,11 @@ impl Controller {
             self.engine.feed(audio);
             match self.engine.submit(mic::Audio16k::silence(0.0)) {
                 Ok(job) => {
-                    self.late.push((job, Some(path)));
+                    self.late.push(LateJob {
+                        job,
+                        path: Some(path),
+                        screen: None,
+                    });
                     sent += 1;
                 }
                 Err(error) => {

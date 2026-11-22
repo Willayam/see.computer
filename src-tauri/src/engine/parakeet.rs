@@ -32,6 +32,8 @@ pub struct Parakeet {
     lexicon: Lexicon,
     boost: Option<Boost>,
     context: Vec<crate::context::Term>,
+    names: Vec<super::rescore::Name>,
+    rewrite_terms: Vec<crate::context::Term>,
 }
 
 impl Parakeet {
@@ -79,7 +81,7 @@ impl Parakeet {
             .collect();
         crate::context::near_misses(
             &self.lexicon.rewrite(&tidy(raw)),
-            &self.context,
+            &self.rewrite_terms,
             &saved,
             crate::learn::Words::shared(),
         )
@@ -87,7 +89,7 @@ impl Parakeet {
 
     fn active_terms(&self) -> Vec<Term> {
         let mut terms = self.lexicon.terms().to_vec();
-        for context in &self.context {
+        for context in self.context.iter().filter(|term| term.boosted()) {
             if !terms
                 .iter()
                 .any(|term| term.text.eq_ignore_ascii_case(&context.text))
@@ -117,6 +119,8 @@ fn open(dir: &Path) -> Result<Parakeet, EngineError> {
             lexicon: Lexicon::load(PathBuf::new()),
             boost: None,
             context: Vec::new(),
+            names: Vec::new(),
+            rewrite_terms: Vec::new(),
         })
         .map_err(|error| EngineError::Load(error.to_string()))
 }
@@ -158,6 +162,8 @@ fn tidy(raw: &str) -> String {
 
 impl Engine for Parakeet {
     fn set_context(&mut self, terms: &[crate::context::Term]) {
+        // Names already in the vocabulary can still be misheard by the decoder.
+        self.rewrite_terms = terms.to_vec();
         let saved = self.lexicon.terms();
         self.context = terms
             .iter()
@@ -171,6 +177,11 @@ impl Engine for Parakeet {
                         .is_some_and(|pieces| pieces.encode(&term.text).is_some())
             })
             .cloned()
+            .collect();
+        self.names = terms
+            .iter()
+            .filter(|term| term.source != "daybook")
+            .filter_map(|term| super::rescore::Name::new(&term.text, self.pieces.as_ref()?))
             .collect();
         self.rebuild_boost();
     }
@@ -188,16 +199,26 @@ impl Engine for Parakeet {
         let pair =
             self.boost.is_some() && std::env::var("SEE_COMPUTER_BOOST_MERGE").as_deref() != Ok("0");
         let (plain, result) = if pair {
-            let (plain, boosted) = self
-                .model
-                .transcribe_samples_with_bias_pair(
+            let (plain, boosted) = if self.names.is_empty() {
+                self.model.transcribe_samples_with_bias_pair(
                     audio.samples().to_vec(),
                     16_000,
                     1,
                     Some(TimestampMode::Sentences),
                     self.boost.as_mut().expect("checked boost") as &mut dyn TokenBias,
                 )
-                .map_err(|error| EngineError::Inference(error.to_string()))?;
+            } else {
+                self.model.transcribe_samples_with_rescored_pair(
+                    audio.samples().to_vec(),
+                    16_000,
+                    1,
+                    Some(TimestampMode::Sentences),
+                    self.boost.as_mut().expect("checked boost"),
+                    |pieces| super::rescore::candidates(pieces, &self.names),
+                    12.0,
+                )
+            }
+            .map_err(|error| EngineError::Inference(error.to_string()))?;
             (Some(plain), boosted)
         } else {
             let result = self

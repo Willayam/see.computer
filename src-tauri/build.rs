@@ -41,6 +41,14 @@ fn main() {
         .compile("seetap");
     println!("cargo:rustc-link-lib=framework=CoreAudio");
     println!("cargo:rerun-if-changed=native/tap.m");
+    cc::Build::new()
+        .file("native/ocr.m")
+        .flag("-fobjc-arc")
+        .flag("-mmacosx-version-min=14.0")
+        .compile("seeocr");
+    println!("cargo:rustc-link-lib=framework=Vision");
+    println!("cargo:rustc-link-lib=framework=CoreText");
+    println!("cargo:rerun-if-changed=native/ocr.m");
     // Only the windows a capability names may call these, so the pill keeps
     // no invoke surface at all.
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(

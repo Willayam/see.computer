@@ -14,6 +14,10 @@ impl ParakeetTDTDecoder {
         Self { vocab }
     }
 
+    pub(crate) fn piece(&self, id: usize) -> Option<&str> {
+        self.vocab.id_to_text(id)
+    }
+
     /// Decode tokens with timestamps
     /// For TDT models, greedy decoding is done in the model, here we just convert to text
     pub fn decode_with_timestamps(

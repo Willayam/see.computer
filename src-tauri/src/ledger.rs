@@ -11,6 +11,7 @@ use chrono::{Local, TimeZone};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -78,6 +79,7 @@ pub struct ContextHit {
 enum Command {
     Dictated(Event, crate::mic::Audio16k),
     Event(Event),
+    Screen(Id, String),
     #[cfg(test)]
     Flush(mpsc::Sender<()>),
     Forget(String),
@@ -125,6 +127,7 @@ impl Ledger {
         let learning = Arc::new(Mutex::new(Learning::default()));
         let snapshot = learning.clone();
         let (tx, rx) = mpsc::channel();
+        let history_enabled = enabled.clone();
         crate::qos::spawn("see-ledger", crate::qos::Class::Upkeep, move || {
             let _ = fs::create_dir_all(root.join("audio"));
             let mut events = read(&root);
@@ -157,6 +160,15 @@ impl Ledger {
                         let protected = corrected.keys().cloned().collect();
                         prune(&root, keep_audio, 50, &protected);
                         let _ = compact(&root, &mut events, 500, 50);
+                    }
+                    Command::Screen(id, text) => {
+                        if history_enabled.load(Ordering::Relaxed)
+                            && root.join(format!("audio/{}.wav", id.0)).is_file()
+                            && save_screen(&root, &id, &text).is_ok()
+                            && corrected.contains_key(&id)
+                        {
+                            let _ = write_corpus(&root, &corrected);
+                        }
                     }
                     Command::Event(event) => {
                         if append(&root, &event).is_ok() {
@@ -347,6 +359,12 @@ impl Ledger {
         }
     }
 
+    pub fn screen(&self, id: Id, text: String) {
+        if self.enabled.load(Ordering::Relaxed) {
+            let _ = self.tx.send(Command::Screen(id, text));
+        }
+    }
+
     pub fn context(&self, id: &Id, terms: &[crate::context::Term], text: &str) {
         if self.enabled.load(Ordering::Relaxed) && !terms.is_empty() {
             let terms = terms
@@ -356,6 +374,9 @@ impl Ledger {
                     source: term.source.to_owned(),
                     landed: crate::boost::occurrences(text, &term.text, false) > 0,
                 })
+                // Hundreds of candidates per take would swamp the log; the
+                // ones that landed are the evidence worth keeping.
+                .filter(|hit| hit.source != "candidate" || hit.landed)
                 .collect();
             let _ = self.tx.send(Command::Event(Event::Context {
                 id: id.clone(),
@@ -503,7 +524,7 @@ fn compact(root: &Path, events: &mut Vec<Event>, keep: usize, slack: usize) -> s
     if let Ok(files) = fs::read_dir(root.join("audio")) {
         for file in files.flatten() {
             if !referenced.contains(&file.path()) {
-                let _ = fs::remove_file(file.path());
+                remove_audio(root, &file.path());
             }
         }
     }
@@ -524,6 +545,28 @@ pub(crate) fn write_audio(path: &Path, audio: &crate::mic::Audio16k) -> Result<(
     writer.finalize()
 }
 
+fn save_screen(root: &Path, id: &Id, text: &str) -> std::io::Result<()> {
+    let dir = root.join("screens");
+    fs::create_dir_all(&dir)?;
+    let temp = dir.join(format!("{}.tmp", id.0));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temp)?;
+    file.write_all(text.as_bytes())?;
+    fs::rename(temp, dir.join(format!("{}.txt", id.0)))
+}
+
+fn remove_audio(root: &Path, path: &Path) {
+    if fs::remove_file(path).is_ok() && path.extension().is_some_and(|ext| ext == "wav") {
+        if let Some(name) = path.file_name() {
+            let _ = fs::remove_file(root.join("screens").join(name).with_extension("txt"));
+        }
+    }
+}
+
 fn write_corpus(root: &Path, corrected: &BTreeMap<Id, String>) -> std::io::Result<()> {
     fs::create_dir_all(root)?;
     let temp = root.join("corpus.tsv.tmp");
@@ -532,12 +575,16 @@ fn write_corpus(root: &Path, corrected: &BTreeMap<Id, String>) -> std::io::Resul
     for (id, text) in corrected {
         let relative = format!("audio/{}.wav", id.0);
         if root.join(&relative).exists() {
-            writeln!(
+            write!(
                 file,
-                "{}\t{}",
-                relative,
+                "{relative}\t{}",
                 text.replace(['\t', '\n', '\r'], " ")
             )?;
+            let screen = format!("screens/{}.txt", id.0);
+            if root.join(&screen).is_file() {
+                write!(file, "\t{screen}")?;
+            }
+            writeln!(file)?;
         }
     }
     file.flush()?;
@@ -567,7 +614,7 @@ fn prune(root: &Path, keep: usize, slack: usize, corrected: &HashSet<Id>) {
     files.sort();
     let remove = files.len().saturating_sub(keep);
     for path in files.into_iter().take(remove) {
-        let _ = fs::remove_file(path);
+        remove_audio(root, &path);
     }
 }
 
@@ -931,6 +978,8 @@ mod tests {
         ledger.corrected(&id, "old", Source::Manual);
         ledger.corrected(&id, "new\tword\nline", Source::Manual);
         ledger.flush();
+        ledger.screen(id, "Sample text".into());
+        ledger.flush();
         let manifest = fs::read_to_string(root.join("corpus.tsv")).unwrap();
         assert_eq!(manifest.lines().count(), 2);
         let (clips, errors) = crate::eval::parse_manifest(&root.join("corpus.tsv"), &manifest);
@@ -938,6 +987,7 @@ mod tests {
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].reference, "new word line");
         assert!(clips[0].path.exists());
+        assert!(manifest.lines().last().unwrap().contains("\tscreens/"));
     }
 
     #[test]
@@ -953,13 +1003,18 @@ mod tests {
             }
         }
         ledger.flush();
+        for id in &ids {
+            save_screen(&root, id, "Sample text").unwrap();
+        }
         let protected = HashSet::from([ids[0].clone()]);
         prune(&root, 2, 0, &protected);
         for index in [0, 3, 4] {
             assert!(root.join(format!("audio/{}.wav", ids[index].0)).exists());
+            assert!(root.join(format!("screens/{}.txt", ids[index].0)).exists());
         }
         for index in [1, 2] {
             assert!(!root.join(format!("audio/{}.wav", ids[index].0)).exists());
+            assert!(!root.join(format!("screens/{}.txt", ids[index].0)).exists());
         }
     }
 
@@ -976,6 +1031,9 @@ mod tests {
             ids.push(id);
         }
         ledger.flush();
+        for id in &ids {
+            save_screen(&root, id, "Sample text").unwrap();
+        }
         let mut events = read(&root);
         compact(&root, &mut events, 2, 0).unwrap();
         assert_eq!(read(&root), events);
@@ -991,6 +1049,10 @@ mod tests {
                 retained
             );
             assert_eq!(root.join(format!("audio/{}.wav", id.0)).exists(), retained);
+            assert_eq!(
+                root.join(format!("screens/{}.txt", id.0)).exists(),
+                retained
+            );
         }
         assert!(events.iter().all(|e| match e {
             Event::Dictated {

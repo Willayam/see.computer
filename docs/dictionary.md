@@ -116,13 +116,16 @@ dictate ─► ledger: id, text, audio, app ─► paste
                     corpus.tsv ─► see-computer eval
 ```
 
-While a dictation is recording, a background task reads the focused window's
-Accessibility text, one line per element. It visits at most 800 elements, 64
+When dictation starts, a background task reads the focused field, window titles,
+and the focused window's Accessibility text. The window walk reads one line
+per element. It visits at most 800 elements, 64
 levels deep, for 800 ms, and accepts at most 16,000 characters. Web apps nest
 their text deep: T3 Code's transcript sits about 27 levels under its window,
 and the first version, which stopped at five levels and 96 elements, only
 ever read the focused field. On T3 Code the walk reads about 670 elements in
-under 100 ms.
+under 100 ms. With Screen Recording permission, a separate worker recognizes
+text from each display using on-device Vision. Transcription uses the snapshot
+if it is ready and can finish without waiting for it.
 
 The terms kept from that text are names and identifiers: camelCase,
 internal punctuation (`claude.ai`), letters mixed with digits, all caps the
@@ -144,22 +147,50 @@ Before this, each dictation was boosted with 62 to 65 terms, among them
 The engine adds those terms at weight 0.5 for this utterance, through the
 same dual decode and merge as saved vocabulary. A hunk survives only when it
 lands a whole term. The context is cleared after the utterance.
-`SEE_COMPUTER_SCREEN_CONTEXT=0` turns the source off.
+`SEE_COMPUTER_SCREEN_CONTEXT=0` disables snapshot capture.
+`SEE_COMPUTER_SCREEN_OCR=0` disables display OCR only.
 
-**Near misses of names on screen.** Boosting cannot reach a name the model
+**Names on screen, after decoding.** Boosting cannot reach a name the model
 hears as another spelling. With "Larsten" in context, the boosted pass takes
 the name's opening token and then leaves it ("Lauriston", "Lawson"), and the
-merge rightly keeps the plain pass's "Larston". Weights up to 3 and margins
-up to 8 did not change that on the user's three recordings. After decoding,
-a capitalized word the word list does not know, at least five letters long,
-is written as a screen term when it is one changed or swapped letter from
-exactly one of them and shares its first two letters
-(`context::near_misses`). Saved vocabulary words are left alone. A letter
-added or dropped is not enough: run over the user's 2,926 saved lines with
-every vocabulary term treated as on screen, allowing those also turned the
-Swedish "Fridag" and "Fridas" into "Frida". With one changed or swapped
-letter, 4 lines changed, all of them misspellings of vocabulary names
-("Larston", "Hormozy", "Fridd").
+merge rightly keeps the plain pass's "Larston". On 2026-11-22 a benchmark of
+30 real dictations whose fixes were misheard names showed boosting harder
+trading names for stray words: margin 6 found 6 of 34 names but added 6 word
+errors. So on-screen names are applied after decoding, in three steps.
+
+1. **Candidates.** Besides the 32 boosted terms, the screen gives up to 400
+   candidates that are never boosted (`learn::screen_candidates`): every word
+   the word list does not know, lowercase product words like "kanban", pairs a
+   capitalized word opens ("Quillo Bot"), and capitalized dictionary words of
+   four or more letters inside a sentence ("Kindle", "Slack") when the screen
+   never shows them lowercase. That last test keeps out "The" and "New", which
+   open UI labels but also appear lowercase in prose. A contraction's stem
+   ("didn") is dropped. With the 32-term list alone, 7 of 33 benchmark names
+   reached matching. With candidates, 29 did.
+2. **Audio check** (`engine/rescore.rs`). Spans of one to three words that
+   sound like a candidate are rescored with the model's own joint network,
+   starting from the decoder state before the span and reusing the encoder
+   output. The span becomes the name when the name's tokens score within 12
+   nats of the heard tokens. This is what fixes a name heard as an ordinary
+   word, which no spelling rule can safely touch. Below 12 the hits
+   fall from 15 to 9; at 16 correct dictations gain 13 errors. A full TDT
+   forced alignment with blanks and durations was tried and separated no
+   better while costing more.
+3. **Sound key** (`sounds_like.rs`). A span that opens with a capital and
+   shares its sound key with exactly one on-screen name, within two spelling
+   edits, is rewritten to it. A candidate must start with a capital, since OCR
+   leaves lowercase fragments ("buit"), and a single heard word needs four
+   letters, since "Can" and "And" sound like too much. Saved vocabulary words
+   are left alone.
+
+On the benchmark this took misheard names from 3 of 34 to 17 of 34 and word
+errors on those clips from 56 to 38. On 150 dictations pasted without a fix,
+replayed with real OCR text from Daybook screenshots, output did not change.
+With the names removed from the screen text, 4 of 34 still landed, from names
+that really were on screen when they were dictated. Rescoring costs about 6 ms
+at the median and 30 ms at p90 per dictation. Still missed: dictionary words
+written lowercase ("sol", "symlinks"), "Mac mini", and long names heard as
+several unrelated words.
 
 Another background task reads Daybook's `daybook.db` with SQLite `mode=ro`.
 It reads only non-private descriptions from the last two hours and refreshes
@@ -538,7 +569,7 @@ Ranked by expected gain per unit of work. Built items are in this branch.
 | 3 | Personal eval corpus and regression score | ledger audio + corrections | none | audio stays local | turns "feels worse" into a number per change | built (`corpus.tsv`, `see-computer eval`) |
 | 4 | Dual decode, keep only boosted hunks that land a term | second greedy pass over the same encoder output | +10.7 ms median per clip | none | errors 187 → 182 at margin 3; margin 4 no longer ends up worse than boost-off (188 vs 190 errors) | built |
 | 5 | Fixing lines in the Library, and the Dictionary menu | the Library window, native panel rows | none | none | covers apps read-back cannot see | built |
-| 6 | Screen-context terms per dictation | AX text of the focused window read while the user speaks, filtered by the learner's shape test, boosted at low weight for that utterance only | none if read during recording | on-screen text held in memory, never written | names and identifiers visible on screen; also the only lever for "scale" vs "skill" | built |
+| 6 | Screen-context terms per dictation | AX text of the focused window, window titles and on-device OCR of every display, read while the user speaks; 32 terms boosted at low weight, up to 400 candidates matched after decoding by audio rescoring and sound key | about 6 ms median after release for rescoring; capture runs during recording | screen text written to the ledger beside the take's audio when history is on | names and identifiers visible on screen; also the only lever for "scale" vs "skill" | built |
 | 7 | Daybook feed | read `daybook.db` read-only, last two hours of non-private descriptions | none | already local; skip private rows | project and client names, about 6 minutes stale | built |
 | 8 | Background miner | nightly job over ledger, history, Daybook, git repos, Wispr's dictionary; optional Haiku pass to judge candidates via the Claude CLI | none | only candidate strings and short contexts leave the machine, and only with Haiku on | finds candidate terms before the user corrects anything | later |
 | 9 | Per-app term sets | ledger's app per dictation | none | local | fewer collateral pushes by boosting only what that app needs | later, after 6 |
@@ -608,8 +639,8 @@ that answered nothing then, the field focused a quarter second later. It
 reads for at most 90 seconds and stores only the region of the user's own
 dictation. Turning off "Save
 Dictation History" stops the ledger, the audio, and learning.
-The dictation app keeps fetched screen text and Daybook descriptions only in
-memory. It writes neither to history nor the ledger. The ledger stores only
-context terms used and whether they landed, when history is enabled. The feed
-opens the Daybook database read-only and skips rows marked private. An
+With history enabled, the ledger stores captured screen text in
+`screens/<take id>.txt` beside the corresponding audio. When the ledger prunes a
+take’s audio, it removes its screen text. The ledger also records which context
+terms were used and landed. Daybook descriptions stay in memory. The feed opens the Daybook database read-only and skips rows marked private. An
 absent, locked, or changed database never delays dictation.

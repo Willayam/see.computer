@@ -1,11 +1,10 @@
 //! Reads the pasted field back after insertion to capture in-place corrections.
 //!
-//! The one place the app reads text out of another app. It reads only the
-//! field it just pasted into, for at most 90 seconds, and keeps only the
-//! user's version of their own dictation.
+//! After a paste, watches the edited field for up to 90 seconds to learn the
+//! user's corrections. Also supplies the accessibility text for screen snapshots.
 
 use std::collections::HashSet;
-use std::ffi::{c_char, c_void};
+use std::ffi::{c_char, c_void, CStr};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -303,7 +302,11 @@ fn value_capped(element: *mut c_void, cap: isize) -> Result<Option<String>, i32>
             return Ok(None);
         }
     }
-    let text = copy(element, c"AXValue")?;
+    string_attribute(element, c"AXValue", cap)
+}
+
+fn string_attribute(element: *mut c_void, name: &CStr, cap: isize) -> Result<Option<String>, i32> {
+    let text = copy(element, name)?;
     if unsafe { CFGetTypeID(text.0) != CFStringGetTypeID() } {
         return Ok(None);
     }
@@ -325,20 +328,25 @@ fn value_capped(element: *mut c_void, cap: isize) -> Result<Option<String>, i32>
     Ok(Some(String::from_utf16_lossy(&units)))
 }
 
-/// Read the focused window while speech is still being captured.
-/// This runs only on the context thread and never retains its full text.
-pub fn screen_text() -> Option<String> {
-    if !crate::paste::accessibility_trusted(false) {
-        return None;
-    }
-    let deadline = Instant::now() + Duration::from_millis(800);
+pub fn screen_text() -> crate::snapshot::AxText {
+    let start = Instant::now();
+    let deadline = start + Duration::from_millis(800);
     let observation = crate::target::observe();
-    if Instant::now() >= deadline {
-        return None;
+    let mut snapshot = crate::snapshot::AxText {
+        app: observation.app,
+        bundle: observation.bundle,
+        focus_ms: start.elapsed().as_millis(),
+        ..Default::default()
+    };
+    if observation.pid <= 0
+        || !crate::paste::accessibility_trusted(false)
+        || Instant::now() >= deadline
+    {
+        return snapshot;
     }
     let app = Cf(unsafe { AXUIElementCreateApplication(observation.pid) });
     if app.0.is_null() {
-        return None;
+        return snapshot;
     }
     unsafe { AXUIElementSetMessagingTimeout(app.0, 0.2) };
     let mut focused = if observation.element.is_some() {
@@ -368,14 +376,35 @@ pub fn screen_text() -> Option<String> {
         .as_ref()
         .map(crate::target::Element::as_ptr)
         .or_else(|| fallback.as_ref().map(|value| value.0));
-    let element = window.as_ref().map(|value| value.0).or(focused_element)?;
-    let mut text = String::new();
-    let mut nodes = 0;
-    if let Some(focused) = focused_element {
-        collect_window_text(focused, &mut text, &mut nodes, 0, deadline);
+    snapshot.title = window
+        .as_ref()
+        .filter(|_| Instant::now() < deadline)
+        .and_then(|window| string_attribute(window.0, c"AXTitle", 4096).ok().flatten())
+        .unwrap_or_default();
+    snapshot.focus_ms = start.elapsed().as_millis();
+
+    let field_start = Instant::now();
+    if let Some(element) = focused_element.filter(|_| field_start < deadline) {
+        unsafe { AXUIElementSetMessagingTimeout(element, 0.1) };
+        snapshot.selected = string_attribute(element, c"AXSelectedText", 16_000)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if Instant::now() < deadline {
+            snapshot.field = string_attribute(element, c"AXValue", 16_000)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+        }
     }
-    collect_window_text(element, &mut text, &mut nodes, 0, deadline);
-    (!text.is_empty()).then_some(text)
+    snapshot.field_ms = field_start.elapsed().as_millis();
+
+    let window_start = Instant::now();
+    if let Some(element) = window.as_ref().map(|value| value.0).or(focused_element) {
+        collect_window_text(element, &mut snapshot.window, &mut 0, 0, deadline);
+    }
+    snapshot.window_ms = window_start.elapsed().as_millis();
+    snapshot
 }
 
 /// Web apps nest their text deep: T3 Code's transcript sits about 27 levels

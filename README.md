@@ -53,7 +53,7 @@ Transcripts are written to disk as plain text by default, with one markdown file
 
 Turn history off with **Save Dictation History** in the tray's **Settings**. Open **see.computer Folder** there to inspect or delete the plain files. There is no auto-pruning.
 
-For learning and accuracy checks, each dictation's audio and what became of it are also kept in `~/Library/Application Support/see.computer/ledger/`, outside iCloud. Audio of the newest 500 uncorrected dictations is kept, and corrected ones are kept as the eval corpus. **Save Dictation History** turns this off too.
+For learning and accuracy checks, each dictation's audio, captured screen text, and what became of the dictation are also kept in `~/Library/Application Support/see.computer/ledger/`, outside iCloud. The ledger keeps audio and screen text for the newest 500 uncorrected dictations. Corrected dictations form the eval corpus. **Save Dictation History** turns this off too.
 
 Files in Documents can also sync through iCloud Desktop & Documents, if you have enabled it.
 
