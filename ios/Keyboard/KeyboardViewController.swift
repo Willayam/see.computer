@@ -710,9 +710,9 @@ final class KeyboardViewController: UIInputViewController {
     private func layout() {
         guard let root = view else { return }
         // iOS pins a custom keyboard's bottom above its own globe row and always draws 17 pt of
-        // keyboard above the view. This height starts the view at the top of Apple's suggestion
-        // strip on an iPhone 17 Pro. The rows end where iOS cuts the view off, 4 pt above Apple's.
-        let height = root.heightAnchor.constraint(equalToConstant: 757.0 / 3)
+        // keyboard above the view. 757 px starts the view at the top of Apple's suggestion strip on
+        // an iPhone 17 Pro. The extra inset is the touch margin under the bottom row's caps.
+        let height = root.heightAnchor.constraint(equalToConstant: 757.0 / 3 + Key.capInset)
         height.priority = .defaultHigh
         height.isActive = true
         root.clipsToBounds = true
