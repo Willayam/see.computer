@@ -26,8 +26,8 @@ container() { xcrun simctl get_app_container "$1" computer.see.ios data; }
 setup() {
     udid="$1"
     mkdir -p "$build"
-    xcodebuild -project "$root/SeeComputer.xcodeproj" -target Keyboard -configuration Debug -sdk iphonesimulator \
-        SYMROOT="$build/products" OBJROOT="$build/objects" build > "$build/keyboard.log" 2>&1 \
+    xcodebuild -project "$root/SeeComputer.xcodeproj" -scheme see.computer -configuration Debug \
+        -destination "id=$udid" -derivedDataPath "$build/derived" build > "$build/keyboard.log" 2>&1 \
         || { tail -30 "$build/keyboard.log"; exit 1; }
     app="$build/ParityHost.app"
     rm -rf "$app"
@@ -35,7 +35,7 @@ setup() {
     xcrun --sdk iphonesimulator swiftc -target "$(uname -m)-apple-ios17.0-simulator" \
         -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" "$here/parity/ParityHost.swift" -o "$app/ParityHost"
     cp "$here/parity/Host-Info.plist" "$app/Info.plist"
-    cp -R "$build/products/Debug-iphonesimulator/Keyboard.appex" "$app/PlugIns/"
+    cp -R "$build/derived/Build/Products/Debug-iphonesimulator/Keyboard.appex" "$app/PlugIns/"
     codesign -s - --force "$app" > /dev/null 2>&1
     xcrun simctl install "$udid" "$app"
     xcrun simctl spawn "$udid" defaults write -g AppleKeyboards -array \
