@@ -100,7 +100,7 @@ final class Key: UIControl {
     private var stroke = [SwipeSample]()
     private var swiping = false
     private var travel = TypingKeys.StrokeTravel()
-    private var trailLayer: CAShapeLayer?
+    private var trail: SwipeTrail?
 
     private func record(_ touch: UITouch, on keyboard: TypingKeys) {
         guard !stroke.isEmpty else { return }
@@ -109,26 +109,16 @@ final class Key: UIControl {
             stroke = stride(from: 0, to: stroke.count, by: 2).map { stroke[$0] }
         }
         stroke.append(sample)
-        if !swiping {
-            guard travel.isWordGesture(at: sample.point, start: stroke[0].point, from: self, on: keyboard) else { return }
-            guard keyboard.beginSwipe(from: self) else { return }
-            swiping = true
-            trackedKey?.isHighlighted = false
-            trackedKey = nil
-            let layer = CAShapeLayer()
-            layer.strokeColor = UIColor.systemBlue.withAlphaComponent(0.65).cgColor
-            layer.fillColor = nil
-            layer.lineWidth = 2.5
-            layer.lineJoin = .round
-            layer.lineCap = .round
-            keyboard.layer.addSublayer(layer)
-            trailLayer = layer
+        if swiping {
+            trail?.add(sample)
+            return
         }
-        let tail = stroke.reversed().prefix { sample.time - $0.time <= 0.16 }.reversed()
-        let line = UIBezierPath()
-        if let first = tail.first { line.move(to: first.point) }
-        for point in tail.dropFirst() { line.addLine(to: point.point) }
-        trailLayer?.path = line.cgPath
+        guard travel.isWordGesture(at: sample.point, start: stroke[0].point, from: self, on: keyboard) else { return }
+        guard keyboard.beginSwipe(from: self) else { return }
+        swiping = true
+        trackedKey?.isHighlighted = false
+        trackedKey = nil
+        trail = SwipeTrail(on: keyboard, from: stroke)
     }
 
     private func endStroke() {
@@ -136,13 +126,8 @@ final class Key: UIControl {
         if swiping { typingKeys?.endSwipe(from: self) }
         swiping = false
         travel = TypingKeys.StrokeTravel()
-        guard let layer = trailLayer else { return }
-        trailLayer = nil
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(0.15)
-        CATransaction.setCompletionBlock { layer.removeFromSuperlayer() }
-        layer.opacity = 0
-        CATransaction.commit()
+        trail?.lift()
+        trail = nil
     }
 
     private weak var trackedKey: Key?
@@ -295,6 +280,185 @@ final class Key: UIControl {
                 keyboard.preview.hide(for: self)
             }
         }
+    }
+}
+
+/// The slide-to-type trail, matched to Apple's iOS 27 keyboard in the simulator:
+/// a translucent grey comet with a round head under the finger. Width falls off
+/// with both path distance and age, so a fast stroke leaves a longer, slimmer
+/// tail. Once the finger stops or lifts, the comet shrinks to a short stub and
+/// thins out. The trail keeps itself alive through its display link until then.
+final class SwipeTrail: NSObject {
+    private struct Mark {
+        let point: CGPoint
+        let time: TimeInterval
+        let distance: CGFloat
+    }
+
+    static let headWidth: CGFloat = 20
+    static let taperLength: CGFloat = 313
+    static let taperAge: TimeInterval = 0.43
+    static let fadeDuration: TimeInterval = 0.62
+    static let needleWidth: CGFloat = 2
+    static let stubLength: CGFloat = 32
+    static let stubTime: TimeInterval = 0.22
+    // Touches arrive every 8 ms on device but every 33 ms in the simulator;
+    // a shorter gap is not a stop.
+    static let stillAfter: TimeInterval = 0.034
+
+    private let shape = CAShapeLayer()
+    private var marks: [Mark] = []
+    private var link: CADisplayLink?
+    private var lifted = false
+
+    init(on view: UIView, from samples: [SwipeSample]) {
+        super.init()
+        let dark = view.traitCollection.userInterfaceStyle == .dark
+        shape.fillColor = (dark
+            ? UIColor(red: 157 / 255, green: 161 / 255, blue: 173 / 255, alpha: 0.52)
+            : UIColor(red: 154 / 255, green: 160 / 255, blue: 168 / 255, alpha: 0.40)).cgColor
+        shape.zPosition = 1
+        view.layer.addSublayer(shape)
+        samples.forEach(add)
+        let link = CADisplayLink(target: self, selector: #selector(step))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        link.add(to: .main, forMode: .common)
+        self.link = link
+        draw(at: CACurrentMediaTime())
+    }
+
+    func add(_ sample: SwipeSample) {
+        guard let last = marks.last else {
+            marks.append(Mark(point: sample.point, time: sample.time, distance: 0))
+            return
+        }
+        let step = hypot(sample.point.x - last.point.x, sample.point.y - last.point.y)
+        guard step > 0.25 else { return }
+        marks.append(Mark(point: sample.point, time: sample.time, distance: last.distance + step))
+        link?.isPaused = false
+    }
+
+    func lift() {
+        lifted = true
+        link?.isPaused = false
+    }
+
+    @objc private func step(_ link: CADisplayLink) {
+        draw(at: link.targetTimestamp)
+    }
+
+    private func draw(at now: TimeInterval) {
+        guard let head = marks.last else { return finish() }
+        let idle = max(0, now - head.time - (lifted ? 0 : Self.stillAfter))
+        let fade = max(0, 1 - idle / Self.fadeDuration)
+        if fade == 0 {
+            if lifted { return finish() }
+            // A finger resting long enough leaves nothing to draw until it moves.
+            link?.isPaused = true
+        }
+
+        var body: [(point: CGPoint, distance: CGFloat, taper: CGFloat)] = []
+        var oldest = 0
+        for index in marks.indices.reversed() {
+            let mark = marks[index]
+            let taper = 1 - (head.distance - mark.distance) / Self.taperLength - CGFloat(head.time - mark.time) / CGFloat(Self.taperAge)
+            if taper <= 0 {
+                if let previous = body.last {
+                    let t = previous.taper / (previous.taper - taper)
+                    let point = CGPoint(x: previous.point.x + (mark.point.x - previous.point.x) * t,
+                                        y: previous.point.y + (mark.point.y - previous.point.y) * t)
+                    body.append((point, previous.distance + (head.distance - mark.distance - previous.distance) * t, 0))
+                }
+                oldest = index
+                break
+            }
+            body.append((mark.point, head.distance - mark.distance, taper))
+        }
+        if oldest > 0 { marks.removeFirst(oldest) }
+
+        // A resting comet settles to a short stub instead of keeping its tail.
+        var stub = CGFloat.infinity
+        if idle > 0, let length = body.last?.distance, length > Self.stubLength {
+            stub = Self.stubLength + (length - Self.stubLength) * CGFloat(exp(-idle / Self.stubTime))
+        }
+        let scale = CGFloat(fade) / 2
+        var outline: [(point: CGPoint, radius: CGFloat)] = []
+        for (index, part) in body.enumerated() {
+            var taper = part.taper
+            if stub.isFinite {
+                taper = min(taper, 1 - part.distance / stub)
+                if taper <= 0, index > 0 {
+                    let previous = body[index - 1]
+                    let before = min(previous.taper, 1 - previous.distance / stub)
+                    let t = before / (before - taper)
+                    outline.append((CGPoint(x: previous.point.x + (part.point.x - previous.point.x) * t,
+                                            y: previous.point.y + (part.point.y - previous.point.y) * t), Self.needleWidth * scale))
+                    break
+                }
+            }
+            outline.append((part.point, max(Self.needleWidth, Self.headWidth * taper) * scale))
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shape.path = Self.path(through: Self.smoothed(outline))
+        CATransaction.commit()
+    }
+
+    private func finish() {
+        link?.invalidate()
+        link = nil
+        shape.removeFromSuperlayer()
+    }
+
+    /// Catmull-Rom points between sparse touches, so a 30 Hz stroke still
+    /// rounds its corners the way Apple's does.
+    static func smoothed(_ points: [(point: CGPoint, radius: CGFloat)]) -> [(point: CGPoint, radius: CGFloat)] {
+        guard points.count > 2 else { return points }
+        var result = [points[0]]
+        for index in 0 ..< points.count - 1 {
+            let p0 = points[max(0, index - 1)].point, p1 = points[index].point
+            let p2 = points[index + 1].point, p3 = points[min(points.count - 1, index + 2)].point
+            let pieces = min(8, Int(hypot(p2.x - p1.x, p2.y - p1.y) / 3))
+            if pieces > 1 {
+                for piece in 1 ..< pieces {
+                    let t = CGFloat(piece) / CGFloat(pieces), t2 = t * t, t3 = t2 * t
+                    func blend(_ a: CGFloat, _ b: CGFloat, _ c: CGFloat, _ d: CGFloat) -> CGFloat {
+                        0.5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (3 * b - a - 3 * c + d) * t3)
+                    }
+                    let radius = points[index].radius + (points[index + 1].radius - points[index].radius) * t
+                    result.append((CGPoint(x: blend(p0.x, p1.x, p2.x, p3.x), y: blend(p0.y, p1.y, p2.y, p3.y)), radius))
+                }
+            }
+            result.append(points[index + 1])
+        }
+        return result
+    }
+
+    /// The union of a disc at every point and the tangent hull between each
+    /// pair. Every piece winds the same way, so nonzero filling never punches
+    /// a hole where the trail crosses itself.
+    static func path(through points: [(point: CGPoint, radius: CGFloat)]) -> CGPath {
+        let path = CGMutablePath()
+        for (index, current) in points.enumerated() where current.radius > 0.05 {
+            path.move(to: CGPoint(x: current.point.x + current.radius, y: current.point.y))
+            path.addArc(center: current.point, radius: current.radius, startAngle: 0, endAngle: -2 * .pi, clockwise: true)
+            path.closeSubpath()
+            guard index + 1 < points.count else { continue }
+            let next = points[index + 1]
+            let dx = next.point.x - current.point.x, dy = next.point.y - current.point.y
+            let length = hypot(dx, dy)
+            guard length > abs(current.radius - next.radius) else { continue }
+            let ux = dx / length, uy = dy / length
+            let e = (current.radius - next.radius) / length, s = (1 - e * e).squareRoot()
+            let left = CGPoint(x: e * ux - s * uy, y: e * uy + s * ux)
+            let right = CGPoint(x: e * ux + s * uy, y: e * uy - s * ux)
+            path.move(to: CGPoint(x: current.point.x + current.radius * left.x, y: current.point.y + current.radius * left.y))
+            path.addLine(to: CGPoint(x: next.point.x + next.radius * left.x, y: next.point.y + next.radius * left.y))
+            path.addLine(to: CGPoint(x: next.point.x + next.radius * right.x, y: next.point.y + next.radius * right.y))
+            path.addLine(to: CGPoint(x: current.point.x + current.radius * right.x, y: current.point.y + current.radius * right.y))
+            path.closeSubpath()
+        }
+        return path
     }
 }
 
