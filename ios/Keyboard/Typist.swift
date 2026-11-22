@@ -57,12 +57,13 @@ final class Typist {
         let input: WordInput
         let taps: TapTrail
         let space: CGPoint
+        let layout: KeyLayout
         let output: String
         let end: Caret
     }
     private var held: HeldWord?
     var reconsider: ((HeldWord, WordInput, TapTrail, String) -> String?)?
-    var committed: ((TapTrail, String, Bool) -> Void)?
+    var committed: ((WordInput, TapTrail, String, Bool) -> Void)?
     var editedInsideWord: ((Caret) -> Void)?
     private let suggestions: (WordInput, TapTrail) -> WordSuggestions
 
@@ -201,7 +202,11 @@ final class Typist {
             }
             return
         }
-        if trail.end == Caret(proxy) { committed?(trail, candidate, true) }
+        let caret = Caret(proxy)
+        if let caret, caret.field == input.field {
+            let pickedTrail = trail.end == caret ? trail : TapTrail(end: caret)
+            committed?(input, pickedTrail, candidate, true)
+        }
         forget()
         let after = proxy.documentContextAfterInput
         let next = after?.first
@@ -218,7 +223,7 @@ final class Typist {
         }
     }
 
-    func type(_ output: String, at point: CGPoint?, in proxy: UITextDocumentProxy, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+    func type(_ output: String, at point: CGPoint?, in proxy: UITextDocumentProxy, layout: KeyLayout? = nil, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         if output.count == 1, output.first?.isLetter == true, needsSpace(at: Caret(proxy)) {
             let swipe = precedingSwipe
             proxy.insertText(" ")
@@ -244,7 +249,7 @@ final class Typist {
         let input = followsLetter && (output == " " || punctuation) ? WordInput(proxy) : nil
         let correction = input.flatMap { suggestions($0, priorTrail).automatic }
         var joint: String?
-        if let input, let previousWord, let caret,
+        if let input, let previousWord, previousWord.layout == layout, let caret,
            previousWord.end.field == caret.field, previousWord.end.after == caret.after,
            previousWord.end.before + input.word == caret.before {
             joint = reconsider?(previousWord, input, priorTrail, correction ?? input.word)
@@ -269,10 +274,10 @@ final class Typist {
         } else {
             proxy.insertText(output == "’" && proxy.smartQuotesType == .no ? "'" : output)
         }
-        if joint == nil, let input { committed?(priorTrail, correction ?? input.word, false) }
-        if output == " ", joint == nil, let input, let point, let end = Caret(proxy),
+        if joint == nil, let input { committed?(input, priorTrail, correction ?? input.word, false) }
+        if output == " ", joint == nil, let input, let point, let layout, let end = Caret(proxy),
            end.before.hasSuffix((correction ?? input.word) + " ") {
-            held = HeldWord(input: input, taps: priorTrail, space: point, output: correction ?? input.word, end: end)
+            held = HeldWord(input: input, taps: priorTrail, space: point, layout: layout, output: correction ?? input.word, end: end)
         }
         if let letter = output.first, output.count == 1, WordInput.wordCharacter(letter),
            let start = caret, let end = Caret(proxy), start.field == end.field, start.after == end.after,

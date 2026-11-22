@@ -56,7 +56,16 @@ private func matchesRecordedGeometry(_ actual: KeyLayout, _ recorded: KeyLayout)
 func replayPhone(_ path: String) async throws {
     let lines = try String(contentsOfFile: path, encoding: .utf8).split(whereSeparator: \.isNewline)
     let events = try lines.map { try JSONDecoder().decode(PhoneEvent.self, from: Data($0.utf8)) }
-    let vocabulary = TypingVocabulary(initialSpread: events.first(where: { $0.e == "field" })?.spread)
+    let suite = UUID().uuidString
+    let store = UserDefaults(suiteName: suite)!
+    defer { store.removePersistentDomain(forName: suite) }
+    if let spread = events.first(where: { $0.e == "field" })?.spread {
+        // The log records the fitted spread without the effective sample count.
+        let count = 1000.0
+        let residual = max(0, 2 * (count + 40) * spread * spread - 5)
+        store.set(["sum": residual, "count": count], forKey: "typingResiduals")
+    }
+    let vocabulary = TypingVocabulary(store: store)
     await withCheckedContinuation { continuation in vocabulary.load { continuation.resume() } }
     var layout = KeyLayout()
     var field = SimField()
@@ -70,7 +79,7 @@ func replayPhone(_ path: String) async throws {
     var loggedKeys = 0
     let typist = Typist { vocabulary.suggestions(for: $0, trail: $1, layout: layout) }
     typist.editedInsideWord = vocabulary.observeEditInsideWord
-    typist.committed = { vocabulary.learn($0, chosen: $1, picked: $2, layout: layout) }
+    typist.committed = { vocabulary.learn($0, trail: $1, chosen: $2, picked: $3, layout: layout) }
     typist.reconsider = { vocabulary.reconsider($0, input: $1, trail: $2, chosen: $3, layout: layout) }
     keys.keyPrior = { _ in
         guard let input = WordInput(field), typist.trail.end == Caret(field),
@@ -80,7 +89,7 @@ func replayPhone(_ path: String) async throws {
     keys.startDelete = { typist.delete(in: field) }
     keys.insert = { output, point in
         let cased = loggedOutput.first?.isUppercase == true ? output.uppercased() : output.lowercased()
-        typist.type(cased, at: point, in: field, now: time)
+        typist.type(cased, at: point, in: field, layout: layout, now: time)
     }
     print("event\taction\tphone\treplay\tkept\tnext")
     for (index, event) in events.enumerated() {
@@ -135,7 +144,7 @@ func replayPhone(_ path: String) async throws {
                 keys.tap(at: point)
             } else {
                 loggedKeys += 1
-                typist.type(output, at: point, in: field, now: time)
+                typist.type(output, at: point, in: field, layout: layout, now: time)
             }
         case "pick":
             // Show what space would have committed before the user picked from the strip.

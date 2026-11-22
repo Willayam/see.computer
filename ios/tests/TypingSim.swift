@@ -51,10 +51,10 @@ private final class Pipeline {
         typist.reviseSwipe = vocabulary.reviseSwipe
         typist.reconsider = { [vocabulary, keys] in vocabulary.reconsider($0, input: $1, trail: $2, chosen: $3, layout: keys.keyLayout) }
         typist.editedInsideWord = vocabulary.observeEditInsideWord
-        typist.committed = { [vocabulary, keys] in vocabulary.learn($0, chosen: $1, picked: $2, layout: keys.keyLayout) }
+        typist.committed = { [vocabulary, keys] in vocabulary.learn($0, trail: $1, chosen: $2, picked: $3, layout: keys.keyLayout) }
         keys.startDelete = { [unowned self] in self.typist.delete(in: self.field); self.keys.updateCase(for: self.field) }
         keys.insert = { [unowned self] output, point in
-            self.typist.type(output, at: point, in: self.field)
+            self.typist.type(output, at: point, in: self.field, layout: self.keys.keyLayout)
             self.keys.updateCase(for: self.field)
         }
     }

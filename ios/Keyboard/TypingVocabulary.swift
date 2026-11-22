@@ -4,6 +4,7 @@ struct WordInput: Equatable {
     let field: UUID
     let word: String
     let previous: [String]
+    let followsEnglishI: Bool
     let sentenceStart: Bool
     let smartQuotes: Bool
 
@@ -36,9 +37,9 @@ struct WordInput: Equatable {
         let prior = leading.trimmingCharacters(in: .whitespaces)
         sentenceStart = prior.isEmpty || prior.last?.isNewline == true || prior.last.map { ".!?".contains($0) } == true
         let sentence = prior.suffix(128).split(whereSeparator: { $0.isNewline || ".!?".contains($0) }).last
-        previous = sentenceStart ? [] : (sentence?.split(whereSeparator: { !Self.wordCharacter($0) }).suffix(4).map {
-            $0.lowercased().replacingOccurrences(of: "’", with: "'")
-        } ?? [])
+        let recent = sentenceStart ? [] : (sentence?.split(whereSeparator: { !Self.wordCharacter($0) }).suffix(4) ?? [])
+        followsEnglishI = recent.last == "I"
+        previous = recent.map { $0.lowercased().replacingOccurrences(of: "’", with: "'") }
         guard let identifier = SeeDocumentIdentifier(proxy) else { return nil }
         field = identifier
         smartQuotes = proxy.smartQuotesType != .no
@@ -61,61 +62,74 @@ final class TypingVocabulary {
     private var shortcuts: [String: String] = [:]
     private var protectedWords = Set<String>()
 
-    private var keptWords: [String]
     private var pickedWords: [String]
-    private var pendingWord: (word: String, field: UUID, before: String, picked: Bool)?
+    private var pendingWord: (word: String, field: UUID, before: String, forget: Bool)?
     private let store: UserDefaults?
     private var residual: Double
     private var count: Double
     var spread: Double { min(0.4, max(0.1, sqrt((residual + 5) / (2 * (count + 40))))) }
 
-    init(store: UserDefaults? = nil, initialSpread: Double? = nil) {
+    private struct TouchProfile: Codable {
+        let signature: [Int]
+        var bias = Array(repeating: 0.0, count: 31)
+        var counts = Array(repeating: 0.0, count: 31)
+    }
+    private var touchProfiles: [TouchProfile]
+    private var touchLayout: KeyLayout?
+
+    init(store: UserDefaults? = nil) {
         self.store = store
-        keptWords = store?.stringArray(forKey: "typingKeptWords") ?? []
         pickedWords = store?.stringArray(forKey: "typingPickedWords") ?? []
         let saved = store?.dictionary(forKey: "typingResiduals")
         residual = saved?["sum"] as? Double ?? 0
         count = saved?["count"] as? Double ?? 0
-        if let initialSpread {
-            // A phone log records the fitted spread, but omits the effective sample count.
-            count = 1000
-            residual = max(0, 2 * (count + 40) * initialSpread * initialSpread - 5)
+        if let data = store?.data(forKey: "typingTouchProfiles"),
+           let profiles = try? PropertyListDecoder().decode([TouchProfile].self, from: data) {
+            touchProfiles = profiles
+        } else if let saved = store?.dictionary(forKey: "typingBoundaryTouches"),
+                  let signature = saved["layout"] as? [Int],
+                  let bias = saved["bias"] as? [Double], bias.count == 31,
+                  let counts = saved["counts"] as? [Double], counts.count == 31 {
+            touchProfiles = [TouchProfile(signature: signature, bias: bias, counts: counts)]
+        } else {
+            touchProfiles = []
         }
     }
 
-    private var touchSignature = [Int]()
-    private var touchLayout: KeyLayout?
-    private var verticalBias = Array(repeating: 0.0, count: 31)
-    private var touchCounts = Array(repeating: 0.0, count: 31)
+    private func selectTouchProfile(for layout: KeyLayout) {
+        guard layout != touchLayout else { return }
+        let geometry = [layout.pitch, layout.reach.width, layout.reach.height, layout.space.minX,
+                        layout.space.minY, layout.space.width, layout.space.height]
+        let centers: [CGFloat] = layout.centers.flatMap { [$0?.x ?? -1, $0?.y ?? -1] }
+        let signature = (geometry + centers).map { Int(($0 * 10).rounded()) }
+        if let index = touchProfiles.firstIndex(where: { $0.signature == signature }) {
+            let profile = touchProfiles.remove(at: index)
+            touchProfiles.append(profile)
+        } else {
+            touchProfiles.append(TouchProfile(signature: signature))
+            if touchProfiles.count > 4 { touchProfiles.removeFirst() }
+        }
+        touchLayout = layout
+    }
 
     func offsets(for layout: KeyLayout) -> [Double] {
-        if layout != touchLayout {
-            let geometry = [layout.pitch, layout.reach.width, layout.reach.height, layout.space.minX,
-                            layout.space.minY, layout.space.width, layout.space.height]
-            let centers: [CGFloat] = layout.centers.flatMap { [$0?.x ?? -1, $0?.y ?? -1] }
-            let signature = (geometry + centers).map { Int(($0 * 10).rounded()) }
-            let saved = store?.dictionary(forKey: "typingBoundaryTouches")
-            if saved?["layout"] as? [Int] == signature,
-               let means = saved?["bias"] as? [Double], means.count == 31,
-               let counts = saved?["counts"] as? [Double], counts.count == 31 {
-                verticalBias = means
-                touchCounts = counts
-            } else {
-                verticalBias = Array(repeating: 0, count: 31)
-                touchCounts = Array(repeating: 0, count: 31)
-            }
-            touchLayout = layout
-            touchSignature = signature
-        }
-        return verticalBias
+        selectTouchProfile(for: layout)
+        return touchProfiles[touchProfiles.count - 1].bias
     }
 
     private func observeHeight(_ y: CGFloat, center: CGFloat, key: Int, layout: KeyLayout) {
         let bias = (y - center) / layout.pitch
         guard abs(bias) <= 1 else { return }
-        _ = offsets(for: layout)
-        touchCounts[key] = min(80, touchCounts[key] + 1)
-        verticalBias[key] += (bias - verticalBias[key]) / (12 + touchCounts[key])
+        selectTouchProfile(for: layout)
+        let index = touchProfiles.count - 1
+        let count = min(80, touchProfiles[index].counts[key] + 1)
+        touchProfiles[index].counts[key] = count
+        touchProfiles[index].bias[key] += (bias - touchProfiles[index].bias[key]) / (12 + count)
+    }
+
+    private func saveTouchProfiles() {
+        guard let store else { return }
+        store.set(try? PropertyListEncoder().encode(touchProfiles), forKey: "typingTouchProfiles")
     }
 
     func observeEditInsideWord(_ caret: Caret) {
@@ -124,53 +138,58 @@ final class TypingVocabulary {
               caret.before.dropLast(left.count).last.map({ $0.isWhitespace || WordInput.opensWord($0) }) ?? true,
               caret.after?.dropFirst(right.count).first.map({ !$0.isNumber && $0 != "_" && $0 != "@" }) ?? true
         else { return }
-        rememberIfRetained((String(left) + right).lowercased(), field: caret.field,
-                           before: caret.before + right, picked: true)
+        rememberIfRetained((String(left) + right).lowercased(), field: caret.field, before: caret.before + right)
     }
 
-    private func rememberIfRetained(_ word: String, field: UUID, before: String, picked: Bool) {
+    private func rememberIfRetained(_ word: String, field: UUID, before: String) {
         guard (2...36).contains(word.count), word.allSatisfy(\.isLetter),
-              !(picked ? pickedWords : keptWords).contains(word),
               languages.allSatisfy({ language in
                   guard let lex = tables[language.code] else { return false }
                   return lex.node(word).flatMap(lex.terminal) == nil
               }) else { return }
-        pendingWord = (word, field, before, picked)
+        pendingWord = (word, field, before, false)
     }
 
-    func learn(_ trail: TapTrail, chosen: String, picked: Bool = false, layout: KeyLayout) {
+    func learn(_ input: WordInput, trail: TapTrail, chosen: String, picked: Bool, layout: KeyLayout) {
         let letters = chosen.lowercased()
+        let original = input.word.lowercased()
+        let previousPicks = pickedWords
         // Wait for another word in the same field so backspace can undo a mistaken commit.
         if let pending = pendingWord, let end = trail.end, end.field == pending.field,
-           end.before.hasPrefix(pending.before + " ") {
-            if pending.picked && !pickedWords.contains(pending.word) {
+           end.before.hasPrefix(pending.before),
+           end.before.dropFirst(pending.before.count).first.map({ !WordInput.wordCharacter($0) }) == true {
+            pickedWords.removeAll { $0 == pending.word }
+            if !pending.forget {
                 pickedWords.append(pending.word)
-                pickedWords = Array(pickedWords.suffix(192))
-                store?.set(pickedWords, forKey: "typingPickedWords")
-            } else if !keptWords.contains(pending.word) {
-                keptWords.append(pending.word)
-                keptWords = Array(keptWords.suffix(192))
-                store?.set(keptWords, forKey: "typingKeptWords")
+                if pickedWords.count > 192 { pickedWords.removeFirst() }
             }
         }
         pendingWord = nil
-        if let end = trail.end, letters == String(trail.taps.map(\.typed)) {
-            rememberIfRetained(letters, field: end.field, before: end.before, picked: picked)
+        if letters != original {
+            if picked {
+                pickedWords.removeAll { $0 == original }
+            } else if pickedWords.contains(original), let end = trail.end {
+                pendingWord = (original, end.field, String(end.before.dropLast(input.word.count)) + chosen, true)
+            }
+        } else if (picked || pickedWords.contains(original)), let end = trail.end {
+            rememberIfRetained(original, field: end.field, before: end.before)
         }
+        if pickedWords != previousPicks { store?.set(pickedWords, forKey: "typingPickedWords") }
+
         guard letters.count == trail.taps.count, !letters.contains(" ") else { return }
+        var learnedHeight = false
         for (tap, letter) in zip(trail.taps, letters) {
             guard let point = tap.point, let code = Lexicon.codes[letter], let center = layout.centers[code] else { continue }
             let distance = hypot(point.x - center.x, point.y - center.y) / layout.pitch
             guard distance <= 1.6 else { continue }
             if "zxcvbnm".contains(letter) {
                 observeHeight(point.y, center: center.y, key: code, layout: layout)
+                learnedHeight = true
             }
             residual = residual * 0.999 + distance * distance
             count = count * 0.999 + 1
         }
-        if touchLayout == layout {
-            store?.set(["layout": touchSignature, "counts": touchCounts, "bias": verticalBias], forKey: "typingBoundaryTouches")
-        }
+        if learnedHeight { saveTouchProfiles() }
         store?.set(["sum": residual, "count": count], forKey: "typingResiduals")
     }
 
@@ -322,9 +341,16 @@ final class TypingVocabulary {
     }
 
     func reconsider(_ held: Typist.HeldWord, input: WordInput, trail: TapTrail, chosen: String, layout: KeyLayout) -> String? {
-        if layout.space.contains(held.space) {
+        let replacement = revisedBoundary(held, input: input, trail: trail, chosen: chosen, layout: layout)
+        // A joint revision may put the boundary at a different tap.
+        if replacement == nil, layout.space.contains(held.space) {
             observeHeight(held.space.y, center: layout.space.midY, key: 30, layout: layout)
+            saveTouchProfiles()
         }
+        return replacement
+    }
+
+    private func revisedBoundary(_ held: Typist.HeldWord, input: WordInput, trail: TapTrail, chosen: String, layout: KeyLayout) -> String? {
         let first = held.input.word, second = input.word
         guard !held.output.contains(" "), !chosen.contains(" "), second.first?.isLowercase == true,
               held.input.sentenceStart || first.first?.isLowercase == true,
@@ -361,13 +387,15 @@ final class TypingVocabulary {
         if let usualScore {
             guard best - usualScore >= 2 else { return nil }
         } else if bestText.contains(" ") || held.space.y >= layout.space.minY + 8 { return nil }
+        let parts = bestText.lowercased().split(separator: " ")
+        for (i, word) in [first.lowercased(), second.lowercased()].enumerated() where pickedWords.contains(word) {
+            guard parts.count == 2, parts[i] == word else { return nil }
+        }
         // A firm space separates two independent words. Keep any centered dictionary word on its side.
         if layout.space.insetBy(dx: 0, dy: 8).contains(held.space) {
-            let parts = bestText.lowercased().split(separator: " ")
             for (i, word, taps) in [(0, first, held.taps), (1, second, trail)] {
                 let lower = word.lowercased()
                 if parts.count == 2 && parts[i] == lower { continue }
-                if pickedWords.contains(lower) && hitsOwnKeys(lower, trail: taps, layout: layout) { return nil }
                 if centered(lower, trail: taps, layout: layout),
                    languages.contains(where: { language in
                        guard let lex = tables[language.code] else { return false }
@@ -408,6 +436,16 @@ final class TypingVocabulary {
         suggestions(for: input, trail: TapTrail(), layout: .standard(swedish: languages.contains { $0.code == "sv" }))
     }
 
+    private static let contractions = [
+        "dont": "don't", "didnt": "didn't", "doesnt": "doesn't", "isnt": "isn't", "wasnt": "wasn't",
+        "werent": "weren't", "couldnt": "couldn't", "wouldnt": "wouldn't", "shouldnt": "shouldn't",
+        "hasnt": "hasn't", "havent": "haven't", "hadnt": "hadn't", "arent": "aren't", "cant": "can't",
+        "wont": "won't", "im": "I'm", "ive": "I've", "youre": "you're", "theyre": "they're",
+        "thats": "that's", "whats": "what's", "hes": "he's", "shes": "she's", "whos": "who's",
+        "heres": "here's", "theres": "there's", "wheres": "where's", "hows": "how's", "lets": "let's",
+    ]
+    private static let uncontractedWords: Set<String> = ["its", "well", "were", "shell", "shed", "wed", "hed", "hell", "ill", "id"]
+
     func suggestions(for input: WordInput, trail: TapTrail, layout: KeyLayout) -> WordSuggestions {
         let typed = input.word
         let word = typed.lowercased().replacingOccurrences(of: "’", with: "'")
@@ -427,7 +465,10 @@ final class TypingVocabulary {
             append(expansion)
             return result
         }
-        if !protectedWords.contains(word), typed.first?.isLowercase == true, typed.dropFirst().first?.isUppercase == true,
+        let pickedLiteral = pickedWords.contains(word) && (
+            trail.taps.count != word.count || trail.taps.contains { $0.point == nil } || hitsOwnKeys(word, trail: trail, layout: layout))
+        let canCorrect = !protectedWords.contains(word) && !pickedLiteral
+        if canCorrect, typed.first?.isLowercase == true, typed.dropFirst().first?.isUppercase == true,
            typed.dropFirst(2).allSatisfy({ !$0.isUppercase }) {
             let swapped = String(typed.prefix(2).reversed()) + typed.dropFirst(2)
             if languages.contains(where: { lang in
@@ -511,19 +552,6 @@ final class TypingVocabulary {
                 let lead = reading.first.map { lex.displayForm(lex.text($0)) + (reading.compound ? "" : " ") } ?? ""
                 candidates.append((lead + (reading.compound ? lex.text(reading.last) : lex.displayForm(lex.text(reading.last))), value))
             }
-            if language.code == "en", codes.count >= 2, !word.contains("'"),
-               input.previous.isEmpty || context >= log(0.5) {
-                // A contraction keeps every letter tap. Compare its contextual probability
-                // with the literal directly instead of charging for a missed letter key.
-                for ending in ["t", "m", "d", "ll", "re", "ve", "s"] where word.count > ending.count && word.hasSuffix(ending) {
-                    let stem = String(word.dropLast(ending.count))
-                    if ending == "s", !["let", "it", "he", "she", "that", "there", "who", "what", "where", "how"].contains(stem) { continue }
-                    let form = stem + "'" + ending
-                    if let id = lex.node(form).flatMap(lex.terminal) {
-                        candidates.append((lex.displayForm(form), score(id) - literalCost - 2))
-                    }
-                }
-            }
             for next in decoders[language.code]?.completions(limit: 4) ?? [] {
                 let text = lex.text(next.id)
                 if text.count > word.count { completions.append((lex.displayForm(text), context + next.score)) }
@@ -540,10 +568,17 @@ final class TypingVocabulary {
                 costs[index][letter] - costs[index][codes[index]] <= 3
             }
         }
-        if let best, best.0.lowercased() != word, !protectedWords.contains(word), !pickedWords.contains(word),
-            !(literal.isFinite && best.0.lowercased().replacingOccurrences(of: "'", with: "") != word && centered(word, trail: trail, layout: layout)),
-            typed.dropFirst() == typed.dropFirst().lowercased(), input.sentenceStart || typed.first?.isUppercase != true || shiftedName
-        {
+        if canCorrect, typed.dropFirst() == typed.dropFirst().lowercased(), let form = Self.contractions[word], word != "lets" || input.sentenceStart,
+           let english = languages.firstIndex(where: { $0.code == "en" }),
+           input.sentenceStart || input.followsEnglishI || weight[english] >= log(0.5) {
+            result.automatic = display(form)
+            append(display(form))
+        } else if canCorrect, typed.dropFirst() == typed.dropFirst().lowercased(),
+                  !Self.uncontractedWords.contains(word), word != "lets",
+                  let best, best.0.lowercased() != word,
+                  best.0.lowercased().replacingOccurrences(of: "'", with: "") != word,
+                  !(literal.isFinite && centered(word, trail: trail, layout: layout)),
+                  input.sentenceStart || typed.first?.isUppercase != true || shiftedName {
             var threshold = literal + 1
             if !literal.isFinite {
                 threshold = unknown + log(typed.first?.isUppercase == true ? 0.03 : 0.0002)
@@ -556,14 +591,9 @@ final class TypingVocabulary {
                 }
                 threshold += 2
             }
-            if keptWords.contains(word), trail.taps.isEmpty || hitsOwnKeys(word, trail: trail, layout: layout) {
-                threshold += log(2)
-            }
             let replacement = best.0.lowercased()
-            let englishContext = languages.firstIndex { $0.code == "en" }.map { weight[$0] >= log(0.9) } ?? false
-            if literal.isFinite, !replacement.contains("'"),
-               tables["sv"].flatMap({ lex in lex.node(word).flatMap(lex.terminal) }) == nil,
-               englishContext || (replacement.count == word.count && zip(word, replacement).filter({ $0 != $1 }).count >= 2),
+            if literal.isFinite, replacement.count == word.count,
+               replacement.allSatisfy(\.isLetter), zip(word, replacement).filter({ $0 != $1 }).count >= 2,
                hitsOwnKeys(word, trail: trail, layout: layout) {
                 threshold += 5
             }

@@ -28,7 +28,7 @@ The inferred raw keyboard uses the nearest letter center inside each supplied wo
 
 ## Replay a phone log
 
-Run `ios/scripts/replay-typing-log.sh /path/to/typing-log.jsonl`. It creates a disposable simulator. Set `SIMULATOR_UDID` to use a booted simulator instead. The TSV contains private text and should stay outside the repository.
+Run `ios/scripts/replay-typing-log.sh /path/to/typing-log.jsonl`. It creates a disposable simulator. Set `SIMULATOR_UDID` to use a booted simulator instead, or `SIMULATOR_RUNTIME` to select an installed runtime ID such as `com.apple.CoreSimulator.SimRuntime.iOS-27-0`. The TSV contains private text and should stay outside the repository.
 
 Each line identifies a commit or a typing attempt interrupted by editing. The phone column shows the recorded insertion. Replay shows what the current keyboard inserts. For a suggestion pick, it shows the automatic candidate available before the pick, then follows the recorded pick. Kept follows later edits at the same position while the field context remains visible. An empty value means the span was erased during that observation. Next shows the replayed strip.
 

@@ -108,6 +108,7 @@ int main(int argc, const char **argv) {
                 &options, NOT_A_WEIGHT_OF_LANG_MODEL_VS_SPATIAL_MODEL,
                 &results);
           NSMutableArray *candidates = [NSMutableArray array];
+          // LatinIME 127336e9, java/src/com/android/inputmethod/latin/Suggest.java, getSuggestedWordsForNonBatchInput.
           bool typedSuggested = false, eligible = false, allowlisted = false;
           for (auto &word : results.sortedWords()) {
             NSMutableString *value = [NSMutableString string];

@@ -70,7 +70,7 @@ final class KeyboardViewController: UIInputViewController {
         typist.reviseSwipe = completions.vocabulary.reviseSwipe
         typist.reconsider = { [completions, keys] in completions.vocabulary.reconsider($0, input: $1, trail: $2, chosen: $3, layout: keys.keyLayout) }
         typist.editedInsideWord = completions.vocabulary.observeEditInsideWord
-        typist.committed = { [completions, keys] in completions.vocabulary.learn($0, chosen: $1, picked: $2, layout: keys.keyLayout) }
+        typist.committed = { [completions, keys] in completions.vocabulary.learn($0, trail: $1, chosen: $2, picked: $3, layout: keys.keyLayout) }
         layout()
         requestSupplementaryLexicon { [weak self] lexicon in
             DispatchQueue.main.async { self?.completions.use(lexicon) }
@@ -656,7 +656,7 @@ final class KeyboardViewController: UIInputViewController {
         prepareForManualEdit()
         var fields: [String: Any] = ["o": output, "s": completions.shownTitles]
         if let point { fields["x"] = Double(point.x); fields["y"] = Double(point.y) }
-        logEdit("key", fields) { typist.type(output, at: point, in: textDocumentProxy) }
+        logEdit("key", fields) { typist.type(output, at: point, in: textDocumentProxy, layout: keys.keyLayout) }
         rememberEditedField()
         updateTypingContext()
     }
