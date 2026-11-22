@@ -94,7 +94,9 @@ WER counts substitutions, insertions and omissions in the resulting field, inclu
 ### Swipe typing
 
 The keyboard loads the FUTO Swipe FP32 encoder on the first English or bilingual
-swipe. Swedish-only typing uses the geometric decoder. Setting the Boolean
+swipe. On the Swedish layout, English candidates combine native and QWERTY
+encoder passes. Swedish candidates use the native pass. Swedish-only typing
+uses the geometric decoder. Setting the Boolean
 `disableNeuralSwipe` in the keyboard's app group defaults restores geometric
 decoding for all languages.
 
@@ -102,4 +104,4 @@ After swiping in a device build with Full Access, run
 `ios/scripts/swipe-budget.sh` on the connected Mac. It prints cold load time,
 gesture latency percentiles and the highest keyboard process footprint recorded.
 For English encoder parity on a booted simulator, run
-`ios/scripts/typing-sim.sh <UDID> --mode neural-swipe --input sample.jsonl --layout layout.json --out results.tsv`.
+`ios/scripts/typing-sim.sh <UDID> --mode neural-swipe --input sample.jsonl --layout layout.json --out results.tsv`. Add `--native-only` to measure the cost of the second pass.

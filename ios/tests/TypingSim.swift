@@ -435,7 +435,14 @@ private func replay(_ input: String, layout: String, output: String, pipeline: P
             normalizedCenters[code] = CGPoint(x: key.cx, y: key.cy)
         }
     }
-    let lex = Lexicon(language: "en")!
+    var inputLayout = KeyLayout()
+    inputLayout.centers = normalizedCenters
+    inputLayout.reach = CGRect(x: 0, y: 0, width: 1, height: 1)
+    inputLayout.pitch = normalizedCenters[Lexicon.codes["å"]!] == nil ? 0.1 : 1.0 / 11
+    if encoderOnly {
+        pipeline.vocabulary.configure(inputLayout.pitch == 0.1 ? .english : .bilingual, dictionaries: [])
+        guard NeuralSwipe.encoder != nil else { throw CocoaError(.fileReadCorruptFile) }
+    }
     var elapsed = [Double]()
     var correct = 0
     for line in inputText.split(separator: UInt8(10)) {
@@ -444,15 +451,8 @@ private func replay(_ input: String, layout: String, output: String, pipeline: P
         if encoderOnly {
             let start = CFAbsoluteTimeGetCurrent()
             let samples = record.data.map { SwipeSample(point: CGPoint(x: $0.x, y: $0.y), time: $0.t / 1000) }
-            let words = context.lowercased().split { !$0.isLetter && $0 != "'" && !".!?".contains($0) }
-            let prior = words.last.flatMap { word -> Int? in
-                if let last = word.last, ".!?".contains(last) { return lex.sentenceStart }
-                return lex.node(String(word.split { ".!?".contains($0) }.last ?? word)).flatMap(lex.terminal)
-            } ?? (words.isEmpty ? lex.sentenceStart : nil)
-            guard let frames = NeuralSwipe.forward(samples, centers: normalizedCenters) else { throw CocoaError(.fileReadCorruptFile) }
-            let ranked = NeuralSwipe.beam(frames, lex: lex).map {
-                ($0.word, $0.score(prior: lex.logProbability($0.id, after: prior)))
-            }.sorted { $0.1 > $1.1 }.prefix(3).map { $0.0 }
+            let ranked = pipeline.vocabulary.swipe(samples, layout: inputLayout, before: context)
+                .words.prefix(3).map { $0.word.lowercased() }
             elapsed.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
             let label = record.word.lowercased().replacingOccurrences(of: "’", with: "'")
                 .trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
@@ -488,7 +488,7 @@ private func replay(_ input: String, layout: String, output: String, pipeline: P
     }
     if !elapsed.isEmpty {
         elapsed.sort()
-        print("neural top1=\(correct)/\(elapsed.count) p50_ms=\(elapsed[elapsed.count/2]) p95_ms=\(elapsed[elapsed.count*95/100])")
+        print("neural top1=\(correct)/\(elapsed.count) p50_ms=\(elapsed[elapsed.count/2]) p95_ms=\(elapsed[elapsed.count*95/100]) peak_mib=\(NeuralSwipe.peakMiB)")
     }
     try rows.joined(separator: "\n").write(toFile: output, atomically: true, encoding: .utf8)
 }
@@ -520,6 +520,7 @@ enum TypingSim {
         ]
         let chosen = option("--level").map { name in levels.filter { $0.name == name } } ?? levels
         let pipeline = await Pipeline(languages: languages, size: size)
+        pipeline.vocabulary.useCanonicalSwipePass = !arguments.contains("--native-only")
         if ["real-swipe", "neural-swipe"].contains(option("--mode") ?? "") {
             guard let input = option("--input"), let layout = option("--layout"), let out = option("--out") else { exit(2) }
             pipeline.configureSwipe(endpoints: false)

@@ -65,7 +65,7 @@ final class TypingVocabulary {
     private var pickedWords: [String]
     private var pendingWord: (word: String, field: UUID, before: String, forget: Bool)?
     private let store: UserDefaults?
-    var warpNeuralSwipe = NeuralSwipe.warpToQwerty
+    var useCanonicalSwipePass = true
     private var residual: Double
     private var count: Double
     var spread: Double { min(0.4, max(0.1, sqrt((residual + 5) / (2 * (count + 40))))) }
@@ -275,12 +275,16 @@ final class TypingVocabulary {
     func swipe(_ samples: [SwipeSample], layout: KeyLayout, before: String,
                previousChoices: [SwipeChoice] = []) -> SwipePrediction {
         let start = ProcessInfo.processInfo.systemUptime
-        let decoder = SwipeDecoder(samples: samples, layout: layout)
+        lazy var decoder = SwipeDecoder(samples: samples, layout: layout)
         var neural = [String: [NeuralSwipe.Candidate]]()
         if store?.bool(forKey: "disableNeuralSwipe") != true, languages.contains(where: { $0.code == "en" }),
-           let frames = NeuralSwipe.emissions(samples, layout: layout, warp: warpNeuralSwipe) {
+           let frames = NeuralSwipe.emissions(samples, layout: layout, canonical: false) {
             for language in languages {
                 if let lex = tables[language.code] { neural[language.code] = NeuralSwipe.beam(frames, lex: lex) }
+            }
+            if useCanonicalSwipePass, layout.centers[Lexicon.codes["å"]!] != nil, let english = neural["en"],
+               let lex = tables["en"], let mapped = NeuralSwipe.emissions(samples, layout: layout, canonical: true) {
+                neural["en"] = NeuralSwipe.average(english, NeuralSwipe.beam(mapped, lex: lex))
             }
         }
         defer {
@@ -332,26 +336,30 @@ final class TypingVocabulary {
         return replacement
     }
 
-    private func rankedSwipe(_ decoder: SwipeDecoder, neural: [String: [NeuralSwipe.Candidate]], before: String) -> [SwipeChoice] {
+    private func rankedSwipe(_ decoder: @autoclosure () -> SwipeDecoder, neural: [String: [NeuralSwipe.Candidate]], before: String) -> [SwipeChoice] {
         let sentence = before.suffix(128).reversed().prefix { !$0.isNewline && !".!?".contains($0) }.reversed()
         let previous = sentence.split { !WordInput.wordCharacter($0) }.suffix(4).map {
             String($0).lowercased().replacingOccurrences(of: "’", with: "'")
         }
         let weights = languageWeights(previous)
-        var scores = [String: Double]()
+        var scores = [String: SwipeChoice]()
         for (i, language) in languages.enumerated() {
             guard let lex = tables[language.code] else { continue }
             let prior = previous.isEmpty ? lex.sentenceStart : previous.last.flatMap(lex.node).flatMap(lex.terminal)
             let candidates = neural[language.code]?.map {
-                (lex.displayForm($0.word), $0.score(prior: lex.logProbability($0.id, after: prior)))
-            } ?? decoder.candidates(in: lex, after: prior)
+                (lex.displayForm($0.word), $0.score(prior: lex.logProbability($0.id, after: prior),
+                                                    language: weights[i], frequency: lex.sourceFrequency($0.id)))
+            } ?? decoder().candidates(in: lex, after: prior).map { ($0.0, $0.1 + weights[i]) }
             for (word, score) in candidates {
-                scores[word] = max(scores[word] ?? -.infinity, score + weights[i])
+                let spelling = neural.isEmpty ? word : word.lowercased()
+                if score > (scores[spelling]?.score ?? -.infinity) {
+                    scores[spelling] = SwipeChoice(word: word, score: score)
+                }
             }
         }
-        return scores.keys.sorted {
-            scores[$0] == scores[$1] ? $0 < $1 : scores[$0]! > scores[$1]!
-        }.prefix(6).map { SwipeChoice(word: $0, score: scores[$0]!) }
+        return Array(scores.values.sorted {
+            $0.score == $1.score ? $0.word < $1.word : $0.score > $1.score
+        }.prefix(6))
     }
 
     func reconsider(_ held: Typist.HeldWord, input: WordInput, trail: TapTrail, chosen: String, layout: KeyLayout) -> String? {

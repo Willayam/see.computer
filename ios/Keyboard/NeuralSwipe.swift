@@ -2,7 +2,6 @@ import Foundation
 import SwipeRuntime
 
 enum NeuralSwipe {
-    static let warpToQwerty = false
     static var peakMiB: Double {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(MemoryLayout.size(ofValue: info) / MemoryLayout<integer_t>.size)
@@ -27,25 +26,51 @@ enum NeuralSwipe {
         catch { NSLog("FUTO Swipe load failed: %@", error.localizedDescription); return nil }
     }()
 
-    // Map the three letter rows to the coordinate space used by the encoder.
-    static func emissions(_ samples: [SwipeSample], layout: KeyLayout, warp: Bool = warpToQwerty) -> [Float]? {
-        func center(_ letter: Character) -> CGPoint? { layout.centers[Lexicon.codes[letter]!] }
-        guard let q = center("q"), let p = center("p"), let a = center("a"), let z = center("z"),
-              layout.pitch > 0, z.y > q.y, p.x > q.x else { return nil }
-        let width = layout.pitch * (center("å") == nil ? 10 : 11)
-        func normalized(_ pt: CGPoint) -> CGPoint {
-            let row = 2 * (pt.y - q.y) / (z.y - q.y)
-            var x = (pt.x - q.x + layout.pitch / 2) / width
-            if warp {
-                let r = max(0, min(2, row))
-                let left = r < 1 ? q.x + r * (a.x - q.x) : a.x + (r - 1) * (z.x - a.x)
-                let offset = r < 1 ? 0.05 + 0.05 * r : 0.1 + 0.1 * (r - 1)
-                x = offset + (pt.x - left) * 0.9 / (p.x - q.x)
+    private static let rows = ["qwertyuiop", "asdfghjkl", "zxcvbnm"].map { row in
+        row.map { Lexicon.codes[$0]! }
+    }
+
+    // Centers from the published QWERTY layout. The lower two rows have a fractional-pixel inset.
+    private static let qwerty: [CGPoint?] = {
+        var centers = [CGPoint?](repeating: nil, count: Lexicon.alphabet.count)
+        let left = [0.05, 43.0 / 428, 85.8 / 428]
+        for (row, letters) in rows.enumerated() {
+            for (column, code) in letters.enumerated() {
+                centers[code] = CGPoint(x: left[row] + Double(column) / 10, y: (Double(row) + 0.5) / 3)
             }
-            return CGPoint(x: x, y: (row + 0.5) / 3)
         }
-        return forward(samples.map { SwipeSample(point: normalized($0.point), time: $0.time) },
-                       centers: layout.centers.map { $0.map(normalized) })
+        return centers
+    }()
+
+    static func emissions(_ samples: [SwipeSample], layout: KeyLayout, canonical: Bool) -> [Float]? {
+        let rows = Self.rows.map { $0.compactMap { layout.centers[$0] } }
+        guard zip(rows, Self.rows).allSatisfy({ $0.count == $1.count }),
+              layout.reach.width > 0 else { return nil }
+        let line = rows.map { $0[0].y }
+        guard line[0] < line[1], line[1] < line[2] else { return nil }
+        func rowNumber(_ y: Double) -> Double {
+            let i = y < line[1] ? 0 : 1
+            return Double(i) + (y - line[i]) / (line[i+1] - line[i])
+        }
+        func native(_ p: CGPoint) -> CGPoint {
+            CGPoint(x: (p.x - layout.reach.minX) / layout.reach.width,
+                    y: ((p.y - line[0]) / ((line[2] - line[0]) / 2) + 0.5) / 3)
+        }
+        func mappedX(_ x: Double, row: Int) -> Double {
+            let points = rows[row]
+            let upper = min(points.count - 1, max(1, points.firstIndex { $0.x >= x } ?? points.count - 1))
+            let a = points[upper-1].x, b = points[upper].x
+            let target = Self.qwerty[Self.rows[row][upper-1]]!.x
+            return target + 0.1 * (x - a) / max(0.000001, b - a)
+        }
+        func mapped(_ p: CGPoint) -> CGPoint {
+            let y = rowNumber(p.y)
+            let clamped = max(0, min(2, y)), row = min(1, Int(clamped))
+            let a = mappedX(p.x, row: row), b = mappedX(p.x, row: row+1)
+            return CGPoint(x: a + (b - a) * (clamped - Double(row)), y: (y + 0.5) / 3)
+        }
+        let points = samples.map { SwipeSample(point: canonical ? mapped($0.point) : native($0.point), time: $0.time) }
+        return forward(points, centers: canonical ? qwerty : layout.centers.map { $0.map(native) })
     }
 
     static func forward(_ samples: [SwipeSample], centers: [CGPoint?]) -> [Float]? {
@@ -94,9 +119,26 @@ enum NeuralSwipe {
         let id: Int
         let mass: Double
 
-        func score(prior: Double, lengthExponent: Double = 0.30, priorWeight: Double = 0.35) -> Double {
-            mass / pow(Double(word.count), lengthExponent) + priorWeight * prior
+        func score(prior: Double, language: Double, frequency: Double, exponent: Double = 0.45,
+                   lengthBonus: Double = 1.25, bigramWeight: Double = 0.40,
+                   languageWeight: Double = 0.50, frequencyWeight: Double = 0.005) -> Double {
+            let length = Double(max(1, word.filter { $0 != "'" }.count))
+            return mass / pow(length, exponent) + lengthBonus * length + bigramWeight * prior
+                + languageWeight * language + frequencyWeight * frequency
         }
+    }
+
+    static func average(_ native: [Candidate], _ canonical: [Candidate]) -> [Candidate] {
+        var candidates = Dictionary(uniqueKeysWithValues: native.map { ($0.id, $0) })
+        for other in canonical {
+            if let first = candidates[other.id] {
+                let mass = max(first.mass, other.mass) + log1p(exp(-abs(first.mass - other.mass)))
+                candidates[other.id] = Candidate(word: first.word, id: first.id, mass: mass)
+            } else {
+                candidates[other.id] = other
+            }
+        }
+        return candidates.values.map { Candidate(word: $0.word, id: $0.id, mass: $0.mass - log(2)) }
     }
 
     private struct Prefix {

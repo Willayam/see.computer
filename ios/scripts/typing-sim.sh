@@ -11,11 +11,13 @@ shift
 out=""
 pass=""
 mode=tap
+native_only=""
 input=""
 layout=""
 metric=noisy_wer
 while [ $# -gt 0 ]; do
     case "$1" in
+        --native-only) native_only="--native-only"; shift ;;
         --input) input="$2"; shift 2 ;;
         --layout) layout="$2"; shift 2 ;;
         --export-sv) export_sv="$2"; shift 2 ;;
@@ -35,7 +37,7 @@ cp "$root"/Keyboard/words-*.bin "$scratch/"
     "$root/Keyboard/TypingKeys.swift" "$root/Keyboard/KeyboardControls.swift" \
     "$root/tests/TypingSim.swift" -o "$scratch/sim"
 if [ "$mode" = real-swipe ] || [ "$mode" = neural-swipe ]; then
-    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --mode "$mode" --languages english \
+    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --mode "$mode" --languages english $native_only \
         --input "${input:?Pass --input sample.jsonl}" --layout "${layout:?Pass --layout qwerty.json}" --out "${out:?Pass --out results.tsv}"
     exit
 fi

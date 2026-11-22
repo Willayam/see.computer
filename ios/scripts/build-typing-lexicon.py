@@ -118,11 +118,11 @@ def collect(language, cache):
         )
         or (language == "en" and (w == "i" or w.startswith("i'")))
     }
-    return probs, proper, rows, totals, held
+    return probs, proper, rows, totals, held, entries
 
 
 def pack_model(language, model):
-    probs, proper, rows, totals, held = model
+    probs, proper, rows, totals, held, entries = model
     vocab = sorted(probs, key=lambda w: (-probs[w], w))
     ids = {w: i for i, w in enumerate(vocab)}
     chars, contexts = Counter(), Counter()
@@ -217,6 +217,7 @@ def pack_model(language, model):
         "<4s11I", data, 0, b"SCLX", 1, len(nodes), len(vocab), len(pairs) // 4, *starts
     )
     (ROOT / f"Keyboard/words-{language}.bin").write_bytes(data)
+    (ROOT / f"Keyboard/frequency-{language}.bin").write_bytes(bytes(entries.get(w, (0,))[0] for w in vocab))
     loss = count = 0
     for prev, w in held:
         if w in probs:

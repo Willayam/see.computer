@@ -16,7 +16,7 @@ src="$runtime/Sources/SwipeRuntime"
 headers="$artifacts/executorch/executorch.xcframework/ios-arm64-simulator/Headers"
 xcrun clang "${clang_args[@]}" -I"$headers" -I"$src/include" -c "$src/SwipeEncoder.m" -o "$scratch/SwipeEncoder.o"
 echo 'module SwipeRuntime { header "SwipeRuntime.h" export * }' > "$scratch/module.modulemap"
-cp "$src/include/SwipeRuntime.h" "$root/Keyboard/FutoSwipe/encoder.pte" "$scratch/"
+cp "$root"/Keyboard/frequency-*.bin "$src/include/SwipeRuntime.h" "$root/Keyboard/FutoSwipe/encoder.pte" "$scratch/"
 libs=("$artifacts"/*/*.xcframework/ios-arm64-simulator/*.a)
 exec xcrun --sdk iphonesimulator swiftc -target "$target" -sdk "$sdk" -I "$scratch" "$scratch/SwipeEncoder.o" \
     -Xlinker -all_load "${libs[@]}" -lc++ -framework Accelerate -framework CoreImage -framework CoreVideo \
