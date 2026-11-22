@@ -748,7 +748,7 @@ final class KeyboardViewController: UIInputViewController {
                 "r": words.previous ?? NSNull(),
             ]
             if let shortWord { fields["short"] = shortWord }
-            if let shortWord, words.words.first?.word.lowercased() != shortWord {
+            guard let best = words.words.first, shortWord == nil || best.word.lowercased() == shortWord else {
                 self.logEdit("swipe", fields.merging(["kept": false]) { $1 }) {}
                 return false
             }

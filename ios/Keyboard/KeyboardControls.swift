@@ -217,6 +217,8 @@ final class Key: UIControl {
     private var symbolView: UIImageView?
     private var face: UIView!
 
+    func faceFrame(in view: UIView) -> CGRect { face.convert(face.bounds, to: view) }
+
     init(title: String? = nil, symbol: String? = nil, label: String? = nil, output: String? = nil) {
         self.output = output ?? title ?? ""
         super.init(frame: .zero)

@@ -307,14 +307,15 @@ final class TypingKeys: UIStackView {
         let hit = super.hitTest(point, with: event)
         guard let key = hit as? Key else {
             guard let hit, hit !== preview, !hit.isDescendant(of: preview) else { return hit }
-            // Spacers extend the nearest character cell. A gap must never activate a function key.
+            let functionKeys = arrangedSubviews.compactMap { $0 as? UIStackView }
+                .flatMap(\.arrangedSubviews).compactMap { $0 as? Key }.filter { !$0.isHidden }
             func distance(to key: Key) -> CGFloat {
-                let frame = key.convert(key.bounds, to: self)
+                let frame = key.faceFrame(in: self)
                 let dx = max(frame.minX - point.x, 0, point.x - frame.maxX)
                 let dy = max(frame.minY - point.y, 0, point.y - frame.maxY)
                 return dx * dx + dy * dy
             }
-            return characterKeys.min { distance(to: $0) < distance(to: $1) } ?? hit
+            return (characterKeys + functionKeys).min { distance(to: $0) < distance(to: $1) } ?? hit
         }
         let choice = resolved(key, at: point)
         return choice.hasActiveTouch ? key : choice
