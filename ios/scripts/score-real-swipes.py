@@ -2,7 +2,8 @@
 
 Usage: python score-real-swipes.py sample.jsonl baseline.tsv model-output.jsonl
 For Swedish, use: python score-real-swipes.py traces.jsonl --synthetic model-output.jsonl
-The last file must come from futo-swipe-bench.py on the same data.
+The last file uses the historical raw/blend JSONL format. For current parity,
+use score-deployed-swipe.py.
 """
 
 import json

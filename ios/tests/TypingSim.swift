@@ -4,10 +4,11 @@ import simd
 /// Types held-out sentences on the real keyboard views with simulated finger noise
 /// and scores the words that end up in the field.
 @MainActor
-private final class Field: NSObject, UITextDocumentProxy {
+final class SimField: NSObject, UITextDocumentProxy {
     var text = ""
     var documentContextBeforeInput: String? { text }
-    var documentContextAfterInput: String? { nil }
+    var following: String?
+    var documentContextAfterInput: String? { following }
     var selectedText: String? { nil }
     var documentInputMode: UITextInputMode? { nil }
     let documentIdentifier = UUID()
@@ -29,7 +30,7 @@ private final class Field: NSObject, UITextDocumentProxy {
 private final class Pipeline {
     let keys = TypingKeys()
     let vocabulary = TypingVocabulary()
-    private(set) var field = Field()
+    private(set) var field = SimField()
     private var typist: Typist!
     var swipeNanos: [UInt64] = []
     var tenLetterNanos: [UInt64] = []
@@ -42,18 +43,19 @@ private final class Pipeline {
         vocabulary.configure(languages, dictionaries: UITextChecker.availableLanguages)
         await withCheckedContinuation { continuation in vocabulary.load { continuation.resume() } }
         typist = Typist { [vocabulary, keys] in vocabulary.suggestions(for: $0, trail: $1, layout: keys.keyLayout) }
-        keys.keyPrior = { [weak self] in
+        keys.keyPrior = { [weak self] layout in
             guard let self, let input = WordInput(self.field), self.typist.trail.end == Caret(self.field),
-                  let prior = self.vocabulary.keyPrior(for: input, trail: self.typist.trail, layout: self.keys.keyLayout)
+                  let prior = self.vocabulary.keyPrior(for: input, trail: self.typist.trail, layout: layout)
             else { return nil }
-            return (prior, self.vocabulary.spread)
+            return (prior, self.vocabulary.spread, self.vocabulary.offsets(for: layout))
         }
         typist.reviseSwipe = vocabulary.reviseSwipe
         typist.reconsider = { [vocabulary, keys] in vocabulary.reconsider($0, input: $1, trail: $2, chosen: $3, layout: keys.keyLayout) }
-        typist.committed = { [vocabulary, keys] in vocabulary.learn($0, chosen: $1, layout: keys.keyLayout) }
+        typist.editedInsideWord = vocabulary.observeEditInsideWord
+        typist.committed = { [vocabulary, keys] in vocabulary.learn($0, trail: $1, chosen: $2, picked: $3, layout: keys.keyLayout) }
         keys.startDelete = { [unowned self] in self.typist.delete(in: self.field); self.keys.updateCase(for: self.field) }
         keys.insert = { [unowned self] output, point in
-            self.typist.type(output, at: point, in: self.field)
+            self.typist.type(output, at: point, in: self.field, layout: self.keys.keyLayout)
             self.keys.updateCase(for: self.field)
         }
     }
@@ -120,7 +122,7 @@ private final class Pipeline {
     }
 
     func newField() {
-        field = Field()
+        field = SimField()
         typist.forget()
         keys.reset()
         keys.updateCase(for: field)
@@ -411,7 +413,7 @@ private struct RealSwipe: Decodable {
 }
 
 @MainActor
-private func replay(_ input: String, layout: String, output: String, pipeline: Pipeline, encoderOnly: Bool) throws {
+private func replay(_ input: String, layout: String, output: String, pipeline: Pipeline, encoderOnly: Bool, geometryOnly: Bool) throws {
     let decoder = JSONDecoder()
     let source = try decoder.decode(FutoLayout.self, from: Data(contentsOf: URL(fileURLWithPath: layout)))
     // Solve the two least-squares systems for target x and y.
@@ -429,19 +431,23 @@ private func replay(_ input: String, layout: String, output: String, pipeline: P
     let ax = gram.inverse * sx, ay = gram.inverse * sy
     var rows = ["id\tword\ttop1\ttop2\ttop3"]
     let inputText = try Data(contentsOf: URL(fileURLWithPath: input), options: .mappedIfSafe)
+    // Geometry needs the physical row-to-column pitch ratio; neural inputs use a unit square.
+    let rowSpan = (centers[Lexicon.codes["z"]!]!.y - centers[Lexicon.codes["q"]!]!.y) * 1.5
+    let rowScale = rowSpan / pipeline.keys.bounds.width
     var normalizedCenters = [CGPoint?](repeating: nil, count: Lexicon.alphabet.count)
     for key in source.keys {
         if let letter = key.letter.first, let code = Lexicon.codes[letter] {
-            normalizedCenters[code] = CGPoint(x: key.cx, y: key.cy)
+            normalizedCenters[code] = CGPoint(x: key.cx, y: key.cy * rowScale)
         }
     }
     var inputLayout = KeyLayout()
     inputLayout.centers = normalizedCenters
     inputLayout.reach = CGRect(x: 0, y: 0, width: 1, height: 1)
     inputLayout.pitch = normalizedCenters[Lexicon.codes["å"]!] == nil ? 0.1 : 1.0 / 11
+    let geometryLexicons = geometryOnly ? ["en", "sv"].compactMap(Lexicon.init) : []
     if encoderOnly {
         pipeline.vocabulary.configure(inputLayout.pitch == 0.1 ? .english : .bilingual, dictionaries: [])
-        guard NeuralSwipe.encoder != nil else { throw CocoaError(.fileReadCorruptFile) }
+        guard geometryOnly || NeuralSwipe.encoder != nil else { throw CocoaError(.fileReadCorruptFile) }
     }
     var elapsed = [Double]()
     var correct = 0
@@ -450,7 +456,25 @@ private func replay(_ input: String, layout: String, output: String, pipeline: P
         let context = record.sentence.split(whereSeparator: \.isWhitespace).prefix(record.word_idx).joined(separator: " ")
         if encoderOnly {
             let start = CFAbsoluteTimeGetCurrent()
-            let samples = record.data.map { SwipeSample(point: CGPoint(x: $0.x, y: $0.y), time: $0.t / 1000) }
+            let samples = record.data.map { SwipeSample(point: CGPoint(x: $0.x, y: $0.y * rowScale), time: $0.t / 1000) }
+            if geometryOnly {
+                let decoder = SwipeDecoder(samples: samples, layout: inputLayout)
+                let tail = context.suffix(128).reversed().prefix { !$0.isNewline && !".!?".contains($0) }.reversed()
+                let previous = tail.split { !WordInput.wordCharacter($0) }.last.map {
+                    String($0).lowercased().replacingOccurrences(of: "’", with: "'")
+                }
+                func candidates(relaxed: Bool) -> [[[String: Any]]] {
+                    geometryLexicons.map { lex in
+                        let prior = previous == nil ? lex.sentenceStart : previous.flatMap(lex.node).flatMap(lex.terminal)
+                        return decoder.candidates(in: lex, after: prior, relaxed: relaxed).map { ["word": $0.0, "score": $0.1] }
+                    }
+                }
+                let strict = candidates(relaxed: false)
+                let relaxed = strict.allSatisfy(\.isEmpty) ? candidates(relaxed: true) : [[], []]
+                let data = try JSONSerialization.data(withJSONObject: ["id": record.id, "strict": strict, "relaxed": relaxed])
+                rows.append(String(decoding: data, as: UTF8.self))
+                continue
+            }
             let ranked = pipeline.vocabulary.swipe(samples, layout: inputLayout, before: context)
                 .words.prefix(3).map { $0.word.lowercased() }
             elapsed.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
@@ -490,12 +514,62 @@ private func replay(_ input: String, layout: String, output: String, pipeline: P
         elapsed.sort()
         print("neural top1=\(correct)/\(elapsed.count) p50_ms=\(elapsed[elapsed.count/2]) p95_ms=\(elapsed[elapsed.count*95/100]) peak_mib=\(NeuralSwipe.peakMiB)")
     }
+    if geometryOnly { rows.removeFirst() }
     try rows.joined(separator: "\n").write(toFile: output, atomically: true, encoding: .utf8)
+}
+
+private struct ReplaySentence: Decodable {
+    let person, id: String
+    let words: [String]
+    let taps: [[[Double]]]
+    let spaces: [[Double]?]
+}
+
+@MainActor
+private func replay(_ path: String, out: String, languages: TypingLanguages, size: CGSize, observedSpaces: Bool) async throws {
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let sentences = try JSONDecoder().decode([ReplaySentence].self, from: data)
+    let lexicons = (languages == .english ? ["en"] : ["en", "sv"]).compactMap(Lexicon.init(language:))
+    var rows = [[String: Any]]()
+    var person: String?
+    var pipeline: Pipeline!
+    for sentence in sentences {
+        if person != sentence.person {
+            pipeline = await Pipeline(languages: languages, size: size)
+            person = sentence.person
+        }
+        pipeline.newField()
+        let bar = pipeline.keys.frame(of: "Space")!
+        var choices = [[String]]()
+        var beforeSpace = [String]()
+        var insertedSpace = [Bool]()
+        var commits = [String]()
+        precondition(sentence.words.count == sentence.taps.count && sentence.words.count == sentence.spaces.count)
+        for (index, taps) in sentence.taps.enumerated() {
+            let before = pipeline.field.text
+            for point in taps { pipeline.tap(at: CGPoint(x: point[0], y: point[1])) }
+            let typed = pipeline.field.text
+            beforeSpace.append(typed.hasPrefix(before) ? String(typed.dropFirst(before.count)) : (tokens(typed).last ?? ""))
+            choices.append(Array(pipeline.suggestions().prefix(3)))
+            if observedSpaces, let space = sentence.spaces[index] {
+                pipeline.tap(at: CGPoint(x: space[0], y: space[1]))
+            } else {
+                pipeline.tap(at: CGPoint(x: bar.midX, y: bar.midY))
+            }
+            let after = pipeline.field.text
+            insertedSpace.append(after.last?.isWhitespace == true && after != typed)
+            commits.append(after.hasPrefix(before) ? String(after.dropFirst(before.count)) : (tokens(after).last ?? ""))
+        }
+        let known = sentence.words.map { word in lexicons.contains { $0.node(word).flatMap($0.terminal) != nil } }
+        rows.append(["known": known, "id": sentence.id, "bars": choices, "commits": commits, "text": pipeline.field.text,
+                     "beforeSpace": beforeSpace, "insertedSpace": insertedSpace])
+    }
+    try JSONSerialization.data(withJSONObject: rows).write(to: URL(fileURLWithPath: out))
 }
 
 @main
 enum TypingSim {
-    @MainActor static func main() async {
+    @MainActor static func main() async throws {
         let arguments = CommandLine.arguments
         func option(_ name: String) -> String? {
             arguments.firstIndex(of: name).flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
@@ -504,6 +578,7 @@ enum TypingSim {
             print("usage: TypingSim --corpus <dir> [--set dev|test] [--languages bilingual|english] [--out <tsv>]")
             exit(2)
         }
+        if let path = option("--typing-log") { try await replayPhone(path); return }
         let swipe = option("--mode") == "swipe"
         let gesture = option("--gesture") ?? "curved"
         guard ["straight", "curved"].contains(gesture) else { exit(2) }
@@ -513,6 +588,22 @@ enum TypingSim {
         let languages: TypingLanguages = mode == "english" ? .english : .bilingual
         let files = mode == "english" ? ["en"] : ["en", "sv"]
         let size = CGSize(width: 394, height: 210)
+        if let path = option("--replay"), let out = option("--out") {
+            try await replay(path, out: out, languages: languages, size: size, observedSpaces: arguments.contains("--observed-spaces"))
+            return
+        }
+        let swipeReplay = ["real-swipe", "neural-swipe", "swipe-geometry"].contains(option("--mode") ?? "")
+        if !swipeReplay, let path = option("--layout") {
+            let pipeline = await Pipeline(languages: languages, size: size)
+            var frames = [String: [Double]]()
+            for key in Lexicon.alphabet.map(String.init) + ["Space"] {
+                if let rect = pipeline.keys.frame(of: key) {
+                    frames[key] = [rect.midX, rect.midY, rect.width, rect.height]
+                }
+            }
+            try JSONEncoder().encode(frames).write(to: URL(fileURLWithPath: path))
+            return
+        }
         let levels = [
             Level(name: "clean", spread: 0, slip: 0),
             Level(name: "steady", spread: 0.2, slip: 0.005),
@@ -521,10 +612,10 @@ enum TypingSim {
         let chosen = option("--level").map { name in levels.filter { $0.name == name } } ?? levels
         let pipeline = await Pipeline(languages: languages, size: size)
         pipeline.vocabulary.useCanonicalSwipePass = !arguments.contains("--native-only")
-        if ["real-swipe", "neural-swipe"].contains(option("--mode") ?? "") {
+        if swipeReplay {
             guard let input = option("--input"), let layout = option("--layout"), let out = option("--out") else { exit(2) }
             pipeline.configureSwipe(endpoints: false)
-            do { try replay(input, layout: layout, output: out, pipeline: pipeline, encoderOnly: option("--mode") == "neural-swipe") }
+            do { try replay(input, layout: layout, output: out, pipeline: pipeline, encoderOnly: option("--mode") != "real-swipe", geometryOnly: option("--mode") == "swipe-geometry") }
             catch { print(error); exit(1) }
             return
         }

@@ -14,16 +14,21 @@ enum NeuralSwipe {
     }
 
     static let encoder: SwipeEncoder? = {
-        guard let path = Bundle.main.path(forResource: "encoder", ofType: "pte") else { return nil }
+        guard let path = Bundle.main.path(forResource: "encoder", ofType: "pte") else {
+            Diagnostics.log("swipe-model-error", ["reason": "missing_encoder"])
+            return nil
+        }
         do {
             let start = ProcessInfo.processInfo.systemUptime
             let model = try SwipeEncoder(path: path)
             let loadMs = (ProcessInfo.processInfo.systemUptime - start) * 1000
             Diagnostics.log("swipe-model", ["load_ms": loadMs])
-            NSLog("FUTO Swipe load %.2f ms", loadMs)
             return model
         }
-        catch { NSLog("FUTO Swipe load failed: %@", error.localizedDescription); return nil }
+        catch {
+            Diagnostics.log("swipe-model-error", ["reason": error.localizedDescription])
+            return nil
+        }
     }()
 
     private static let rows = ["qwertyuiop", "asdfghjkl", "zxcvbnm"].map { row in
@@ -100,8 +105,8 @@ enum NeuralSwipe {
         for i in 0..<64 {
             let index = intervals * Double(i) / 63
             let point = interpolate(at(floor(index)), at(ceil(index)), index - floor(index))
-            features[i] = Float(point.x)
-            features[64 + i] = Float(point.y)
+            features[i] = Float(min(1.1, max(-0.1, point.x)))
+            features[64 + i] = Float(min(1.1, max(-0.1, point.y)))
         }
         for (i, center) in centers.enumerated() {
             guard let center else { continue }
@@ -153,6 +158,7 @@ enum NeuralSwipe {
             if min(a, b) == -.infinity { return max(a, b) }
             return max(a, b) + log1p(exp(-abs(a-b)))
         }
+        let apostrophe = Lexicon.codes["'"]!
         var beam = [Prefix(node: 0, blank: 0, letter: -.infinity, total: 0)]
         var next = [Prefix]()
         // Each child has one parent. Only the retained prefixes can collide with an extension.
@@ -167,10 +173,10 @@ enum NeuralSwipe {
             }
             for state in beam {
                 let previous = state.node == 0 ? -1 : lex.letter(state.node)
-                for child in lex.children(state.node) {
+                func extend(_ child: Int) {
                     let code = lex.letter(child)
                     let mass = (previous == code ? state.blank : state.total) + Double(emissions[frame + code])
-                    guard mass.isFinite else { continue }
+                    guard mass.isFinite else { return }
                     if let i = retained[child] {
                         next[i].letter = sum(next[i].letter, mass)
                         next[i].total = sum(next[i].blank, next[i].letter)
@@ -178,13 +184,26 @@ enum NeuralSwipe {
                         next.append(Prefix(node: child, blank: -.infinity, letter: mass, total: mass))
                     }
                 }
+                for child in lex.children(state.node) {
+                    if lex.letter(child) == apostrophe {
+                        // Apostrophes have no key. The next letter inherits this prefix's CTC masses.
+                        for following in lex.children(child) { extend(following) }
+                    } else { extend(child) }
+                }
             }
             next.sort { $0.total == $1.total ? $0.node < $1.node : $0.total > $1.total }
             beam = Array(next.prefix(100))
         }
-        return beam.compactMap { state in
-            guard state.total.isFinite, let id = lex.terminal(state.node) else { return nil }
-            return Candidate(word: lex.text(id), id: id, mass: state.total)
+        var candidates = [Candidate]()
+        for state in beam where state.total.isFinite {
+            func finish(_ node: Int) {
+                if let id = lex.terminal(node) {
+                    candidates.append(Candidate(word: lex.text(id), id: id, mass: state.total))
+                }
+            }
+            finish(state.node)
+            for child in lex.children(state.node) where lex.letter(child) == apostrophe { finish(child) }
         }
+        return candidates
     }
 }

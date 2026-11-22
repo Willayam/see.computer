@@ -1,14 +1,7 @@
-"""Run the published encoder and a trie-constrained CTC prefix beam on replay traces.
+"""Read keyboard lexicons and prepare encoder input for swipe-blend-bench."""
 
-Requires executorch, torch and numpy. Supply --synthetic for TypingSim's Swedish
-JSONL export. Otherwise supply --layout and the sampled FUTO test JSONL.
-"""
-
-import argparse
-import json
 import re
 import struct
-import time
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +39,24 @@ class Lexicon:
             spelling.extend(spelling[n] + ALPHABET[self.letter[c]] for c in children)
             if self.terminal[n] >= 0:
                 self.words[self.terminal[n]] = spelling[n]
+        self.depths = np.array([len(w.replace("'", "")) for w in spelling], dtype=np.int32)
+        # Follow apostrophe edges without consuming an emission.
+        self.trailing = np.full(nodes, -1, dtype=int)
+        edges = []
+        for n, row in enumerate(self.children):
+            choices = []
+            for child in row:
+                if child < 0:
+                    break
+                if self.letter[child] == ALPHABET.index("'"):
+                    self.trailing[n] = self.terminal[child]
+                    choices.extend(c for c in self.children[child] if c >= 0)
+                else:
+                    choices.append(child)
+            edges.append(choices)
+        self.children = np.full((nodes, max(map(len, edges))), -1, dtype=int)
+        for n, row in enumerate(edges):
+            self.children[n, :len(row)] = row
         self.ids = {word: i for i, word in enumerate(self.words)}
         self.uni = -array(2, "B").astype(float) / 10
         self.rows = array(3, "<u4")
@@ -71,51 +82,6 @@ class Lexicon:
         return prior
 
 
-def decode(lex, emissions, before):
-    # Each active prefix stores separate masses for blank and nonblank endings.
-    nodes = np.array([0])
-    blank, letter = np.array([0.0]), np.array([-np.inf])
-    for frame in emissions:
-        total = np.logaddexp(blank, letter)
-        edges = lex.children[nodes]
-        parent, slot = np.nonzero(edges >= 0)
-        child = edges[parent, slot]
-        char = lex.letter[child]
-        previous = lex.letter[nodes]
-        extend = (
-            np.where(char == previous[parent], blank[parent], total[parent])
-            + frame[char]
-        )
-        new_nodes, index = np.unique(
-            np.concatenate((nodes, child)), return_inverse=True
-        )
-        b = np.full(len(new_nodes), -np.inf)
-        l = b.copy()
-        keep = index[: len(nodes)]
-        b[keep] = total + frame[64]
-        l[keep] = np.where(nodes != 0, letter + frame[previous], -np.inf)
-        np.logaddexp.at(l, index[len(nodes) :], extend)
-        rank = np.logaddexp(b, l)
-        chosen = (
-            np.argpartition(rank, -100)[-100:]
-            if len(rank) > 100
-            else np.arange(len(rank))
-        )
-        nodes, blank, letter = new_nodes[chosen], b[chosen], l[chosen]
-
-    ids = lex.terminal[nodes]
-    valid = (ids >= 0) & np.isfinite(np.logaddexp(blank, letter))
-    ids = ids[valid]
-    scores = np.logaddexp(blank, letter)[valid]
-    lengths = np.array([len(lex.words[i]) for i in ids])
-    shape = scores / lengths**0.30
-
-    def top(score):
-        return [lex.words[ids[i]] for i in np.argsort(-score)[:3]]
-
-    return top(shape), top(shape + 0.35 * lex.prior(ids, before))
-
-
 def features(points):
     x, y, t = np.array(points).T
     t = t - t[0]
@@ -125,68 +91,6 @@ def features(points):
     index = np.arange(len(x))
     grid = np.linspace(0, len(x) - 1, 64)
     return torch.tensor(
-        np.stack([np.interp(grid, index, x), np.interp(grid, index, y)])[None],
+        np.stack([np.interp(grid, index, x), np.interp(grid, index, y)]).clip(-0.1, 1.1)[None],
         dtype=torch.float32,
     )
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    for name in ("model", "lexicon", "input", "out"):
-        parser.add_argument("--" + name, required=True)
-    parser.add_argument("--layout")
-    parser.add_argument("--synthetic", action="store_true")
-    args = parser.parse_args()
-    torch.set_num_threads(1)
-    encoder = Runtime.get().load_program(args.model).load_method("forward")
-    lex = Lexicon(args.lexicon)
-    if not args.synthetic:
-        layout = {
-            k["letter"]: (k["cx"], k["cy"])
-            for k in json.loads(Path(args.layout).read_text())["keys"]
-        }
-    with open(args.input) as source, open(args.out, "w") as out:
-        for i, line in enumerate(source):
-            r = json.loads(line)
-            if args.synthetic:
-                layout, points, before = r["centers"], r["points"], r["before"]
-            else:
-                points = [(p["x"], p["y"], p["t"]) for p in r["data"]]
-                before = " ".join(r["sentence"].split()[: r["word_idx"]])
-            keys = torch.zeros(1, 64, 2)
-            mask = torch.zeros(1, 64, dtype=torch.bool)
-            for c, xy in layout.items():
-                keys[0, ALPHABET.index(c)] = torch.tensor(xy)
-                mask[0, ALPHABET.index(c)] = True
-            # Sentence labels include punctuation entered separately from the swipe.
-            word = re.sub(r"^[^\w]+|[^\w]+$", "", r["word"].lower().replace("’", "'"))
-            start = time.perf_counter()
-            if points:
-                trace = features(points)
-                emissions = encoder.execute((trace, keys, mask))[0][0].numpy()
-                mid = time.perf_counter()
-                raw, blend = decode(lex, emissions, before)
-            else:
-                mid = start
-                raw, blend = [], []
-            end = time.perf_counter()
-            print(
-                json.dumps(
-                    {
-                        "id": r.get("id", i),
-                        "word": word,
-                        "iv": word in lex.ids,
-                        "raw": raw,
-                        "blend": blend,
-                        "baseline": r.get("baseline"),
-                        "level": r.get("level"),
-                        "encoder_ms": 1000 * (mid - start),
-                        "beam_ms": 1000 * (end - mid),
-                    }
-                ),
-                file=out,
-            )
-
-
-if __name__ == "__main__":
-    main()

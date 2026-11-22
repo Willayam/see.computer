@@ -55,6 +55,11 @@ enum TypingVocabularyChecks {
             field.documentContextAfterInput = after
         }
 
+        reset("")
+        let neuralChoice = SwipeChoice(word: "it's", score: 3)
+        typist.insertSwipe(SwipePrediction(words: [neuralChoice], previous: nil), uppercase: true, locked: false, in: field)
+        assert(typist.precedingChoices(in: field).first.map { $0.geometricScore == nil } == true)
+
         reset("Go ahead ")
         swipe(["with"])
         type("t")
@@ -150,12 +155,25 @@ enum TypingVocabularyChecks {
         assert(output == "M \n", "Touches around space and return follow their cells")
     }
 
-    @MainActor private static func swipeWords(_ vocabulary: TypingVocabulary) {
+    @MainActor private static func swipeWords(_ vocabulary: TypingVocabulary, store: UserDefaults) {
         let layout = KeyLayout.standard(swedish: true)
+        let english = Lexicon(language: "en")!
+        let frames = "its".flatMap { letter in
+            var frame = [Float](repeating: -.infinity, count: 65)
+            frame[Lexicon.codes[letter]!] = 0
+            return frame
+        }
+        let matches = NeuralSwipe.beam(frames, lex: english).filter { ["its", "it's"].contains($0.word) }
+        assert(matches.count == 2 && matches.allSatisfy { $0.mass == 0 })
         let clean = "improvements".enumerated().map { index, letter in
             SwipeSample(point: layout.centers[Lexicon.codes[letter]!]!, time: Double(index) * 0.08)
         }
-        assert(vocabulary.swipe(clean, layout: layout, before: "with ").words.first?.word == "improvements")
+        let enabled = vocabulary.swipe(clean, layout: layout, before: "with ").words
+        assert(enabled.first?.word == "improvements" && enabled.first?.geometricScore == nil)
+        store.set(false, forKey: TypingLanguages.neuralSwipeKey)
+        let disabled = vocabulary.swipe(clean, layout: layout, before: "with ").words
+        assert(disabled.first?.word == "improvements" && disabled.allSatisfy { $0.geometricScore != nil })
+        store.removeObject(forKey: TypingLanguages.neuralSwipeKey)
 
         // The turns from the logged attempt to swipe "improvements".
         let points: [(Double, Double, Double)] = [
@@ -302,7 +320,7 @@ enum TypingVocabularyChecks {
         contractions(vocabulary)
         await touchProfiles(vocabulary, reload: loadedVocabulary)
         gapHits()
-        swipeWords(vocabulary)
+        swipeWords(vocabulary, store: store)
         // A user can pick the literal spelling, undo it, or keep typing after it.
         func learnLiteral(_ word: String, after prefix: String, picked: Bool = false, chosen: String? = nil) {
             field.documentContextBeforeInput = prefix + word

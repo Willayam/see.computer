@@ -10,6 +10,10 @@ device="${1:?Pass a booted simulator UDID}"
 shift
 out=""
 pass=""
+typing_log=""
+replay=""
+spaces=""
+language=english
 mode=tap
 native_only=""
 input=""
@@ -22,6 +26,10 @@ while [ $# -gt 0 ]; do
         --layout) layout="$2"; shift 2 ;;
         --export-sv) export_sv="$2"; shift 2 ;;
         --mode) mode="$2"; pass="$pass --mode $2"; if [ "$2" = swipe ]; then metric=noisy_swipe_wer; fi; shift 2 ;;
+        --replay) replay="$2"; shift 2 ;;
+        --typing-log) typing_log="$2"; shift 2 ;;
+        --observed-spaces) spaces=--observed-spaces; shift ;;
+        --languages) language="$2"; pass="$pass --languages $2"; shift 2 ;;
         --out) out="$2"; shift 2 ;;
         *) pass="$pass $1"; shift ;;
     esac
@@ -35,10 +43,22 @@ cp "$root"/Keyboard/words-*.bin "$scratch/"
     "$root/Keyboard/Lexicon.swift" "$root/Keyboard/TapDecoder.swift" "$root/Keyboard/SwipeDecoder.swift" "$root/Shared/Bridge.swift" "$root/Shared/TypingLanguages.swift" \
     "$root"/Keyboard/TypingVocabulary.swift "$root/Keyboard/Typist.swift" \
     "$root/Keyboard/TypingKeys.swift" "$root/Keyboard/KeyboardControls.swift" \
-    "$root/tests/TypingSim.swift" -o "$scratch/sim"
-if [ "$mode" = real-swipe ] || [ "$mode" = neural-swipe ]; then
+    "$root/tests/TypingSim.swift" "$root/tests/TypingLogReplay.swift" -o "$scratch/sim"
+if [ "$mode" = real-swipe ] || [ "$mode" = neural-swipe ] || [ "$mode" = swipe-geometry ]; then
     xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --mode "$mode" --languages english $native_only \
         --input "${input:?Pass --input sample.jsonl}" --layout "${layout:?Pass --layout qwerty.json}" --out "${out:?Pass --out results.tsv}"
+    exit
+fi
+if [ -n "$typing_log" ]; then
+    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --typing-log "$typing_log"
+    exit
+fi
+if [ -n "$layout" ]; then
+    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --languages "$language" --layout "$layout"
+    exit
+fi
+if [ -n "$replay" ]; then
+    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --languages "$language" --replay "$replay" --out "${out:?Pass --out with --replay}" $spaces
     exit
 fi
 for level in clean steady hurried; do

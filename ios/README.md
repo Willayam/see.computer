@@ -95,13 +95,30 @@ WER counts substitutions, insertions and omissions in the resulting field, inclu
 
 The keyboard loads the FUTO Swipe FP32 encoder on the first English or bilingual
 swipe. On the Swedish layout, English candidates combine native and QWERTY
-encoder passes. Swedish candidates use the native pass. Swedish-only typing
-uses the geometric decoder. Setting the Boolean
-`disableNeuralSwipe` in the keyboard's app group defaults restores geometric
-decoding for all languages.
+encoder passes. The geometric decoder supplies Swedish words and their order.
+The native Swedish beam provides evidence when the decoders disagree about the language. Turning off
+**New swipe model** in the app's Keyboard section switches English back to geometry.
 
 After swiping in a device build with Full Access, run
-`ios/scripts/swipe-budget.sh` on the connected Mac. It prints cold load time,
-gesture latency percentiles and the highest keyboard process footprint recorded.
+`ios/scripts/swipe-budget.sh` on the connected Mac. It reports cold load time,
+latency and peak keyboard footprint from the first and every twentieth subsequent neural gesture.
 For English encoder parity on a booted simulator, run
 `ios/scripts/typing-sim.sh <UDID> --mode neural-swipe --input sample.jsonl --layout layout.json --out results.tsv`. Add `--native-only` to measure the cost of the second pass.
+
+To reproduce bilingual ranking, use the same real English JSONL and keyboard layouts
+for both encoder passes. Run from the repository root with NumPy, Numba, PyTorch
+and the ExecuTorch 1.6.0 Python runtime. The native pass can also export the
+Swedish-layout proxy for Swift. Keep these gesture files and outputs outside git.
+
+```sh
+python ios/scripts/swipe-blend-bench.py --model "$MODEL" --layout "$QWERTY" --swedish-layout "$SWEDISH" --input "$INPUT" --geometry native --out "$DIR/native.gz" --replay-input "$DIR/proxy.jsonl" --replay-layout "$DIR/layout.json"
+python ios/scripts/swipe-blend-bench.py --model "$MODEL" --layout "$QWERTY" --swedish-layout "$SWEDISH" --input "$INPUT" --geometry canonical --english-beam-only --out "$DIR/canonical.gz"
+python ios/scripts/merge-swipe-layouts.py --native "$DIR/native.gz" --canonical "$DIR/canonical.gz" --out "$DIR/both.gz"
+ios/scripts/typing-sim.sh "$UDID" --mode swipe-geometry --layout "$DIR/layout.json" --input "$DIR/proxy.jsonl" --out "$DIR/geometry.jsonl"
+python ios/scripts/score-deployed-swipe.py --neural "$DIR/both.gz" --geometry "$DIR/geometry.jsonl" --input "$INPUT" --out "$DIR/reference.tsv"
+ios/scripts/typing-sim.sh "$UDID" --mode neural-swipe --layout "$DIR/layout.json" --input "$DIR/proxy.jsonl" --out "$DIR/swift.tsv"
+```
+
+Compare the first three TSV columns (gesture ID, label and first choice).
+The reference runs the encoder, CTC beam and final ranking in Python. Both paths
+use Swift's geometric candidates.
