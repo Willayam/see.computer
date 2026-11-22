@@ -1,17 +1,66 @@
+import CoreText
 import UIKit
 
 private enum Ink {
     static let key = UIColor {
-        $0.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.165) : .white
+        $0.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.161) : .white
     }
     static let keyDown = UIColor {
-        $0.userInterfaceStyle == .dark ? UIColor(white: 0.24, alpha: 1) : UIColor(red: 0.7, green: 0.72, blue: 0.76, alpha: 1)
+        $0.userInterfaceStyle == .dark ? UIColor(white: 130 / 255.0, alpha: 1) : UIColor(red: 197 / 255.0, green: 197 / 255.0, blue: 201 / 255.0, alpha: 1)
     }
-    static let mark = UIColor { $0.userInterfaceStyle == .dark ? .white : UIColor(white: 0.11, alpha: 1) }
+    /// A letter under the finger fades while its preview shows above it.
+    static let keyFaded = UIColor {
+        $0.userInterfaceStyle == .dark ? UIColor(white: 105 / 255.0, alpha: 1) : UIColor(white: 228 / 255.0, alpha: 1)
+    }
+    static let tile = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 78 / 255.0, alpha: 1) : .white }
+    static let mark = UIColor { $0.userInterfaceStyle == .dark ? .white : .black }
+    static let action = UIColor(red: 0, green: 122 / 255.0, blue: 1, alpha: 1)
+    static let actionOff = UIColor {
+        $0.userInterfaceStyle == .dark ? UIColor(white: 121 / 255.0, alpha: 1) : UIColor(red: 192 / 255.0, green: 193 / 255.0, blue: 197 / 255.0, alpha: 1)
+    }
+    static let actionMarkOff = UIColor {
+        $0.userInterfaceStyle == .dark ? UIColor(white: 134 / 255.0, alpha: 1) : UIColor(red: 172 / 255.0, green: 173 / 255.0, blue: 177 / 255.0, alpha: 1)
+    }
+    static let markOff = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.25) : UIColor(white: 229 / 255.0, alpha: 1) }
     static let markDim = mark.withAlphaComponent(0.6)
 }
 
-private func keyFace(radius: CGFloat, in control: UIControl, usesGlass: Bool = false, inset: CGSize = .zero) -> UIView {
+/// Apple's keys are labelled in SF Compact, which UIFont does not offer. The face ships beside
+/// the system font, so it is loaded from that folder, with SF Pro if it is ever missing.
+/// Apple sets lower case larger and lighter than capitals. The sizes and weights were
+/// measured from its keyboard in the simulator.
+enum KeyFont {
+    private static let compact: CTFontDescriptor? = {
+        let system = CTFontCreateUIFontForLanguage(.system, 17, nil)
+        guard let systemURL = system.flatMap({ CTFontCopyAttribute($0, kCTFontURLAttribute) as? URL }) else { return nil }
+        let url = systemURL.deletingLastPathComponent().appendingPathComponent("SFCompact.ttf")
+        return (CTFontManagerCreateFontDescriptorsFromURL(url as CFURL) as? [CTFontDescriptor])?.first
+    }()
+
+    private static func compact(_ size: CGFloat, weight: Int) -> UIFont {
+        guard let compact else { return .systemFont(ofSize: size) }
+        let wght = 0x7767_6874
+        let face = CTFontDescriptorCreateCopyWithAttributes(compact, [kCTFontVariationAttribute: [wght: weight]] as CFDictionary)
+        return CTFontCreateWithFontDescriptor(face, size, nil) as UIFont
+    }
+
+    private static let capital = compact(23, weight: 450)
+    private static let lower = compact(25.5, weight: 400)
+
+    static func key(_ title: String) -> UIFont { title.contains(where: \.isLowercase) ? lower : capital }
+
+    /// How far above the middle of the cap Apple centres a label.
+    static func lift(_ title: String) -> CGFloat { title.contains(where: \.isLowercase) ? 2.5 : 1.6 }
+
+    private static let previewCapital = compact(34.5, weight: 450)
+    private static let previewLower = compact(38, weight: 400)
+
+    /// The preview is about one and a half times the key's label.
+    static func preview(_ title: String) -> UIFont { title.contains(where: \.isLowercase) ? previewLower : previewCapital }
+}
+
+private func keyFace(radius: CGFloat, in control: UIControl, usesGlass: Bool = false, inset: CGSize = .zero,
+                     height: CGFloat? = nil) -> UIView {
     let face: UIView
     if #available(iOS 26, *), usesGlass {
         let glass = UIGlassEffect(style: .regular)
@@ -32,8 +81,16 @@ private func keyFace(radius: CGFloat, in control: UIControl, usesGlass: Bool = f
         face.leadingAnchor.constraint(equalTo: control.leadingAnchor, constant: inset.width),
         face.trailingAnchor.constraint(equalTo: control.trailingAnchor, constant: -inset.width),
         face.topAnchor.constraint(equalTo: control.topAnchor, constant: inset.height),
-        face.bottomAnchor.constraint(equalTo: control.bottomAnchor, constant: -inset.height)
     ])
+    if let height {
+        let fixed = face.heightAnchor.constraint(equalToConstant: height)
+        // Below the keyboard's own height, so a short bottom row trims its caps instead of growing the keyboard.
+        fixed.priority = .init(740)
+        fixed.isActive = true
+        face.bottomAnchor.constraint(lessThanOrEqualTo: control.bottomAnchor).isActive = true
+    } else {
+        face.bottomAnchor.constraint(equalTo: control.bottomAnchor, constant: -inset.height).isActive = true
+    }
     return face
 }
 
@@ -95,6 +152,8 @@ final class StartBar: UIControl {
 
 final class Key: UIControl {
     static let touchSurfaceColor = UIColor(white: 0.5, alpha: 0.02)
+    static let capHeight: CGFloat = 43
+    static let capInset: CGFloat = 5.5
     var releasePoint: CGPoint?
 
     private var stroke = [SwipeSample]()
@@ -204,13 +263,23 @@ final class Key: UIControl {
 
     func faceFrame(in view: UIView) -> CGRect { face.convert(face.bounds, to: view) }
 
-    init(title: String? = nil, symbol: String? = nil, label: String? = nil, output: String? = nil) {
+    private let isCharacter: Bool
+    private var labelCenter: NSLayoutConstraint?
+    private var symbol: String?
+    private let pressedSymbol: String?
+
+    init(title: String? = nil, symbol: String? = nil, pressedSymbol: String? = nil, label: String? = nil, output: String? = nil,
+         character: Bool = false) {
         self.output = output ?? title ?? ""
+        isCharacter = character
+        self.symbol = symbol
+        self.pressedSymbol = pressedSymbol
         super.init(frame: .zero)
         // The host hit-tests a remote keyboard surface. Give the touch cell a
         // continuous surface even where the inset keycap leaves a gutter.
         backgroundColor = Self.touchSurfaceColor
-        face = keyFace(radius: 8, in: self, inset: CGSize(width: 3, height: 5.5))
+        // Each cap is centred in its 54 pt touch cell, so the decoder's key centres stay on the visible keys.
+        face = keyFace(radius: 8, in: self, inset: CGSize(width: 3, height: Self.capInset), height: Self.capHeight)
         let content: UIView?
         if let symbol {
             let image = UIImageView(image: UIImage(systemName: symbol))
@@ -222,7 +291,7 @@ final class Key: UIControl {
             let text = UILabel()
             text.text = title
             text.textColor = Ink.mark
-            text.font = .systemFont(ofSize: title.count > 1 ? 18 : 22)
+            text.font = character ? KeyFont.key(title) : .systemFont(ofSize: 18)
             titleLabel = text
             content = text
         } else {
@@ -232,28 +301,42 @@ final class Key: UIControl {
             content.translatesAutoresizingMaskIntoConstraints = false
             content.isUserInteractionEnabled = false
             addSubview(content)
-            content.centerXAnchor.constraint(equalTo: centerXAnchor).isActive = true
-            content.centerYAnchor.constraint(equalTo: centerYAnchor).isActive = true
+            content.centerXAnchor.constraint(equalTo: face.centerXAnchor).isActive = true
+            // Centred on a full-height cap, so a trimmed bottom row keeps Apple's label positions.
+            let center = content.centerYAnchor.constraint(equalTo: face.topAnchor, constant: Self.capHeight / 2)
+            center.isActive = true
+            labelCenter = center
+            if character, let title { center.constant -= KeyFont.lift(title) }
         }
         isAccessibilityElement = true
         accessibilityTraits = .keyboardKey
         accessibilityLabel = label ?? title
     }
 
+    func setTitleSize(_ size: CGFloat) {
+        titleLabel?.font = .systemFont(ofSize: size)
+    }
+
     func setTitle(_ title: String) {
         titleLabel?.text = title
+        if isCharacter {
+            titleLabel?.font = KeyFont.key(title)
+            labelCenter?.constant = Self.capHeight / 2 - KeyFont.lift(title)
+        }
         accessibilityLabel = title
     }
 
     private var restingColor = Ink.key
 
-    func setActionColor(_ accent: Bool) {
-        restingColor = accent ? .systemBlue : Ink.key
+    /// Apple greys return when the field asks for text before it can be sent.
+    func setActionColor(_ accent: Bool, enabled: Bool = true) {
+        restingColor = accent ? (enabled ? Ink.action : Ink.actionOff) : Ink.key
         face.backgroundColor = restingColor
-        symbolView?.tintColor = accent ? .white : Ink.mark
+        symbolView?.tintColor = accent ? (enabled ? .white : Ink.actionMarkOff) : (enabled ? Ink.mark : Ink.markOff)
     }
 
     func setSymbol(_ symbol: String) {
+        self.symbol = symbol
         symbolView?.image = UIImage(systemName: symbol)
     }
 
@@ -271,11 +354,13 @@ final class Key: UIControl {
     override var isHighlighted: Bool {
         didSet {
             guard oldValue != isHighlighted else { return }
-            face.backgroundColor = isHighlighted ? Ink.keyDown : restingColor
-            guard output.count == 1, let character = titleLabel?.text, character.count == 1,
-                let keyboard = typingKeys else { return }
+            face.backgroundColor = isHighlighted ? (isCharacter ? Ink.keyFaded : Ink.keyDown) : restingColor
+            if let pressedSymbol, let symbol {
+                symbolView?.image = UIImage(systemName: isHighlighted ? pressedSymbol : symbol)
+            }
+            guard isCharacter, let character = titleLabel?.text, let keyboard = typingKeys else { return }
             if isHighlighted {
-                keyboard.preview.show(character, for: self, in: keyboard)
+                keyboard.preview.show(character, for: self, cap: face.frame, in: keyboard)
             } else {
                 keyboard.preview.hide(for: self)
             }
@@ -462,7 +547,7 @@ final class SwipeTrail: NSObject {
     }
 }
 
-/// Reuse one material and label for all letters. Overlapping thumb presses
+/// Reuse one tile and label for all letters. Overlapping thumb presses
 /// release independently, so only the key that owns the preview can hide it.
 final class KeyPreview: UIControl {
     private let label = UILabel()
@@ -472,23 +557,27 @@ final class KeyPreview: UIControl {
         super.init(frame: frame)
         isUserInteractionEnabled = false
         accessibilityElementsHidden = true
-        _ = keyFace(radius: 12, in: self, usesGlass: true)
+        keyFace(radius: 12, in: self).backgroundColor = Ink.tile
         label.textAlignment = .center
         label.textColor = Ink.mark
-        label.font = .systemFont(ofSize: 29)
         addSubview(label)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    func show(_ character: String, for key: Key, in keyboard: TypingKeys) {
+    /// Apple's tile is a fixed amount wider than the cap, ends just above it, and stops
+    /// a third of a point inside the keyboard's sides.
+    func show(_ character: String, for key: Key, cap: CGRect, in keyboard: TypingKeys) {
         owner = key
-        let rect = key.convert(key.bounds, to: keyboard)
-        let width = max(46, rect.width + 4)
-        let x = min(max(0, rect.midX - width / 2), keyboard.bounds.width - width)
-        frame = CGRect(x: x, y: rect.minY - 40, width: width, height: 46)
-        label.frame = bounds
+        let rect = key.convert(cap, to: keyboard)
+        let width = rect.width + 70.0 / 3, height = 199.0 / 3
+        let sides = (keyboard.superview ?? keyboard).bounds.insetBy(dx: 1.0 / 3, dy: 0)
+        let low = keyboard.convert(sides, from: keyboard.superview ?? keyboard)
+        let x = min(max(low.minX, rect.midX - width / 2), low.maxX - width)
+        frame = CGRect(x: x, y: rect.minY - 7.0 / 3 - height, width: width, height: height)
+        label.frame = bounds.offsetBy(dx: 0, dy: 10.0 / 3)
         label.text = character
+        label.font = KeyFont.preview(character)
         keyboard.addSubview(self)
     }
 

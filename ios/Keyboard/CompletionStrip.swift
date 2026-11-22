@@ -12,6 +12,17 @@ final class CompletionStrip: UIStackView {
     private var canCorrect = false
     private var pending: DispatchWorkItem?
     private let choices = (0..<3).map { _ in UIButton(type: .custom) }
+    /// Apple marks the word that space will accept with a pale capsule rather than a bolder face.
+    private let capsules = (0..<3).map { _ in UIView() }
+    private static let text = UIColor {
+        $0.userInterfaceStyle == .dark ? UIColor(white: 162 / 255.0, alpha: 1) : UIColor(red: 74 / 255.0, green: 74 / 255.0, blue: 76 / 255.0, alpha: 1)
+    }
+    private static let capsule = UIColor {
+        $0.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.1) : UIColor(red: 235 / 255.0, green: 237 / 255.0, blue: 240 / 255.0, alpha: 1)
+    }
+    /// The words sit this far below the middle of Apple's strip. The strip is moved down by
+    /// it, and the capsules and dividers are moved back up.
+    static let textDrop: CGFloat = 3
     var accept: ((WordInput, String) -> Void)?
     var shownTitles: [String] { choices.compactMap { $0.title(for: .normal) } }
 
@@ -19,9 +30,23 @@ final class CompletionStrip: UIStackView {
         super.init(frame: frame)
         distribution = .fillEqually
         for (index, button) in choices.enumerated() {
-            button.setTitleColor(.label, for: .normal)
-            button.setTitleColor(UIColor.label.withAlphaComponent(0.5), for: .highlighted)
-            button.titleLabel?.font = .systemFont(ofSize: 16)
+            button.setTitleColor(Self.text, for: .normal)
+            button.setTitleColor(Self.text.withAlphaComponent(0.5), for: .highlighted)
+            button.titleLabel?.font = .systemFont(ofSize: 17)
+            let capsule = capsules[index]
+            capsule.backgroundColor = Self.capsule
+            capsule.layer.cornerRadius = 22
+            capsule.layer.cornerCurve = .continuous
+            capsule.isUserInteractionEnabled = false
+            capsule.isHidden = true
+            capsule.translatesAutoresizingMaskIntoConstraints = false
+            button.insertSubview(capsule, at: 0)
+            NSLayoutConstraint.activate([
+                capsule.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 2),
+                capsule.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -2),
+                capsule.topAnchor.constraint(equalTo: button.topAnchor, constant: -Self.textDrop),
+                capsule.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: -Self.textDrop),
+            ])
             button.titleLabel?.lineBreakMode = .byTruncatingTail
             button.addTarget(self, action: #selector(chosen(_:)), for: .touchUpInside)
             addArrangedSubview(button)
@@ -32,7 +57,7 @@ final class CompletionStrip: UIStackView {
                 button.addSubview(divider)
                 NSLayoutConstraint.activate([
                     divider.leadingAnchor.constraint(equalTo: button.leadingAnchor),
-                    divider.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+                    divider.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: -Self.textDrop),
                     divider.heightAnchor.constraint(equalToConstant: 24),
                     divider.widthAnchor.constraint(equalToConstant: 0.5)
                 ])
@@ -105,7 +130,7 @@ final class CompletionStrip: UIStackView {
             button.setTitle(title, for: .normal)
             button.accessibilityLabel = value
             let proposed = canCorrect && value != nil && value == result.automatic
-            button.titleLabel?.font = .systemFont(ofSize: 16, weight: proposed ? .semibold : .regular)
+            capsules[index].isHidden = !proposed
             button.isEnabled = value != nil
             button.isAccessibilityElement = value != nil
         }

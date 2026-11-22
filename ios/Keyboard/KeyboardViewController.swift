@@ -698,7 +698,7 @@ final class KeyboardViewController: UIInputViewController {
         status.text = talking ? (preview ? liveWords : String(format: "%d:%02d", elapsed / 60, elapsed % 60)) : message
         status.font = preview || !talking ? .systemFont(ofSize: 15) : .monospacedDigitSystemFont(ofSize: 15, weight: .medium)
         statusRow.isHidden = !talking && message == nil
-        completions.isHidden = !statusRow.isHidden || textDocumentProxy.autocorrectionType == .no
+        completions.isHidden = !statusRow.isHidden
         meter.isHidden = phase != .recording || preview
         if meter.isHidden { meter.stop() } else { meter.start() }
         cancel.isHidden = phase != .recording
@@ -709,7 +709,10 @@ final class KeyboardViewController: UIInputViewController {
 
     private func layout() {
         guard let root = view else { return }
-        let height = root.heightAnchor.constraint(equalToConstant: 254)
+        // iOS pins a custom keyboard's bottom above its own globe row and always draws 17 pt of
+        // keyboard above the view. 757 px starts the view at the top of Apple's suggestion strip on
+        // an iPhone 17 Pro. The extra inset is the touch margin under the bottom row's caps.
+        let height = root.heightAnchor.constraint(equalToConstant: 757.0 / 3 + Key.capInset)
         height.priority = .defaultHigh
         height.isActive = true
         root.clipsToBounds = true
@@ -772,22 +775,22 @@ final class KeyboardViewController: UIInputViewController {
             root.addSubview(child)
         }
         NSLayoutConstraint.activate([
-            controls.topAnchor.constraint(equalTo: root.topAnchor, constant: 5),
+            // The rows take their full height from the bottom, and the strip and Dictate bar get the rest.
+            controls.topAnchor.constraint(equalTo: root.topAnchor),
             controls.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            controls.heightAnchor.constraint(equalToConstant: 44),
 
             bar.widthAnchor.constraint(equalToConstant: 108),
-            completions.topAnchor.constraint(equalTo: controls.topAnchor),
-            completions.bottomAnchor.constraint(equalTo: controls.bottomAnchor),
+            completions.topAnchor.constraint(equalTo: controls.topAnchor, constant: CompletionStrip.textDrop),
+            completions.bottomAnchor.constraint(equalTo: controls.bottomAnchor, constant: CompletionStrip.textDrop),
             completions.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 7),
             completions.trailingAnchor.constraint(equalTo: controls.leadingAnchor, constant: -6),
             statusRow.centerYAnchor.constraint(equalTo: controls.centerYAnchor),
             statusRow.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
             statusRow.trailingAnchor.constraint(lessThanOrEqualTo: controls.leadingAnchor, constant: -6),
-            keys.topAnchor.constraint(equalTo: controls.bottomAnchor),
-            keys.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 4),
-            keys.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -4),
-            keys.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: 5)
+            keys.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 11.0 / 6),
+            keys.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 11.0 / 3),
+            keys.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -11.0 / 3),
+            keys.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
     }
 }

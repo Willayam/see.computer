@@ -587,7 +587,7 @@ enum TypingSim {
         let mode = option("--languages") ?? "bilingual"
         let languages: TypingLanguages = mode == "english" ? .english : .bilingual
         let files = mode == "english" ? ["en"] : ["en", "sv"]
-        let size = CGSize(width: 394, height: 210)
+        let size = CGSize(width: 1184.0 / 3, height: 216)
         if let path = option("--replay"), let out = option("--out") {
             try await replay(path, out: out, languages: languages, size: size, observedSpaces: arguments.contains("--observed-spaces"))
             return

@@ -30,7 +30,7 @@ Tap **Dictate** above the letters, talk, then tap **Done** in the same spot. Or 
 
 **Typing languages** in the see.computer app follows the iPhone’s preferred languages by default. Choose **English & Svenska** once to keep Å, Ä and Ö on the letter rows in every app. Shift changes case, a double tap locks capitals, and **123** opens numbers and symbols. Hold and slide the space bar to position the cursor. Double-tap a word in the host app to use its Copy and Paste menu. Double-tap space after a letter or digit to insert a period and a space. Typing a space after a number returns to the letters.
 
-The keyboard keeps where each finger landed. While you type, a tap near the edge of a key goes to the letter that more likely comes next, and a tap in the middle of a key always types that key. At a space or punctuation it reads the whole word again from the touch points, the words around it and English and Swedish word frequencies. That fixes neighbor keys, skipped, doubled and swapped letters, a space that landed on a letter, and a letter that landed on the space bar. It can also fix the word before. The bold suggestion is what space or punctuation will accept. Tap the quoted spelling to keep it, or press backspace immediately after a correction to restore what you typed. Tap a suggestion to finish a word or insert the next one. In bilingual mode the recent words help rank suggestions, and a word from either language can stay. The keyboard also uses the iPhone’s text replacements and the names iOS shares with it.
+The keyboard keeps where each finger landed. While you type, a tap near the edge of a key goes to the letter that more likely comes next, and a tap in the middle of a key always types that key. At a space or punctuation it reads the whole word again from the touch points, the words around it and English and Swedish word frequencies. That fixes neighbor keys, skipped, doubled and swapped letters, a space that landed on a letter, and a letter that landed on the space bar. It can also fix the word before. The suggestion on a pale capsule is what space or punctuation will accept. Tap the quoted spelling to keep it, or press backspace immediately after a correction to restore what you typed. Tap a suggestion to finish a word or insert the next one. In bilingual mode the recent words help rank suggestions, and a word from either language can stay. The keyboard also uses the iPhone’s text replacements and the names iOS shares with it.
 
 The keyboard scores nearby keys using English and Swedish word frequencies from the AOSP dictionaries, Leipzig news and web corpora, and Mozilla Common Voice. The bundled models run on device. Rebuild them with `python3 ios/scripts/build-typing-lexicon.py /path/to/cache`. [Data sources and licenses](THIRD_PARTY_NOTICES.md)
 
@@ -51,6 +51,8 @@ The keyboard hands over to the next keyboard in number, phone and email fields, 
 The app owns the microphone, the engine and `state.json` in the shared App Group folder. The keyboard reads that file and sends Darwin notifications (`start`, `stop`, `cancel`, `ping`, `away`, `sent`). It holds no audio. It checks the field identifier and fingerprints of the surrounding text before changing the host field. It writes the words so far with `setMarkedText`, the call keyboards for Japanese use for text they have not committed. It decides whether the app is alive by whether a `ping` gets a `pong`, because a killed app cannot correct the file it left behind. The `Island` widget extension draws the Live Activity, and only the app starts and updates it.
 
 `core/` is a small Rust crate that compiles the Mac's own source files by path: `engine/`, `boost.rs`, `vocabulary.rs`, `filler.rs`, `numbers.rs`, `text.rs`, `align.rs` and `qos.rs`. `core/src/seams.rs` stands in for the few Mac modules they reach into. A change to any of those files reaches both apps. CI builds this crate so a Mac change cannot break it unnoticed.
+
+The keys copy Apple's keyboard as measured in the simulator, down to SF Compact for the key labels. UIKit does not offer that face, so the keyboard loads it with Core Text from the folder that holds the system font, and falls back to SF Pro if the file is not there. iOS draws 17 pt of keyboard above any custom keyboard and ends it above its own globe row, so this keyboard stands 16 pt taller than Apple's. Every key keeps Apple's size and gaps, and the four rows sit 4 pt higher than Apple's so the bottom row is not cut short.
 
 The engine is Parakeet TDT 0.6b v3 (INT8, ONNX) on the CPU, as on the Mac. The Neural Engine would use less power, but [Sayboard](https://github.com/stanlsv/sayboard), an open source voice keyboard, treats it as blocked for background apps from iOS 27 and falls back to the CPU. The mapped weights stay out of the app's memory footprint, so it sits near 135 MB while loaded.
 
@@ -122,3 +124,18 @@ ios/scripts/typing-sim.sh "$UDID" --mode neural-swipe --layout "$DIR/layout.json
 Compare the first three TSV columns (gesture ID, label and first choice).
 The reference runs the encoder, CTC beam and final ranking in Python. Both paths
 use Swift's geometric candidates.
+
+## Compare it with Apple's keyboard
+
+`scripts/keyboard-parity.sh` puts Apple's keyboard and this one in the same state in a booted simulator, screenshots both, and compares them. Use a simulator made for it, because its host app takes the bundle ID `computer.see.ios`.
+
+```sh
+export AGENT_DEVICE=<the agent-device command bound to the simulator>
+scripts/keyboard-parity.sh setup <simulator id>
+scripts/keyboard-parity.sh run <simulator id> parity-out          # every state
+scripts/keyboard-parity.sh run <simulator id> parity-out 'sv-hold-*'
+```
+
+`setup` builds the keyboard into a small host app with one text field, enables Apple's English and Swedish keyboards and this one, and grants Full Access. The first time, open the host, tap the field, hold the globe key and pick see.computer once. `run` drives 55 states: letters, shift and caps lock, the number and symbol pages, held keys with their previews, every return key enabled and greyed, the suggestion strip, URL and web search fields, and dark mode. Taps land where Apple's keys are, read from the host's accessibility tree, and the same points are replayed on this keyboard. For each state it writes `<state>-side.png` with Apple, this keyboard and the differing pixels in red, and `<state>-caps.tsv` with every key cap's frame, corner radius, colour and label offset on both. `summary.tsv` holds one row per state with the share of pixels that differ by more than 12 of 255 in any channel, the same share for the strip and the keys alone, and the largest key-frame gap.
+
+iOS draws 17 pt of its own keyboard above a custom keyboard, cuts it off a few points above the bottom of Apple's last row, and delivers no touches below that line. This keyboard gives every row Apple's full cap height, keeps 5.5 pt of touch margin under the bottom caps, and sits about 9.5 pt higher than Apple's instead. So the summary also reports that uniform vertical offset (`offset_y`, the median over all caps) and, with it taken out, how far cap sizes and gaps differ (`shape_gap_pt`, and `row_shape_gaps` with the largest per row, top to bottom). The space bar is wider than Apple's because there is no emoji key, which shows in the bottom row's number.

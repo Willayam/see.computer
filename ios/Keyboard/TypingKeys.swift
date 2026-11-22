@@ -16,6 +16,9 @@ final class TypingKeys: UIStackView {
     private var shiftKey: Key?
     private let enter = Key(symbol: "return.left", label: "Return", output: "\n")
     private var returnType: UIReturnKeyType?
+    private var returnEnabled = true
+    private enum Field { case text, url, search }
+    private var field = Field.text
     private(set) var uppercase = false
     private var capsLock = false
     private var lastShift = Date.distantPast
@@ -126,7 +129,7 @@ final class TypingKeys: UIStackView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         axis = .vertical
-        distribution = .fillEqually
+        distribution = .fill
         spacing = 0
         enter.addTarget(self, action: #selector(typed(_:)), for: .touchUpInside)
         rebuild()
@@ -172,20 +175,28 @@ final class TypingKeys: UIStackView {
     }
 
     func updateCase(for proxy: UITextDocumentProxy) {
-        if proxy.returnKeyType != returnType {
+        let kind: Field = proxy.keyboardType == .URL ? .url : proxy.keyboardType == .webSearch ? .search : .text
+        if kind != field {
+            field = kind
+            rebuild()
+        }
+        let enabled = proxy.enablesReturnKeyAutomatically != true || proxy.hasText
+        if proxy.returnKeyType != returnType || enabled != returnEnabled {
+            returnEnabled = enabled
             returnType = proxy.returnKeyType
             let action: (String, String)
             switch returnType {
             case .search, .google, .yahoo: action = ("magnifyingglass", "Search")
             case .send: action = ("arrow.up", "Send")
-            case .go, .next, .continue: action = ("arrow.right", "Continue")
+            case .next: action = ("chevron.right", "Next")
+            case .go, .continue: action = ("arrow.right", "Continue")
             case .done: action = ("checkmark", "Done")
             case .join: action = ("arrow.right", "Join")
             default: action = ("return.left", "Return")
             }
             enter.setSymbol(action.0)
             enter.accessibilityLabel = action.1
-            enter.setActionColor(action.1 != "Return")
+            enter.setActionColor(action.1 != "Return" && action.1 != "Next", enabled: enabled)
         }
         guard !capsLock else { return }
         let before = proxy.documentContextBeforeInput ?? ""
@@ -208,14 +219,15 @@ final class TypingKeys: UIStackView {
         arrangedSubviews.forEach { $0.removeFromSuperview() }
         characterKeys = []
         shiftKey = nil
-        let rows: [String]
+        var rows: [[String]]
         switch page {
-        case .letters: rows = [swedish ? "qwertyuiopå" : "qwertyuiop", swedish ? "asdfghjklöä" : "asdfghjkl", "zxcvbnm"]
-        case .numbers: rows = ["1234567890", "-/:;()$&@\"", ".,?!’"]
-        case .symbols: rows = ["[]{}#%^*+=", "_\\|~<>€£¥•", ".,?!'`"]
+        case .letters: rows = [swedish ? "qwertyuiopå" : "qwertyuiop", swedish ? "asdfghjklöä" : "asdfghjkl", "zxcvbnm"].map(Self.keys)
+        case .numbers: rows = ["1234567890", "-/:;()", ".,?!’"].map(Self.keys)
+            rows[1] += swedish ? ["kr", "&", "@", "”"] : ["$", "&", "@", "“"]
+        case .symbols: rows = ["[]{}#%^*+=", "_\\|~<>€$£•", ".,?!’"].map(Self.keys)
         }
-        for (index, characters) in rows.enumerated() {
-            let controls = characters.map { typingKey(String($0)) }
+        for (index, titles) in rows.enumerated() {
+            let controls = titles.map { typingKey($0) }
             let row = addRow()
             let cluster = UIStackView(arrangedSubviews: controls)
             cluster.distribution = .fillEqually
@@ -229,9 +241,10 @@ final class TypingKeys: UIStackView {
                     modifier.addTarget(self, action: #selector(shift), for: .touchUpInside)
                 } else {
                     modifier = Key(title: page == .numbers ? "#+=" : "123")
+                    modifier.setTitleSize(page == .numbers ? 12 : 15)
                     modifier.addTarget(self, action: #selector(changeSymbols), for: .touchUpInside)
                 }
-                let delete = Key(symbol: "delete.left", label: "Delete")
+                let delete = Key(symbol: "delete.left", pressedSymbol: "delete.left.fill", label: "Delete")
                 deleteKey = delete
                 delete.addTarget(self, action: #selector(deleteDown), for: .touchDown)
                 delete.addTarget(self, action: #selector(deleteUp), for: [.touchUpInside, .touchUpOutside, .touchCancel])
@@ -261,28 +274,42 @@ final class TypingKeys: UIStackView {
         space.addTarget(self, action: #selector(typed(_:)), for: .touchUpInside)
         let language = UILabel()
         language.text = swedish ? "SV" : "EN"
-        language.font = .systemFont(ofSize: 10)
-        language.textColor = .tertiaryLabel
+        language.font = .systemFont(ofSize: 13.5, weight: .regular, width: .compressed)
+        language.textColor = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 124 / 255.0, alpha: 1) : UIColor(white: 204 / 255.0, alpha: 1) }
         language.isAccessibilityElement = false
         language.translatesAutoresizingMaskIntoConstraints = false
         space.addSubview(language)
         NSLayoutConstraint.activate([
-            language.trailingAnchor.constraint(equalTo: space.trailingAnchor, constant: -8),
-            language.bottomAnchor.constraint(equalTo: space.bottomAnchor, constant: -8)
+            language.trailingAnchor.constraint(equalTo: space.trailingAnchor, constant: -9),
+            language.lastBaselineAnchor.constraint(equalTo: space.topAnchor, constant: Key.capInset + Key.capHeight - 6)
         ])
         let trackpad = UILongPressGestureRecognizer(target: self, action: #selector(trackCursor(_:)))
         trackpad.delaysTouchesEnded = false
         trackpad.minimumPressDuration = 0.35
         space.addGestureRecognizer(trackpad)
         let bottom = addRow()
-        let bottomKeys = [mode, globe, space, enter]
+        // Apple's URL keys replace the space bar, and web search adds a full stop beside it.
+        let extras = (field == .url ? [".", "/", ".com"] : field == .search ? ["."] : []).map { typingKey($0, character: $0.count == 1) }
+        let bottomKeys = [mode, globe] + (field == .url ? extras : [space] + extras) + [enter]
         bottomKeys.forEach(bottom.addArrangedSubview)
+        for key in field == .url ? extras.dropFirst() : extras[...] {
+            key.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: field == .url ? 0.1672 : 0.0997).isActive = true
+        }
         for key in [mode, globe] {
-            let width = key.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.111, constant: 5)
+            let width = key.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.125)
             width.priority = .defaultHigh
             width.isActive = true
         }
-        enter.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: 0.239, constant: 4.5).isActive = true
+        enter.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: field == .search ? 0.1757 : 0.25,
+                                     constant: field == .search ? 0 : 1.0 / 3).isActive = true
+        // Apple's rows are 54 pt apart. iOS ends a custom keyboard a few points above the bottom of
+        // Apple's last caps and delivers no touches below it, so all four rows sit higher than Apple's.
+        // That keeps every cap at Apple's size and leaves the space bar its touch margin underneath.
+        for row in arrangedSubviews {
+            let height = row.heightAnchor.constraint(equalToConstant: 54)
+            height.priority = .init(999)
+            height.isActive = true
+        }
         setUppercase(uppercase)
     }
 
@@ -457,13 +484,16 @@ final class TypingKeys: UIStackView {
         return row
     }
 
-    private func typingKey(_ title: String) -> Key {
-        let key = Key(title: title)
+    private static func keys(_ characters: String) -> [String] { characters.map(String.init) }
+
+    private func typingKey(_ title: String, character: Bool = true) -> Key {
+        let key = Key(title: title, character: character)
         key.addTarget(self, action: #selector(typed(_:)), for: .touchUpInside)
         return key
     }
 
     @objc private func typed(_ key: Key) {
+        if key === enter && !returnEnabled { return }
         lastShift = .distantPast
         let value = page == .letters && uppercase ? key.output.uppercased() : key.output
         insert?(value, key.releasePoint.map { key.convert($0, to: self) })
