@@ -61,15 +61,16 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        keys.keyPrior = { [weak self] in
+        keys.keyPrior = { [weak self] layout in
             guard let self, let input = WordInput(self.textDocumentProxy), self.typist.trail.end == Caret(self.textDocumentProxy),
-                  let prior = self.completions.vocabulary.keyPrior(for: input, trail: self.typist.trail, layout: self.keys.keyLayout)
+                  let prior = self.completions.vocabulary.keyPrior(for: input, trail: self.typist.trail, layout: layout)
             else { return nil }
-            return (prior, self.completions.vocabulary.spread)
+            return (prior, self.completions.vocabulary.spread, self.completions.vocabulary.offsets(for: layout))
         }
         typist.reviseSwipe = completions.vocabulary.reviseSwipe
         typist.reconsider = { [completions, keys] in completions.vocabulary.reconsider($0, input: $1, trail: $2, chosen: $3, layout: keys.keyLayout) }
-        typist.committed = { [completions, keys] in completions.vocabulary.learn($0, chosen: $1, layout: keys.keyLayout) }
+        typist.editedInsideWord = completions.vocabulary.observeEditInsideWord
+        typist.committed = { [completions, keys] in completions.vocabulary.learn($0, trail: $1, chosen: $2, picked: $3, layout: keys.keyLayout) }
         layout()
         requestSupplementaryLexicon { [weak self] lexicon in
             DispatchQueue.main.async { self?.completions.use(lexicon) }
@@ -655,7 +656,7 @@ final class KeyboardViewController: UIInputViewController {
         prepareForManualEdit()
         var fields: [String: Any] = ["o": output, "s": completions.shownTitles]
         if let point { fields["x"] = Double(point.x); fields["y"] = Double(point.y) }
-        logEdit("key", fields) { typist.type(output, at: point, in: textDocumentProxy) }
+        logEdit("key", fields) { typist.type(output, at: point, in: textDocumentProxy, layout: keys.keyLayout) }
         rememberEditedField()
         updateTypingContext()
     }

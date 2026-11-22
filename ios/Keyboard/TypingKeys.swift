@@ -22,7 +22,7 @@ final class TypingKeys: UIStackView {
     private var swedish = false
     private let globe = Key(symbol: "globe", label: "Next keyboard")
 
-    var keyPrior: (() -> (probabilities: [Double], spread: Double)?)?
+    var keyPrior: ((KeyLayout) -> (probabilities: [Double], spread: Double, offsets: [Double])?)?
     var allowsSwipe: () -> Bool = { true }
     var onSwipe: (([SwipeSample], Bool, Bool, String?) -> Bool)?
 
@@ -331,23 +331,29 @@ final class TypingKeys: UIStackView {
         let functions = [spaceKey, enter, shiftKey, deleteKey].compactMap { $0 }
         let nearby = functions.filter {
             let f = $0.convert($0.bounds, to: self)
-            // A function key only competes for touches on itself, so a letter's cell never deletes or sends.
+            // Space may compete across the row boundary. Other controls stay inside their cells.
+            if $0 === spaceKey && isLetter {
+                return point.x >= f.minX && point.x < f.maxX && point.y >= f.minY - rect.height * 0.2
+            }
             guard $0 === key, f.contains(point) else { return false }
             if point.y <= f.minY + 8 { return true }
             if $0 === shiftKey { return point.x >= f.maxX - 8 }
             if $0 === deleteKey { return point.x <= f.minX + 8 }
             return false
         }
-        guard isLetter || !nearby.isEmpty, let prior = keyPrior?() else { return key }
+        guard isLetter || !nearby.isEmpty else { return key }
         let layout = keyLayout
+        guard let prior = keyPrior?(layout) else { return key }
         let sigma = prior.spread * layout.pitch
         let scale = 0.5 / (sigma * sigma)
         func logPrior(_ i: Int) -> Double { log(0.95 * prior.probabilities[i] + 0.05 / 30) }
         var best = -Double.infinity
         var choice = key
+        let atSpaceEdge = nearby.contains(where: { $0 === spaceKey })
         for letter in letterKeys {
             guard let ch = letter.output.first, let i = Lexicon.codes[ch], let c = layout.centers[i] else { continue }
-            let dx = point.x - c.x, dy = point.y - c.y
+            let boundaryBias = atSpaceEdge ? prior.offsets[i] * layout.pitch : 0
+            let dx = point.x - c.x, dy = point.y - c.y - boundaryBias
             let cost = (dx * dx + dy * dy) * scale
             let score = logPrior(i) - cost
             if cost <= 10 && score > best { best = score; choice = letter }
@@ -355,7 +361,10 @@ final class TypingKeys: UIStackView {
         for fn in nearby {
             let score: Double
             if fn === spaceKey {
-                score = logPrior(30) - layout.spaceCost(point, sigma: sigma)
+                // Reaching into a letter cell requires evidence of a consistently high space tap.
+                if isLetter && prior.offsets[30] > -0.06 { continue }
+                let adjusted = CGPoint(x: point.x, y: point.y - prior.offsets[30] * layout.pitch)
+                score = logPrior(30) - layout.spaceCost(adjusted, sigma: sigma)
             } else {
                 let f = fn.convert(fn.bounds, to: self).insetBy(dx: 10, dy: 10)
                 let dx = max(0, f.minX - point.x, point.x - f.maxX)

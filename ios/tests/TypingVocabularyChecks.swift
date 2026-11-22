@@ -173,10 +173,93 @@ enum TypingVocabularyChecks {
         }, "Even the fallback only returns dictionary words")
     }
 
+    @MainActor private static func contractions(_ vocabulary: TypingVocabulary) {
+        let layout = KeyLayout.standard(swedish: true)
+        let field = Field()
+        let typist = Typist { vocabulary.suggestions(for: $0, trail: $1, layout: layout) }
+        let cases = [
+            ("", "Dont", "Don’t"), ("I ", "didnt", "didn’t"), ("It ", "doesnt", "doesn’t"),
+            ("She ", "isnt", "isn’t"), ("I ", "wasnt", "wasn’t"), ("We ", "werent", "weren’t"),
+            ("OK I ", "couldnt", "couldn’t"), ("I ", "wouldnt", "wouldn’t"), ("You ", "shouldnt", "shouldn’t"),
+            ("She ", "hasnt", "hasn’t"), ("I ", "havent", "haven’t"), ("I ", "hadnt", "hadn’t"),
+            ("Those ", "arent", "aren’t"), ("I think ", "im", "I’m"), ("", "Ive", "I’ve"),
+            ("I hope ", "youre", "you’re"), ("I think ", "theyre", "they’re"),
+            ("", "Thats", "That’s"), ("Tell me ", "whats", "what’s"),
+            ("I ", "cant", "can’t"), ("She ", "wont", "won’t"),
+            ("We could go. ", "Lets", "Let’s"), ("She ", "lets", "lets"),
+            ("The dog licked ", "its", "its"), ("Get ", "well", "well"), ("They ", "were", "were"),
+            ("", "Shell", "Shell"), ("", "Shed", "Shed"), ("", "Wed", "Wed"), ("", "Hed", "Hed"),
+            ("It was ", "hell", "hell"), ("I was ", "ill", "ill"), ("The psyche has an ", "id", "id"),
+            ("Jag är ", "hes", "hes"),
+        ]
+        for (prefix, raw, expected) in cases {
+            for drift in [0.0, 0.25] {
+                typist.forget()
+                field.documentContextBeforeInput = prefix
+                for letter in raw {
+                    let code = Lexicon.codes[Character(letter.lowercased())]!
+                    var point = layout.centers[code]!
+                    point.x += layout.pitch * drift
+                    point.y += layout.pitch * drift * 0.4
+                    typist.type(String(letter), at: point, in: field)
+                }
+                typist.type(" ", at: nil, in: field)
+                precondition(field.documentContextBeforeInput == prefix + expected + " ", "Commit \(prefix)\(raw) at drift \(drift)")
+            }
+        }
+    }
+
+    @MainActor private static func touchProfiles(_ vocabulary: TypingVocabulary, reload: () async -> TypingVocabulary) async {
+        let field = Field()
+        var portrait = KeyLayout.standard(swedish: true)
+        portrait.space = CGRect(x: 110, y: 160, width: 174, height: 40)
+        var landscape = portrait
+        landscape.reach.size.width += 200
+        landscape.space.size.width += 200
+
+        func trail(_ word: String, prefix: String = "") -> TapTrail {
+            field.documentContextBeforeInput = prefix + word
+            return TapTrail(taps: word.map { letter in
+                Tap(typed: letter, shifted: false, point: portrait.centers[Lexicon.codes[letter]!])
+            }, end: Caret(field))
+        }
+
+        let left = trail("pla")
+        let first = WordInput(field)!
+        field.documentContextBeforeInput = "pla "
+        let boundary = Caret(field)!
+        let right = trail("et", prefix: "pla ")
+        let second = WordInput(field)!
+        let n = portrait.centers[Lexicon.codes["n"]!]!
+        var edge = portrait
+        edge.space.origin.y = n.y - 1
+        let mistakenSpace = Typist.HeldWord(input: first, taps: left, space: n, layout: edge, output: "pla", end: boundary)
+        precondition(vocabulary.reconsider(mistakenSpace, input: second, trail: right, chosen: "et", layout: edge) == "planet")
+        precondition(vocabulary.offsets(for: edge)[30] == 0, "A tap reinterpreted as a letter does not train space")
+
+        for (layout, shift) in [(portrait, -9.0), (landscape, 6.0)] {
+            let point = CGPoint(x: layout.space.midX, y: layout.space.midY + shift)
+            let keptSpace = Typist.HeldWord(input: first, taps: left, space: point, layout: layout, output: "pla", end: boundary)
+            precondition(vocabulary.reconsider(keptSpace, input: second, trail: right, chosen: "et", layout: layout) == nil)
+        }
+        let up = vocabulary.offsets(for: portrait)[30]
+        let down = vocabulary.offsets(for: landscape)[30]
+        precondition(up < 0 && down > 0 && vocabulary.offsets(for: portrait)[30] == up)
+        let reloaded = await reload()
+        precondition(reloaded.offsets(for: landscape)[30] == down && reloaded.offsets(for: portrait)[30] == up)
+    }
+
     @MainActor static func main() async {
-        let vocabulary = TypingVocabulary()
-        vocabulary.configure(.bilingual, dictionaries: UITextChecker.availableLanguages)
-        await withCheckedContinuation { continuation in vocabulary.load { continuation.resume() } }
+        let suite = UUID().uuidString
+        let store = UserDefaults(suiteName: suite)!
+        defer { store.removePersistentDomain(forName: suite) }
+        func loadedVocabulary() async -> TypingVocabulary {
+            let vocabulary = TypingVocabulary(store: store)
+            vocabulary.configure(.bilingual, dictionaries: UITextChecker.availableLanguages)
+            await withCheckedContinuation { continuation in vocabulary.load { continuation.resume() } }
+            return vocabulary
+        }
+        var vocabulary = await loadedVocabulary()
         let field = Field()
         precondition(SeeDocumentIdentifier(field) == field.documentIdentifier)
         precondition(SeeDocumentIdentifier(UIInputViewController().textDocumentProxy) == nil)
@@ -216,8 +299,50 @@ enum TypingVocabularyChecks {
         precondition(suggestions("Jag ").titles.contains("har"))
         precondition(suggestions("Vi ses itne").automatic == "inte")
         await typingEdits()
+        contractions(vocabulary)
+        await touchProfiles(vocabulary, reload: loadedVocabulary)
         gapHits()
         swipeWords(vocabulary)
+        // A user can pick the literal spelling, undo it, or keep typing after it.
+        func learnLiteral(_ word: String, after prefix: String, picked: Bool = false, chosen: String? = nil) {
+            field.documentContextBeforeInput = prefix + word
+            let trail = TapTrail(taps: word.map { Tap(typed: $0, shifted: false, point: nil) }, end: Caret(field))
+            vocabulary.learn(WordInput(field)!, trail: trail, chosen: chosen ?? word, picked: picked, layout: .standard(swedish: true))
+        }
+        learnLiteral("helpp", after: "We need ", picked: true)
+        learnLiteral("more", after: "We need help ")
+        precondition(suggestions("We need helpp").automatic == "help")
+        learnLiteral("helpp", after: "We need ", picked: true)
+        learnLiteral("today", after: "We need helpp ")
+        vocabulary = await loadedVocabulary()
+        precondition(suggestions("We need helpp").automatic == nil)
+        field.documentContextBeforeInput = "Det är br"
+        field.documentContextAfterInput = "aa"
+        vocabulary.observeEditInsideWord(Caret(field)!)
+        field.documentContextAfterInput = nil
+        learnLiteral("idag", after: "Det är braa ")
+        vocabulary = await loadedVocabulary()
+        precondition(suggestions("Det är braa").automatic == nil)
+        learnLiteral("helpp", after: "We need ")
+        learnLiteral("today", after: "We need helpp ")
+        precondition(store.stringArray(forKey: "typingPickedWords") == ["braa", "helpp"])
+        precondition(suggestions("We need helpp").titles.contains("help"))
+        let typist = Typist { input, _ in vocabulary.suggestions(for: input) }
+        typist.committed = { input, trail, chosen, picked in
+            vocabulary.learn(input, trail: trail, chosen: chosen, picked: picked, layout: .standard(swedish: true))
+        }
+        field.documentContextBeforeInput = "We need helpp"
+        typist.choose(WordInput(field)!, "help", in: field)
+        precondition(field.documentContextBeforeInput == "We need help ")
+        vocabulary = await loadedVocabulary()
+        precondition(suggestions("We need helpp").automatic == "help")
+        learnLiteral("braa", after: "Det är ", chosen: "bra")
+        learnLiteral("idag", after: "Det är braa ")
+        precondition(suggestions("Det är braa").automatic == nil, "An undone correction keeps the spelling")
+        learnLiteral("braa", after: "Det är ", chosen: "bra")
+        learnLiteral("idag", after: "Det är bra ")
+        vocabulary = await loadedVocabulary()
+        precondition(suggestions("Det är braa").automatic == "bra")
         print("English and Swedish typing checks passed")
     }
 }
