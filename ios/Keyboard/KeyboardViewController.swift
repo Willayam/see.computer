@@ -711,7 +711,7 @@ final class KeyboardViewController: UIInputViewController {
         guard let root = view else { return }
         // iOS pins a custom keyboard's bottom above its own globe row and always draws 17 pt of
         // keyboard above the view. This height starts the view at the top of Apple's suggestion
-        // strip on an iPhone 17 Pro, so the strip and the rows sit where Apple's do.
+        // strip on an iPhone 17 Pro. The rows end where iOS cuts the view off, 4 pt above Apple's.
         let height = root.heightAnchor.constraint(equalToConstant: 757.0 / 3)
         height.priority = .defaultHigh
         height.isActive = true
@@ -775,9 +775,9 @@ final class KeyboardViewController: UIInputViewController {
             root.addSubview(child)
         }
         NSLayoutConstraint.activate([
+            // The rows take their full height from the bottom, and the strip and Dictate bar get the rest.
             controls.topAnchor.constraint(equalTo: root.topAnchor),
             controls.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            controls.heightAnchor.constraint(equalToConstant: 44),
 
             bar.widthAnchor.constraint(equalToConstant: 108),
             completions.topAnchor.constraint(equalTo: controls.topAnchor, constant: CompletionStrip.textDrop),

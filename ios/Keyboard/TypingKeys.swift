@@ -303,9 +303,10 @@ final class TypingKeys: UIStackView {
         enter.widthAnchor.constraint(equalTo: bottom.widthAnchor, multiplier: field == .search ? 0.1757 : 0.25,
                                      constant: field == .search ? 0 : 1.0 / 3).isActive = true
         // Apple's rows are 54 pt apart. iOS ends a custom keyboard a few points above the bottom of
-        // Apple's last row, so that row gets what is left and its caps come out shorter.
-        for row in arrangedSubviews.dropLast() {
-            let height = row.heightAnchor.constraint(equalToConstant: 54)
+        // Apple's last caps, so the last row ends at its cap and all four rows sit that much higher,
+        // which keeps every cap at Apple's size.
+        for row in arrangedSubviews {
+            let height = row.heightAnchor.constraint(equalToConstant: row === bottom ? Key.capInset + Key.capHeight : 54)
             height.priority = .init(999)
             height.isActive = true
         }
