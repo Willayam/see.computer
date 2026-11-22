@@ -216,7 +216,38 @@ for (_, i, j) in candidates.sorted(by: { $0.0 < $1.0 }) where pairOf[i] == nil &
     taken.insert(j)
 }
 
-var lines = ["key\tapple_x\tapple_y\tapple_w\tapple_h\tours_x\tours_y\tours_w\tours_h\tgap\tapple_radius\tours_radius\tapple_face\tours_face\tink_ratio\tglyph_dx\tglyph_dy\tglyph_dw\tglyph_dh"]
+// iOS places a custom keyboard's view itself, so ours can sit a uniform distance above or below
+// Apple's. Report that offset once, and measure cap sizes and gaps with it taken out.
+func isKeyCap(_ c: Cap) -> Bool { pt(c.y1 - c.y0 + 1) >= 40 }
+let shifts = pairOf.filter { isKeyCap(capsA[$0.key]) }.map { pt(capsB[$0.value].y0) - pt(capsA[$0.key].y0) }.sorted()
+let offsetY = shifts.isEmpty ? 0 : shifts[shifts.count / 2]
+func shapeGap(_ a: Cap, _ b: Cap) -> Double {
+    [pt(b.x0) - pt(a.x0), pt(b.y0) - pt(a.y0) - offsetY, pt(b.x1) - pt(a.x1), pt(b.y1) - pt(a.y1) - offsetY].map(abs).max()!
+}
+var rowGaps = [Double: Double]()
+var shapeWorst: (Double, String) = (0, "-")
+for (i, j) in pairOf where isKeyCap(capsA[i]) {
+    let gap = shapeGap(capsA[i], capsB[j])
+    rowGaps[pt(capsA[i].y0)] = max(rowGaps[pt(capsA[i].y0)] ?? 0, gap)
+    if gap > shapeWorst.0 { shapeWorst = (gap, capsA[i].label) }
+}
+
+// The key area's differing pixels once ours is moved by that offset, so a uniform shift
+// does not count as every edge and label differing.
+var alignedKeys = "-"
+if let keys = bands.first(where: { $0.0 == "keys" }) {
+    let shift = px(offsetY)
+    var differ = 0, total = 0
+    for y in keys.1..<keys.2 where y + shift >= 0 && y + shift < H {
+        for x in 0..<W {
+            total += 1
+            if distance(apple.pixel(x, y), ours.pixel(x, y + shift)) > tolerance { differ += 1 }
+        }
+    }
+    if total > 0 { alignedKeys = String(format: "%.2f%%", Double(differ) / Double(total) * 100) }
+}
+
+var lines = ["key\tapple_x\tapple_y\tapple_w\tapple_h\tours_x\tours_y\tours_w\tours_h\tgap\tapple_radius\tours_radius\tapple_face\tours_face\tink_ratio\tglyph_dx\tglyph_dy\tglyph_dw\tglyph_dh\tshape_gap"]
 var worst: (Double, String) = (0, "-")
 var unmatched: [String] = []
 func frame(_ c: Cap) -> String { "\(pt(c.x0))\t\(pt(c.y0))\t\(pt(c.x1 - c.x0 + 1))\t\(pt(c.y1 - c.y0 + 1))" }
@@ -232,7 +263,7 @@ for (i, cap) in capsA.enumerated().sorted(by: { ($0.1.cy, $0.1.cx) < ($1.1.cy, $
     lines.append(([
         cap.label, frame(cap), frame(o), String(format: "%.2f", gap), String(format: "%.1f", cap.radius), String(format: "%.1f", o.radius),
         hex(cap.face), hex(o.face), cap.ink > 0 ? String(format: "%.2f", o.ink / cap.ink) : "-",
-    ] + glyphGap(cap, o)).joined(separator: "\t"))
+    ] + glyphGap(cap, o) + [String(format: "%.2f", shapeGap(cap, o))]).joined(separator: "\t"))
 }
 for (j, o) in capsB.enumerated() where !taken.contains(j) {
     unmatched.append("ours@\(Int(pt(o.x0))),\(Int(pt(o.y0)))")
@@ -259,12 +290,15 @@ func bandShare(_ name: String) -> String {
 }
 let summary = "\(outDir)/summary.tsv"
 if !FileManager.default.fileExists(atPath: summary) {
-    try! "state\tdiff\tstrip_diff\tkeys_diff\tapple_top\tours_top\tapple_caps\tours_caps\tmax_gap_pt\tworst_key\tapple_bg\tours_bg\tunmatched\n"
+    try! "state\tdiff\tstrip_diff\tkeys_diff\tapple_top\tours_top\tapple_caps\tours_caps\tmax_gap_pt\tworst_key\toffset_y\tkeys_diff_aligned\tshape_gap_pt\tshape_worst\trow_shape_gaps\tapple_bg\tours_bg\tunmatched\n"
         .write(toFile: summary, atomically: true, encoding: .utf8)
 }
 let row = [
     state, String(format: "%.2f%%", share * 100), bandShare("strip"), bandShare("keys"), "\(pt(topA))", "\(pt(topB))",
-    "\(capsA.count)", "\(capsB.count)", String(format: "%.2f", worst.0), worst.1, hex(bgA), hex(bgB),
+    "\(capsA.count)", "\(capsB.count)", String(format: "%.2f", worst.0), worst.1,
+    String(format: "%.2f", offsetY), alignedKeys, String(format: "%.2f", shapeWorst.0), shapeWorst.1,
+    rowGaps.isEmpty ? "-" : rowGaps.keys.sorted().map { String(format: "%.2f", rowGaps[$0]!) }.joined(separator: "/"),
+    hex(bgA), hex(bgB),
     unmatched.isEmpty ? "-" : unmatched.joined(separator: ","),
 ].joined(separator: "\t")
 let handle = FileHandle(forWritingAtPath: summary)!
