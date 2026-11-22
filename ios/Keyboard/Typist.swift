@@ -31,6 +31,7 @@ struct TapTrail: Equatable {
 struct SwipeChoice {
     let word: String
     let score: Double
+    var geometricScore: Double? = nil
 }
 
 struct SwipePrediction {
@@ -40,7 +41,7 @@ struct SwipePrediction {
 
 extension SwipePrediction {
     init(_ words: [String]) {
-        self.init(words: words.map { SwipeChoice(word: $0, score: 0) }, previous: nil)
+        self.init(words: words.map { SwipeChoice(word: $0, score: 0, geometricScore: 0) }, previous: nil)
     }
 }
 
@@ -136,7 +137,7 @@ final class Typist {
             let text = proxy.smartQuotesType == .no ? word : word.replacingOccurrences(of: "'", with: "’")
             let cased = locked || proxy.autocapitalizationType == .allCharacters ? text.uppercased()
                 : capitalize ? text.prefix(1).uppercased() + text.dropFirst() : text
-            return SwipeChoice(word: cased, score: choice.score)
+            return SwipeChoice(word: cased, score: choice.score, geometricScore: choice.geometricScore)
         }
         let choices = ranked.prefix(3).map(\.word)
         guard let word = choices.first else { return }

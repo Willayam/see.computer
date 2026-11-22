@@ -61,6 +61,7 @@ jobs:
         run: |
           xcodebuild -project ios/SeeComputer.xcodeproj -target Keyboard -sdk iphonesimulator \
             -configuration Release CODE_SIGNING_ALLOWED=NO \
+            SYMROOT="$RUNNER_TEMP/ios-products" OBJROOT="$RUNNER_TEMP/ios-objects" \
             SWIFT_ACTIVE_COMPILATION_CONDITIONS=STORE GCC_PREPROCESSOR_DEFINITIONS=STORE=1 build
       - name: Check draft ownership and bilingual typing
         working-directory: .

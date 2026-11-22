@@ -27,7 +27,15 @@ enum TypingLanguages: String, CaseIterable, Identifiable {
     }
 
     static let key = "typingLanguages"
-    static let store = UserDefaults(suiteName: Bridge.group)
+    static let neuralSwipeKey = "newSwipeModel"
+    static let store: UserDefaults? = {
+        let defaults = UserDefaults(suiteName: Bridge.group)
+        if defaults?.object(forKey: neuralSwipeKey) == nil,
+           let disabled = defaults?.object(forKey: "disableNeuralSwipe") as? Bool {
+            defaults?.set(!disabled, forKey: neuralSwipeKey)
+        }
+        return defaults
+    }()
 
     static var current: Self {
         store?.string(forKey: key).flatMap(Self.init(rawValue:)) ?? .device

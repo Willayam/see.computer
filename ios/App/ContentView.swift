@@ -12,6 +12,7 @@ struct ContentView: View {
     @State private var connected = DictionaryFolder.isConnected
     @State private var copied: Date?
     @AppStorage(TypingLanguages.key, store: TypingLanguages.store) private var typingLanguages = TypingLanguages.device
+    @AppStorage(TypingLanguages.neuralSwipeKey, store: TypingLanguages.store) private var newSwipeModel = true
     @AppStorage(TypingLog.key, store: TypingLog.store) private var keepsTypingLog = true
     @FocusState private var tryItFocused: Bool
 
@@ -110,6 +111,10 @@ struct ContentView: View {
                 ForEach(TypingLanguages.allCases) { Text($0.label).tag($0) }
             }
             .onChange(of: typingLanguages) { _, _ in Signals.post(.typingLanguagesChanged) }
+            Toggle("New swipe model", isOn: $newSwipeModel)
+            Text("Swipe typing powered by FUTO Swipe")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             Toggle("Keep a typing log", isOn: $keepsTypingLog)
                 .onChange(of: keepsTypingLog) { _, on in if !on { TypingLog.erase() } }
             Button("Add the keyboard and allow Full Access") {

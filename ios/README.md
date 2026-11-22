@@ -90,3 +90,35 @@ Use `--mode swipe` with the same simulator command and corpus. The generator col
 The use of noisy via points follows [Modeling Gesture-Typing Movements](https://research.google/pubs/modeling-gesture-typing-movements/). [How We Swipe](https://research.aalto.fi/en/publications/how-we-swipe-a-large-scale-shape-writing-dataset-and-empirical-fi/) reports a mean swipe duration of 689 ms and mean trajectory length of 371 px for its English Enron phrases. The simulator chooses a nominal speed of 10 to 20 key pitches per second and samples at 60 to 120 Hz. The noise scales, bow and corner threshold here are synthetic stress settings. They have not been fitted to those traces or to Swedish input.
 
 WER counts substitutions, insertions and omissions in the resulting field, including missed gesture starts. Decode timing covers successful gesture recognition through candidate ranking, excluding drawing and host text edits. The ten-letter timing groups by reference word length. Run `--mode swipe --endpoints` to score a control that reads only the first and last keys. This synthetic benchmark does not measure actual finger trajectories, correlated drift or host-app touch delivery.
+
+### Swipe typing
+
+The keyboard loads the FUTO Swipe FP32 encoder on the first English or bilingual
+swipe. On the Swedish layout, English candidates combine native and QWERTY
+encoder passes. The geometric decoder supplies Swedish words and their order.
+The native Swedish beam provides evidence when the decoders disagree about the language. Turning off
+**New swipe model** in the app's Keyboard section switches English back to geometry.
+
+After swiping in a device build with Full Access, run
+`ios/scripts/swipe-budget.sh` on the connected Mac. It reports cold load time,
+latency and peak keyboard footprint from the first and every twentieth subsequent neural gesture.
+For English encoder parity on a booted simulator, run
+`ios/scripts/typing-sim.sh <UDID> --mode neural-swipe --input sample.jsonl --layout layout.json --out results.tsv`. Add `--native-only` to measure the cost of the second pass.
+
+To reproduce bilingual ranking, use the same real English JSONL and keyboard layouts
+for both encoder passes. Run from the repository root with NumPy, Numba, PyTorch
+and the ExecuTorch 1.6.0 Python runtime. The native pass can also export the
+Swedish-layout proxy for Swift. Keep these gesture files and outputs outside git.
+
+```sh
+python ios/scripts/swipe-blend-bench.py --model "$MODEL" --layout "$QWERTY" --swedish-layout "$SWEDISH" --input "$INPUT" --geometry native --out "$DIR/native.gz" --replay-input "$DIR/proxy.jsonl" --replay-layout "$DIR/layout.json"
+python ios/scripts/swipe-blend-bench.py --model "$MODEL" --layout "$QWERTY" --swedish-layout "$SWEDISH" --input "$INPUT" --geometry canonical --english-beam-only --out "$DIR/canonical.gz"
+python ios/scripts/merge-swipe-layouts.py --native "$DIR/native.gz" --canonical "$DIR/canonical.gz" --out "$DIR/both.gz"
+ios/scripts/typing-sim.sh "$UDID" --mode swipe-geometry --layout "$DIR/layout.json" --input "$DIR/proxy.jsonl" --out "$DIR/geometry.jsonl"
+python ios/scripts/score-deployed-swipe.py --neural "$DIR/both.gz" --geometry "$DIR/geometry.jsonl" --input "$INPUT" --out "$DIR/reference.tsv"
+ios/scripts/typing-sim.sh "$UDID" --mode neural-swipe --layout "$DIR/layout.json" --input "$DIR/proxy.jsonl" --out "$DIR/swift.tsv"
+```
+
+Compare the first three TSV columns (gesture ID, label and first choice).
+The reference runs the encoder, CTC beam and final ranking in Python. Both paths
+use Swift's geometric candidates.

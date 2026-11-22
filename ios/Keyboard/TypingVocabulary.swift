@@ -65,6 +65,8 @@ final class TypingVocabulary {
     private var pickedWords: [String]
     private var pendingWord: (word: String, field: UUID, before: String, forget: Bool)?
     private let store: UserDefaults?
+    private var neuralGestures = 0
+    var useCanonicalSwipePass = true
     private var residual: Double
     private var count: Double
     var spread: Double { min(0.4, max(0.1, sqrt((residual + 5) / (2 * (count + 40))))) }
@@ -273,18 +275,43 @@ final class TypingVocabulary {
 
     func swipe(_ samples: [SwipeSample], layout: KeyLayout, before: String,
                previousChoices: [SwipeChoice] = []) -> SwipePrediction {
-        let decoder = SwipeDecoder(samples: samples, layout: layout)
-        let usual = rankedSwipe(decoder, before: before)
+        let start = ProcessInfo.processInfo.systemUptime
+        lazy var decoder = SwipeDecoder(samples: samples, layout: layout)
+        var nativeSwedish = [NeuralSwipe.Candidate]()
+        var neural: [NeuralSwipe.Candidate] = []
+        if store?.object(forKey: TypingLanguages.neuralSwipeKey) as? Bool != false,
+           languages.contains(where: { $0.code == "en" }), let lex = tables["en"],
+           let frames = NeuralSwipe.emissions(samples, layout: layout, canonical: false) {
+            neural = NeuralSwipe.beam(frames, lex: lex)
+            if languages.count == 2, let sv = tables["sv"] {
+                nativeSwedish = NeuralSwipe.beam(frames, lex: sv)
+            }
+            if useCanonicalSwipePass, layout.centers[Lexicon.codes["å"]!] != nil,
+               let mapped = NeuralSwipe.emissions(samples, layout: layout, canonical: true) {
+                neural = NeuralSwipe.average(neural, NeuralSwipe.beam(mapped, lex: lex))
+            }
+        }
+        defer {
+            if !neural.isEmpty {
+                neuralGestures &+= 1
+                if neuralGestures % 20 == 1, store != nil {
+                    Diagnostics.log("swipe-neural", ["ms": (ProcessInfo.processInfo.systemUptime - start) * 1000,
+                                                     "peak_mib": NeuralSwipe.peakMiB])
+                }
+            }
+        }
+        let usual = rankedSwipe(decoder, neural: neural, nativeSwedish: nativeSwedish, before: before)
         var prediction = SwipePrediction(words: usual, previous: nil)
         let trimmed = before.last == " " ? String(before.dropLast()) : before
-        guard let first = previousChoices.first, trimmed.hasSuffix(first.word),
-              let current = usual.first, canReviseSwipe(first.word) else { return prediction }
+        guard let first = previousChoices.first, let precedingScore = first.geometricScore,
+              trimmed.hasSuffix(first.word), let currentScore = usual.first?.geometricScore, canReviseSwipe(first.word) else { return prediction }
         let prefix = trimmed.dropLast(first.word.count)
-        var best = first.score + current.score + 0.8
+        var best = precedingScore + currentScore + 0.8
         for alternative in previousChoices.dropFirst() {
-            let next = rankedSwipe(decoder, before: prefix + alternative.word)
-            guard let score = next.first?.score else { continue }
-            let joint = alternative.score + score
+            guard let precedingScore = alternative.geometricScore else { continue }
+            let next = rankedSwipe(decoder, neural: neural, nativeSwedish: nativeSwedish, before: prefix + alternative.word)
+            guard let score = next.first?.geometricScore else { continue }
+            let joint = precedingScore + score
             if joint > best {
                 best = joint
                 prediction = SwipePrediction(words: next, previous: alternative.word)
@@ -298,7 +325,7 @@ final class TypingVocabulary {
     }
 
     func reviseSwipe(_ choices: [SwipeChoice], followedBy next: String) -> String? {
-        guard let first = choices.first, canReviseSwipe(first.word) else { return nil }
+        guard let first = choices.first, let firstScore = first.geometricScore, canReviseSwipe(first.word) else { return nil }
         func likelihood(_ word: String) -> Double {
             let previous = word.lowercased().replacingOccurrences(of: "’", with: "'")
             let following = next.lowercased().replacingOccurrences(of: "’", with: "'")
@@ -308,36 +335,90 @@ final class TypingVocabulary {
                 return lex.logProbability(id, after: lex.node(previous).flatMap(lex.terminal))
             }.max() ?? 0
         }
-        var best = first.score + likelihood(first.word) + 0.8
+        var best = firstScore + likelihood(first.word) + 0.8
         var replacement: String?
         for alternative in choices.dropFirst() {
-            let score = alternative.score + likelihood(alternative.word)
+            guard let prior = alternative.geometricScore else { continue }
+            let score = prior + likelihood(alternative.word)
             if score > best { best = score; replacement = alternative.word }
         }
         return replacement
     }
 
-    private func rankedSwipe(_ decoder: SwipeDecoder, before: String) -> [SwipeChoice] {
+    private func rankedSwipe(_ decoder: @autoclosure () -> SwipeDecoder, neural: [NeuralSwipe.Candidate], nativeSwedish: [NeuralSwipe.Candidate], before: String) -> [SwipeChoice] {
         let sentence = before.suffix(128).reversed().prefix { !$0.isNewline && !".!?".contains($0) }.reversed()
         let previous = sentence.split { !WordInput.wordCharacter($0) }.suffix(4).map {
             String($0).lowercased().replacingOccurrences(of: "’", with: "'")
         }
         let weights = languageWeights(previous)
-        var scores = [String: Double]()
-        func collect(relaxed: Bool) {
-            for (i, language) in languages.enumerated() {
-                guard let lex = tables[language.code] else { continue }
-                let prior = previous.isEmpty ? lex.sentenceStart : previous.last.flatMap(lex.node).flatMap(lex.terminal)
-                for (word, score) in decoder.candidates(in: lex, after: prior, relaxed: relaxed) {
-                    scores[word] = max(scores[word] ?? -.infinity, score + weights[i])
+        var scores = [String: SwipeChoice]()
+        var geometric = [String: [(String, Double)]]()
+        var swedishEvidence = -Double.infinity
+        var english = [(String, Double)]()
+        for (i, language) in languages.enumerated() {
+            guard let lex = tables[language.code] else { continue }
+            let prior = previous.isEmpty ? lex.sentenceStart : previous.last.flatMap(lex.node).flatMap(lex.terminal)
+            if language.code == "sv" {
+                swedishEvidence = nativeSwedish.map {
+                    $0.score(prior: lex.logProbability($0.id, after: prior), language: weights[i],
+                             frequency: lex.sourceFrequency($0.id))
+                }.max() ?? -.infinity
+            }
+            if language.code == "en", !neural.isEmpty {
+                let spellings = Set(neural.map(\.word))
+                english = neural.map {
+                    let ambiguous = $0.word.contains("'") && spellings.contains($0.word.replacingOccurrences(of: "'", with: ""))
+                    let score = $0.score(prior: lex.logProbability($0.id, after: prior), language: weights[i],
+                                         frequency: lex.sourceFrequency($0.id))
+                    return (lex.displayForm($0.word), score - (ambiguous ? 0.25 : 0))
+                }
+            }
+            if languages.count > 1 || english.isEmpty {
+                geometric[language.code] = decoder().candidates(in: lex, after: prior).map { ($0.0, $0.1 + weights[i]) }
+            }
+        }
+        func add(_ candidates: [(String, Double)], offset: Double = 0, geometric: Bool = true) {
+            for (word, score) in candidates {
+                let spelling = english.isEmpty ? word : word.lowercased()
+                if score + offset > (scores[spelling]?.score ?? -.infinity) {
+                    scores[spelling] = SwipeChoice(word: word, score: score + offset, geometricScore: geometric ? score : nil)
                 }
             }
         }
-        collect(relaxed: false)
-        if scores.isEmpty { collect(relaxed: true) }
-        return scores.keys.sorted {
-            scores[$0] == scores[$1] ? $0 < $1 : scores[$0]! > scores[$1]!
-        }.prefix(6).map { SwipeChoice(word: $0, score: scores[$0]!) }
+        func best(_ candidates: [(String, Double)]) -> (String, Double)? {
+            candidates.min { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }
+        }
+        if let top = best(english) {
+            add(english, geometric: false)
+            if let swedish = geometric["sv"], let bestSwedish = best(swedish),
+               let en = languages.firstIndex(where: { $0.code == "en" }),
+               let sv = languages.firstIndex(where: { $0.code == "sv" }) {
+                let anchor = best(geometric["en"] ?? [])
+                // Calibrated on real English validation and synthetic bilingual development traces.
+                let neuralFit = top.1 - 0.75 * Double(top.0.count)
+                let geometricFit = (max(-60, bestSwedish.1) - weights[sv]) / Double(bestSwedish.0.count)
+                let difference = max(-45, bestSwedish.1) - max(-45, anchor?.1 ?? -.infinity)
+                let agreement = anchor?.0.lowercased() == top.0.lowercased()
+                let margin = 2 - 0.65 * neuralFit + 0.3 * (weights[sv] - weights[en])
+                    + 0.9 * geometricFit + 0.06 * difference - (agreement ? 1.7 : 0)
+                let supportsSwedish = swedishEvidence >= top.1 - 1 || weights[sv] > weights[en] + 1
+                let geometricLead = bestSwedish.1 - (anchor?.1 ?? -.infinity)
+                let calibrated = supportsSwedish && geometricLead > 0 ? max(0.1, margin) : margin
+                add(swedish, offset: top.1 + calibrated - bestSwedish.1)
+            }
+        } else {
+            for candidates in geometric.values { add(candidates) }
+            if scores.isEmpty {
+                for (i, language) in languages.enumerated() {
+                    guard let lex = tables[language.code] else { continue }
+                    let prior = previous.isEmpty ? lex.sentenceStart : previous.last.flatMap(lex.node).flatMap(lex.terminal)
+                    add(decoder().candidates(in: lex, after: prior, relaxed: true).map { ($0.0, $0.1 + weights[i]) })
+                }
+            }
+        }
+        return Array(scores.values.sorted {
+            $0.score == $1.score ? $0.word < $1.word : $0.score > $1.score
+        }.prefix(6))
     }
 
     func reconsider(_ held: Typist.HeldWord, input: WordInput, trail: TapTrail, chosen: String, layout: KeyLayout) -> String? {

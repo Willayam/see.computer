@@ -3,6 +3,7 @@ import Foundation
 struct Lexicon {
     static let alphabet = Array("abcdefghijklmnopqrstuvwxyzåäö'")
     static let codes = Dictionary(uniqueKeysWithValues: alphabet.enumerated().map { ($1, $0) })
+    private let frequency: Data?
     private let data: Data
     private let nodes, wordNodes, unigrams, rows, backoff, pairs, chars: Int
     let sentenceStart: Int
@@ -18,6 +19,9 @@ struct Lexicon {
         let sections = (5...11).map(field)
         guard field(1) == 1, sections[0] >= 64, zip(sections, sections.dropFirst()).allSatisfy({ $0 <= $1 }),
               field(11) + 31 * 31 * 31 == mapped.count else { return nil }
+        let frequencies = Bundle.main.url(forResource: "frequency-\(language)", withExtension: "bin")
+            .flatMap { try? Data(contentsOf: $0, options: .alwaysMapped) }
+        frequency = frequencies?.count == field(3) ? frequencies : nil
         data = mapped
         sentenceStart = field(3)
         nodes = field(5)
@@ -73,6 +77,7 @@ struct Lexicon {
         return word.prefix(1).uppercased() + word.dropFirst()
     }
 
+    func sourceFrequency(_ id: Int) -> Double { Double(frequency?[id] ?? 0) }
     func unigram(_ id: Int) -> Double { -Double(data[unigrams + id]) / 10 }
     private func pairRange(_ prev: Int) -> Range<Int> {
         uint(rows + prev * 4)..<uint(rows + (prev + 1) * 4)
