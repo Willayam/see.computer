@@ -110,6 +110,9 @@ struct ContentView: View {
                 ForEach(TypingLanguages.allCases) { Text($0.label).tag($0) }
             }
             .onChange(of: typingLanguages) { _, _ in Signals.post(.typingLanguagesChanged) }
+            Text("Swipe typing powered by FUTO Swipe")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             Toggle("Keep a typing log", isOn: $keepsTypingLog)
                 .onChange(of: keepsTypingLog) { _, on in if !on { TypingLog.erase() } }
             Button("Add the keyboard and allow Full Access") {

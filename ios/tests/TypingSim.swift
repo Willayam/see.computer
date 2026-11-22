@@ -411,7 +411,7 @@ private struct RealSwipe: Decodable {
 }
 
 @MainActor
-private func replay(_ input: String, layout: String, output: String, pipeline: Pipeline) throws {
+private func replay(_ input: String, layout: String, output: String, pipeline: Pipeline, encoderOnly: Bool) throws {
     let decoder = JSONDecoder()
     let source = try decoder.decode(FutoLayout.self, from: Data(contentsOf: URL(fileURLWithPath: layout)))
     // Solve the two least-squares systems for target x and y.
@@ -429,9 +429,37 @@ private func replay(_ input: String, layout: String, output: String, pipeline: P
     let ax = gram.inverse * sx, ay = gram.inverse * sy
     var rows = ["id\tword\ttop1\ttop2\ttop3"]
     let inputText = try Data(contentsOf: URL(fileURLWithPath: input), options: .mappedIfSafe)
+    var normalizedCenters = [CGPoint?](repeating: nil, count: Lexicon.alphabet.count)
+    for key in source.keys {
+        if let letter = key.letter.first, let code = Lexicon.codes[letter] {
+            normalizedCenters[code] = CGPoint(x: key.cx, y: key.cy)
+        }
+    }
+    let lex = Lexicon(language: "en")!
+    var elapsed = [Double]()
+    var correct = 0
     for line in inputText.split(separator: UInt8(10)) {
         let record = try decoder.decode(RealSwipe.self, from: line)
         let context = record.sentence.split(whereSeparator: \.isWhitespace).prefix(record.word_idx).joined(separator: " ")
+        if encoderOnly {
+            let start = CFAbsoluteTimeGetCurrent()
+            let samples = record.data.map { SwipeSample(point: CGPoint(x: $0.x, y: $0.y), time: $0.t / 1000) }
+            let words = context.lowercased().split { !$0.isLetter && $0 != "'" && !".!?".contains($0) }
+            let prior = words.last.flatMap { word -> Int? in
+                if let last = word.last, ".!?".contains(last) { return lex.sentenceStart }
+                return lex.node(String(word.split { ".!?".contains($0) }.last ?? word)).flatMap(lex.terminal)
+            } ?? (words.isEmpty ? lex.sentenceStart : nil)
+            guard let frames = NeuralSwipe.forward(samples, centers: normalizedCenters) else { throw CocoaError(.fileReadCorruptFile) }
+            let ranked = NeuralSwipe.beam(frames, lex: lex).map {
+                ($0.word, $0.score(prior: lex.logProbability($0.id, after: prior)))
+            }.sorted { $0.1 > $1.1 }.prefix(3).map { $0.0 }
+            elapsed.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            let label = record.word.lowercased().replacingOccurrences(of: "’", with: "'")
+                .trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+            if ranked.first == label { correct += 1 }
+            rows.append(([String(record.id), label] + ranked).joined(separator: "\t"))
+            continue
+        }
         pipeline.newField()
         let before = context.isEmpty ? "" : context + " "
         pipeline.field.text = before
@@ -457,6 +485,10 @@ private func replay(_ input: String, layout: String, output: String, pipeline: P
         pipeline.keys.swipe(samples)
         let choices = pipeline.gestureChoices(before: before)
         rows.append(([String(record.id), record.word] + choices).joined(separator: "\t"))
+    }
+    if !elapsed.isEmpty {
+        elapsed.sort()
+        print("neural top1=\(correct)/\(elapsed.count) p50_ms=\(elapsed[elapsed.count/2]) p95_ms=\(elapsed[elapsed.count*95/100])")
     }
     try rows.joined(separator: "\n").write(toFile: output, atomically: true, encoding: .utf8)
 }
@@ -488,10 +520,10 @@ enum TypingSim {
         ]
         let chosen = option("--level").map { name in levels.filter { $0.name == name } } ?? levels
         let pipeline = await Pipeline(languages: languages, size: size)
-        if option("--mode") == "real-swipe" {
+        if ["real-swipe", "neural-swipe"].contains(option("--mode") ?? "") {
             guard let input = option("--input"), let layout = option("--layout"), let out = option("--out") else { exit(2) }
             pipeline.configureSwipe(endpoints: false)
-            do { try replay(input, layout: layout, output: out, pipeline: pipeline) }
+            do { try replay(input, layout: layout, output: out, pipeline: pipeline, encoderOnly: option("--mode") == "neural-swipe") }
             catch { print(error); exit(1) }
             return
         }

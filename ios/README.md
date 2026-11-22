@@ -90,3 +90,16 @@ Use `--mode swipe` with the same simulator command and corpus. The generator col
 The use of noisy via points follows [Modeling Gesture-Typing Movements](https://research.google/pubs/modeling-gesture-typing-movements/). [How We Swipe](https://research.aalto.fi/en/publications/how-we-swipe-a-large-scale-shape-writing-dataset-and-empirical-fi/) reports a mean swipe duration of 689 ms and mean trajectory length of 371 px for its English Enron phrases. The simulator chooses a nominal speed of 10 to 20 key pitches per second and samples at 60 to 120 Hz. The noise scales, bow and corner threshold here are synthetic stress settings. They have not been fitted to those traces or to Swedish input.
 
 WER counts substitutions, insertions and omissions in the resulting field, including missed gesture starts. Decode timing covers successful gesture recognition through candidate ranking, excluding drawing and host text edits. The ten-letter timing groups by reference word length. Run `--mode swipe --endpoints` to score a control that reads only the first and last keys. This synthetic benchmark does not measure actual finger trajectories, correlated drift or host-app touch delivery.
+
+### Swipe typing
+
+The keyboard loads the FUTO Swipe FP32 encoder on the first English or bilingual
+swipe. Swedish-only typing uses the geometric decoder. Setting the Boolean
+`disableNeuralSwipe` in the keyboard's app group defaults restores geometric
+decoding for all languages.
+
+After swiping in a device build with Full Access, run
+`ios/scripts/swipe-budget.sh` on the connected Mac. It prints cold load time,
+gesture latency percentiles and the highest keyboard process footprint recorded.
+For English encoder parity on a booted simulator, run
+`ios/scripts/typing-sim.sh <UDID> --mode neural-swipe --input sample.jsonl --layout layout.json --out results.tsv`.

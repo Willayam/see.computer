@@ -199,3 +199,12 @@ Copyright (c) 2008, The Android Open Source Project
 
 
 Includes Dictionaries © Lexiteria LLC.  Used by permission.
+
+## FUTO Swipe
+
+Swipe typing uses FUTO Holdings, Inc.'s unmodified honorable_sturgeon FP32 encoder.
+The weights ship under the FUTO Model Weights License 1.0. See
+[the bundled license](Keyboard/FutoSwipe/LICENSE.md) and
+[the model card](https://huggingface.co/futo-org/futo-swipe).
+Inference uses [ExecuTorch 1.6.0](https://github.com/pytorch/executorch/tree/v1.6.0)
+and its XNNPACK backend.

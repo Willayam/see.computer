@@ -6,7 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+5EEC00000000000000000040 = {isa = XCLocalSwiftPackageReference; relativePath = SwipeRuntime; };
+        5EEC00000000000000000041 = {isa = XCSwiftPackageProductDependency; package = 5EEC00000000000000000040; productName = SwipeRuntime; };
 /* Begin PBXBuildFile section */
+        5EEC00000000000000000042 = {isa = PBXBuildFile; productRef = 5EEC00000000000000000041; };
 		5EEC0000000000000000000C /* Keyboard.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 5EEC0000000000000000000B /* Keyboard.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		5EEC00000000000000000021 /* Island.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 5EEC00000000000000000020 /* Island.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
@@ -59,7 +62,7 @@
 
 /* Begin PBXFrameworksBuildPhase section */
 		5EEC0000000000000000000F /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
-		5EEC00000000000000000010 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		5EEC00000000000000000010 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (5EEC00000000000000000042,); runOnlyForDeploymentPostprocessing = 0; };
 		5EEC00000000000000000028 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
@@ -128,6 +131,7 @@
 				5EEC00000000000000000005 /* Keyboard */,
 				5EEC00000000000000000006 /* Shared */,
 			);
+			packageProductDependencies = (5EEC00000000000000000041,);
 			name = Keyboard;
 			productName = Keyboard;
 			productReference = 5EEC0000000000000000000B;
@@ -171,6 +175,7 @@
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 5EEC00000000000000000003 /* Products */;
+			packageReferences = (5EEC00000000000000000040,);
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -326,6 +331,7 @@
 				PRODUCT_NAME = Keyboard;
 				SKIP_INSTALL = YES;
 				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				OTHER_LDFLAGS = ("$(inherited)", "-all_load");
 				SWIFT_OBJC_BRIDGING_HEADER = "Config/Keyboard-Bridging.h";
 			};
 			name = Debug;
@@ -342,6 +348,7 @@
 				PRODUCT_NAME = Keyboard;
 				SKIP_INSTALL = YES;
 				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				OTHER_LDFLAGS = ("$(inherited)", "-all_load");
 				SWIFT_OBJC_BRIDGING_HEADER = "Config/Keyboard-Bridging.h";
 			};
 			name = Release;

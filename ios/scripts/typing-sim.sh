@@ -2,6 +2,7 @@
 # Type the held-out sentences on the real keyboard views in a booted iOS Simulator.
 # Usage: typing-sim.sh <simulator UDID> [--set dev|test] [--languages bilingual|english] [--out <tsv>]
 # Real data: typing-sim.sh <UDID> --mode real-swipe --input sample.jsonl --layout qwerty.json --out results.tsv
+# Encoder parity: use --mode neural-swipe with the same input, layout and output arguments.
 # Synthetic export: typing-sim.sh <UDID> --mode swipe --export-sv <output-prefix>
 # Prints one line per noise level, then the metric: word error rate over the two noisy levels.
 set -eu
@@ -27,15 +28,14 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 cp "$root"/Keyboard/words-*.bin "$scratch/"
-xcrun --sdk iphonesimulator swiftc -O -target "$(uname -m)-apple-ios17.0-simulator" \
-    -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
+"$root/scripts/typing-swiftc.sh" "$scratch" -O \
     -import-objc-header "$root/Keyboard/DocumentIdentifier.h" \
     "$root/Keyboard/Lexicon.swift" "$root/Keyboard/TapDecoder.swift" "$root/Keyboard/SwipeDecoder.swift" "$root/Shared/Bridge.swift" "$root/Shared/TypingLanguages.swift" \
     "$root"/Keyboard/TypingVocabulary.swift "$root/Keyboard/Typist.swift" \
     "$root/Keyboard/TypingKeys.swift" "$root/Keyboard/KeyboardControls.swift" \
     "$root/tests/TypingSim.swift" -o "$scratch/sim"
-if [ "$mode" = real-swipe ]; then
-    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --mode real-swipe --languages english \
+if [ "$mode" = real-swipe ] || [ "$mode" = neural-swipe ]; then
+    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --mode "$mode" --languages english \
         --input "${input:?Pass --input sample.jsonl}" --layout "${layout:?Pass --layout qwerty.json}" --out "${out:?Pass --out results.tsv}"
     exit
 fi

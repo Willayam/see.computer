@@ -65,6 +65,7 @@ final class TypingVocabulary {
     private var pickedWords: [String]
     private var pendingWord: (word: String, field: UUID, before: String, forget: Bool)?
     private let store: UserDefaults?
+    var warpNeuralSwipe = NeuralSwipe.warpToQwerty
     private var residual: Double
     private var count: Double
     var spread: Double { min(0.4, max(0.1, sqrt((residual + 5) / (2 * (count + 40))))) }
@@ -273,8 +274,22 @@ final class TypingVocabulary {
 
     func swipe(_ samples: [SwipeSample], layout: KeyLayout, before: String,
                previousChoices: [SwipeChoice] = []) -> SwipePrediction {
+        let start = ProcessInfo.processInfo.systemUptime
         let decoder = SwipeDecoder(samples: samples, layout: layout)
-        let usual = rankedSwipe(decoder, before: before)
+        var neural = [String: [NeuralSwipe.Candidate]]()
+        if store?.bool(forKey: "disableNeuralSwipe") != true, languages.contains(where: { $0.code == "en" }),
+           let frames = NeuralSwipe.emissions(samples, layout: layout, warp: warpNeuralSwipe) {
+            for language in languages {
+                if let lex = tables[language.code] { neural[language.code] = NeuralSwipe.beam(frames, lex: lex) }
+            }
+        }
+        defer {
+            if !neural.isEmpty, store != nil {
+                Diagnostics.log("swipe-neural", ["ms": (ProcessInfo.processInfo.systemUptime - start) * 1000,
+                                                 "peak_mib": NeuralSwipe.peakMiB])
+            }
+        }
+        let usual = rankedSwipe(decoder, neural: neural, before: before)
         var prediction = SwipePrediction(words: usual, previous: nil)
         let trimmed = before.last == " " ? String(before.dropLast()) : before
         guard let first = previousChoices.first, trimmed.hasSuffix(first.word),
@@ -282,7 +297,7 @@ final class TypingVocabulary {
         let prefix = trimmed.dropLast(first.word.count)
         var best = first.score + current.score + 0.8
         for alternative in previousChoices.dropFirst() {
-            let next = rankedSwipe(decoder, before: prefix + alternative.word)
+            let next = rankedSwipe(decoder, neural: neural, before: prefix + alternative.word)
             guard let score = next.first?.score else { continue }
             let joint = alternative.score + score
             if joint > best {
@@ -317,24 +332,23 @@ final class TypingVocabulary {
         return replacement
     }
 
-    private func rankedSwipe(_ decoder: SwipeDecoder, before: String) -> [SwipeChoice] {
+    private func rankedSwipe(_ decoder: SwipeDecoder, neural: [String: [NeuralSwipe.Candidate]], before: String) -> [SwipeChoice] {
         let sentence = before.suffix(128).reversed().prefix { !$0.isNewline && !".!?".contains($0) }.reversed()
         let previous = sentence.split { !WordInput.wordCharacter($0) }.suffix(4).map {
             String($0).lowercased().replacingOccurrences(of: "’", with: "'")
         }
         let weights = languageWeights(previous)
         var scores = [String: Double]()
-        func collect(relaxed: Bool) {
-            for (i, language) in languages.enumerated() {
-                guard let lex = tables[language.code] else { continue }
-                let prior = previous.isEmpty ? lex.sentenceStart : previous.last.flatMap(lex.node).flatMap(lex.terminal)
-                for (word, score) in decoder.candidates(in: lex, after: prior, relaxed: relaxed) {
-                    scores[word] = max(scores[word] ?? -.infinity, score + weights[i])
-                }
+        for (i, language) in languages.enumerated() {
+            guard let lex = tables[language.code] else { continue }
+            let prior = previous.isEmpty ? lex.sentenceStart : previous.last.flatMap(lex.node).flatMap(lex.terminal)
+            let candidates = neural[language.code]?.map {
+                (lex.displayForm($0.word), $0.score(prior: lex.logProbability($0.id, after: prior)))
+            } ?? decoder.candidates(in: lex, after: prior)
+            for (word, score) in candidates {
+                scores[word] = max(scores[word] ?? -.infinity, score + weights[i])
             }
         }
-        collect(relaxed: false)
-        if scores.isEmpty { collect(relaxed: true) }
         return scores.keys.sorted {
             scores[$0] == scores[$1] ? $0 < $1 : scores[$0]! > scores[$1]!
         }.prefix(6).map { SwipeChoice(word: $0, score: scores[$0]!) }
