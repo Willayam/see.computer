@@ -92,6 +92,11 @@ for lang, layout, engines in [
                     else dict(text=" ".join(raw), commits=raw, bars=[[r] for r in raw])
                 )
                 commits = [normal(w) for w in result["commits"]]
+                for known, word, geometric, committed in zip(result.get("known", []), words, raw, commits):
+                    if geometric == word:
+                        group_name = "in dictionary" if known else "outside dictionary"
+                        breakdown[f"{group_name} correct taps"] += 1
+                        breakdown[f"{group_name} changed"] += committed != word
                 errors = distance(words, normal(result["text"]).split())
                 row = counts[indices[cluster]]
                 row[0] += len(words)

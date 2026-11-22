@@ -61,27 +61,115 @@ final class TypingVocabulary {
     private var shortcuts: [String: String] = [:]
     private var protectedWords = Set<String>()
 
+    private var keptWords: [String]
+    private var pickedWords: [String]
+    private var pendingWord: (word: String, field: UUID, before: String, picked: Bool)?
     private let store: UserDefaults?
     private var residual: Double
     private var count: Double
     var spread: Double { min(0.4, max(0.1, sqrt((residual + 5) / (2 * (count + 40))))) }
 
-    init(store: UserDefaults? = nil) {
+    init(store: UserDefaults? = nil, initialSpread: Double? = nil) {
         self.store = store
+        keptWords = store?.stringArray(forKey: "typingKeptWords") ?? []
+        pickedWords = store?.stringArray(forKey: "typingPickedWords") ?? []
         let saved = store?.dictionary(forKey: "typingResiduals")
         residual = saved?["sum"] as? Double ?? 0
         count = saved?["count"] as? Double ?? 0
+        if let initialSpread {
+            // A phone log records the fitted spread, but omits the effective sample count.
+            count = 1000
+            residual = max(0, 2 * (count + 40) * initialSpread * initialSpread - 5)
+        }
     }
 
-    func learn(_ trail: TapTrail, chosen: String, layout: KeyLayout) {
+    private var touchSignature = [Int]()
+    private var touchLayout: KeyLayout?
+    private var verticalBias = Array(repeating: 0.0, count: 31)
+    private var touchCounts = Array(repeating: 0.0, count: 31)
+
+    func offsets(for layout: KeyLayout) -> [Double] {
+        if layout != touchLayout {
+            let geometry = [layout.pitch, layout.reach.width, layout.reach.height, layout.space.minX,
+                            layout.space.minY, layout.space.width, layout.space.height]
+            let centers: [CGFloat] = layout.centers.flatMap { [$0?.x ?? -1, $0?.y ?? -1] }
+            let signature = (geometry + centers).map { Int(($0 * 10).rounded()) }
+            let saved = store?.dictionary(forKey: "typingBoundaryTouches")
+            if saved?["layout"] as? [Int] == signature,
+               let means = saved?["bias"] as? [Double], means.count == 31,
+               let counts = saved?["counts"] as? [Double], counts.count == 31 {
+                verticalBias = means
+                touchCounts = counts
+            } else {
+                verticalBias = Array(repeating: 0, count: 31)
+                touchCounts = Array(repeating: 0, count: 31)
+            }
+            touchLayout = layout
+            touchSignature = signature
+        }
+        return verticalBias
+    }
+
+    private func observeHeight(_ y: CGFloat, center: CGFloat, key: Int, layout: KeyLayout) {
+        let bias = (y - center) / layout.pitch
+        guard abs(bias) <= 1 else { return }
+        _ = offsets(for: layout)
+        touchCounts[key] = min(80, touchCounts[key] + 1)
+        verticalBias[key] += (bias - verticalBias[key]) / (12 + touchCounts[key])
+    }
+
+    func observeEditInsideWord(_ caret: Caret) {
+        let left = caret.before.reversed().prefix(while: \.isLetter).reversed()
+        guard let right = caret.after?.prefix(while: \.isLetter), !right.isEmpty,
+              caret.before.dropLast(left.count).last.map({ $0.isWhitespace || WordInput.opensWord($0) }) ?? true,
+              caret.after?.dropFirst(right.count).first.map({ !$0.isNumber && $0 != "_" && $0 != "@" }) ?? true
+        else { return }
+        rememberIfRetained((String(left) + right).lowercased(), field: caret.field,
+                           before: caret.before + right, picked: true)
+    }
+
+    private func rememberIfRetained(_ word: String, field: UUID, before: String, picked: Bool) {
+        guard (2...36).contains(word.count), word.allSatisfy(\.isLetter),
+              !(picked ? pickedWords : keptWords).contains(word),
+              languages.allSatisfy({ language in
+                  guard let lex = tables[language.code] else { return false }
+                  return lex.node(word).flatMap(lex.terminal) == nil
+              }) else { return }
+        pendingWord = (word, field, before, picked)
+    }
+
+    func learn(_ trail: TapTrail, chosen: String, picked: Bool = false, layout: KeyLayout) {
         let letters = chosen.lowercased()
+        // Wait for another word in the same field so backspace can undo a mistaken commit.
+        if let pending = pendingWord, let end = trail.end, end.field == pending.field,
+           end.before.hasPrefix(pending.before + " ") {
+            if pending.picked && !pickedWords.contains(pending.word) {
+                pickedWords.append(pending.word)
+                pickedWords = Array(pickedWords.suffix(192))
+                store?.set(pickedWords, forKey: "typingPickedWords")
+            } else if !keptWords.contains(pending.word) {
+                keptWords.append(pending.word)
+                keptWords = Array(keptWords.suffix(192))
+                store?.set(keptWords, forKey: "typingKeptWords")
+            }
+        }
+        pendingWord = nil
+        if let end = trail.end, letters == String(trail.taps.map(\.typed)) {
+            rememberIfRetained(letters, field: end.field, before: end.before, picked: picked)
+        }
         guard letters.count == trail.taps.count, !letters.contains(" ") else { return }
         for (tap, letter) in zip(trail.taps, letters) {
             guard let point = tap.point, let code = Lexicon.codes[letter], let center = layout.centers[code] else { continue }
             let distance = hypot(point.x - center.x, point.y - center.y) / layout.pitch
             guard distance <= 1.6 else { continue }
+            if "zxcvbnm".contains(letter) {
+                observeHeight(point.y, center: center.y, key: code, layout: layout)
+            }
             residual = residual * 0.999 + distance * distance
             count = count * 0.999 + 1
+        }
+        if touchLayout == layout {
+            store?.set(["layout": touchSignature, "counts": touchCounts, "bias": verticalBias], forKey: "typingBoundaryTouches")
         }
         store?.set(["sum": residual, "count": count], forKey: "typingResiduals")
     }
@@ -139,6 +227,19 @@ final class TypingVocabulary {
             weight = [log(p), log1p(-p)]
         }
         return weight
+    }
+
+    private func hitsOwnKeys(_ word: String, trail: TapTrail, layout: KeyLayout) -> Bool {
+        guard !word.isEmpty, word.count == trail.taps.count else { return false }
+        return zip(word, trail.taps).allSatisfy { letter, tap in
+            guard tap.typed == letter, let point = tap.point, let code = Lexicon.codes[letter],
+                  let center = layout.centers[code] else { return false }
+            let distance = hypot(point.x - center.x, point.y - center.y)
+            return layout.centers.allSatisfy { other in
+                guard let other else { return true }
+                return hypot(point.x - other.x, point.y - other.y) >= distance
+            }
+        }
     }
 
     private func centered(_ word: String, trail: TapTrail, layout: KeyLayout) -> Bool {
@@ -221,6 +322,9 @@ final class TypingVocabulary {
     }
 
     func reconsider(_ held: Typist.HeldWord, input: WordInput, trail: TapTrail, chosen: String, layout: KeyLayout) -> String? {
+        if layout.space.contains(held.space) {
+            observeHeight(held.space.y, center: layout.space.midY, key: 30, layout: layout)
+        }
         let first = held.input.word, second = input.word
         guard !held.output.contains(" "), !chosen.contains(" "), second.first?.isLowercase == true,
               held.input.sentenceStart || first.first?.isLowercase == true,
@@ -262,7 +366,9 @@ final class TypingVocabulary {
             let parts = bestText.lowercased().split(separator: " ")
             for (i, word, taps) in [(0, first, held.taps), (1, second, trail)] {
                 let lower = word.lowercased()
-                if (parts.count != 2 || parts[i] != lower), centered(lower, trail: taps, layout: layout),
+                if parts.count == 2 && parts[i] == lower { continue }
+                if pickedWords.contains(lower) && hitsOwnKeys(lower, trail: taps, layout: layout) { return nil }
+                if centered(lower, trail: taps, layout: layout),
                    languages.contains(where: { language in
                        guard let lex = tables[language.code] else { return false }
                        return lex.node(lower).flatMap(lex.terminal) != nil
@@ -357,8 +463,17 @@ final class TypingVocabulary {
             func score(_ id: Int) -> Double { context + lex.logProbability(id, after: prev) }
             if word.isEmpty {
                 if let prev {
-                    for (rank, next) in lex.followers(prev, limit: 3).enumerated() {
-                        completions.append((lex.displayForm(next), context - Double(rank) * 0.1))
+                    let evidence: Double
+                    if input.previous.count == 1, let first = input.previous.first,
+                       let id = lex.node(first).flatMap(lex.terminal) {
+                        evidence = lex.logProbability(id, after: lex.sentenceStart)
+                    } else {
+                        evidence = context
+                    }
+                    for next in lex.followers(prev, limit: 3) {
+                        if let id = lex.node(next).flatMap(lex.terminal) {
+                            completions.append((lex.displayForm(next), evidence + lex.logProbability(id, after: prev)))
+                        }
                     }
                 }
                 continue
@@ -374,6 +489,12 @@ final class TypingVocabulary {
                 if reading.compound {
                     guard word.count >= 7, let first = reading.first,
                           lex.text(first).count >= 3, lex.text(reading.last).count >= 3 else { return nil }
+                    let joined = lex.text(first) + lex.text(reading.last)
+                    // Swedish permits productive compounds outside the bundled word list.
+                    // Require a Swedish sentence before changing letters to invent one.
+                    let swedishContext = languages.count == 1 || (!input.previous.isEmpty && context > log(0.6))
+                    guard joined == word || swedishContext || lex.node(joined).flatMap(lex.terminal) != nil ||
+                        languageWeights([lex.text(first), lex.text(reading.last)])[index] > log(0.9) else { return nil }
                 }
                 if word.count >= 7, let first = reading.first, !reading.compound,
                    readings[TapDecoder.Reading(first: first, last: reading.last, compound: true)] != nil,
@@ -389,6 +510,19 @@ final class TypingVocabulary {
             for (reading, value) in ranked.prefix(4) {
                 let lead = reading.first.map { lex.displayForm(lex.text($0)) + (reading.compound ? "" : " ") } ?? ""
                 candidates.append((lead + (reading.compound ? lex.text(reading.last) : lex.displayForm(lex.text(reading.last))), value))
+            }
+            if language.code == "en", codes.count >= 2, !word.contains("'"),
+               input.previous.isEmpty || context >= log(0.5) {
+                // A contraction keeps every letter tap. Compare its contextual probability
+                // with the literal directly instead of charging for a missed letter key.
+                for ending in ["t", "m", "d", "ll", "re", "ve", "s"] where word.count > ending.count && word.hasSuffix(ending) {
+                    let stem = String(word.dropLast(ending.count))
+                    if ending == "s", !["let", "it", "he", "she", "that", "there", "who", "what", "where", "how"].contains(stem) { continue }
+                    let form = stem + "'" + ending
+                    if let id = lex.node(form).flatMap(lex.terminal) {
+                        candidates.append((lex.displayForm(form), score(id) - literalCost - 2))
+                    }
+                }
             }
             for next in decoders[language.code]?.completions(limit: 4) ?? [] {
                 let text = lex.text(next.id)
@@ -406,8 +540,8 @@ final class TypingVocabulary {
                 costs[index][letter] - costs[index][codes[index]] <= 3
             }
         }
-        if let best, best.0.lowercased() != word, !protectedWords.contains(word),
-            !(literal.isFinite && centered(word, trail: trail, layout: layout)),
+        if let best, best.0.lowercased() != word, !protectedWords.contains(word), !pickedWords.contains(word),
+            !(literal.isFinite && best.0.lowercased().replacingOccurrences(of: "'", with: "") != word && centered(word, trail: trail, layout: layout)),
             typed.dropFirst() == typed.dropFirst().lowercased(), input.sentenceStart || typed.first?.isUppercase != true || shiftedName
         {
             var threshold = literal + 1
@@ -421,6 +555,17 @@ final class TypingVocabulary {
                     threshold = max(-16, threshold)
                 }
                 threshold += 2
+            }
+            if keptWords.contains(word), trail.taps.isEmpty || hitsOwnKeys(word, trail: trail, layout: layout) {
+                threshold += log(2)
+            }
+            let replacement = best.0.lowercased()
+            let englishContext = languages.firstIndex { $0.code == "en" }.map { weight[$0] >= log(0.9) } ?? false
+            if literal.isFinite, !replacement.contains("'"),
+               tables["sv"].flatMap({ lex in lex.node(word).flatMap(lex.terminal) }) == nil,
+               englishContext || (replacement.count == word.count && zip(word, replacement).filter({ $0 != $1 }).count >= 2),
+               hitsOwnKeys(word, trail: trail, layout: layout) {
+                threshold += 5
             }
             if best.1 >= threshold - literalCost {
                 result.automatic = display(best.0)

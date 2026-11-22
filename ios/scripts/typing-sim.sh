@@ -7,6 +7,7 @@ device="${1:?Pass a booted simulator UDID}"
 shift
 out=""
 pass=""
+typing_log=""
 replay=""
 layout=""
 spaces=""
@@ -16,6 +17,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --mode) pass="$pass --mode $2"; if [ "$2" = swipe ]; then metric=noisy_swipe_wer; fi; shift 2 ;;
         --replay) replay="$2"; shift 2 ;;
+        --typing-log) typing_log="$2"; shift 2 ;;
         --layout) layout="$2"; shift 2 ;;
         --observed-spaces) spaces=--observed-spaces; shift ;;
         --languages) language="$2"; pass="$pass --languages $2"; shift 2 ;;
@@ -33,7 +35,11 @@ xcrun --sdk iphonesimulator swiftc -O -target "$(uname -m)-apple-ios17.0-simulat
     "$root/Keyboard/Lexicon.swift" "$root/Keyboard/TapDecoder.swift" "$root/Keyboard/SwipeDecoder.swift" "$root/Shared/Bridge.swift" "$root/Shared/TypingLanguages.swift" \
     "$root"/Keyboard/TypingVocabulary.swift "$root/Keyboard/Typist.swift" \
     "$root/Keyboard/TypingKeys.swift" "$root/Keyboard/KeyboardControls.swift" \
-    "$root/tests/TypingSim.swift" -o "$scratch/sim"
+    "$root/tests/TypingSim.swift" "$root/tests/TypingLogReplay.swift" -o "$scratch/sim"
+if [ -n "$typing_log" ]; then
+    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --typing-log "$typing_log"
+    exit
+fi
 if [ -n "$layout" ]; then
     xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --languages "$language" --layout "$layout"
     exit

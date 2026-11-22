@@ -174,9 +174,16 @@ enum TypingVocabularyChecks {
     }
 
     @MainActor static func main() async {
-        let vocabulary = TypingVocabulary()
-        vocabulary.configure(.bilingual, dictionaries: UITextChecker.availableLanguages)
-        await withCheckedContinuation { continuation in vocabulary.load { continuation.resume() } }
+        let suite = UUID().uuidString
+        let store = UserDefaults(suiteName: suite)!
+        defer { store.removePersistentDomain(forName: suite) }
+        func loadedVocabulary() async -> TypingVocabulary {
+            let vocabulary = TypingVocabulary(store: store)
+            vocabulary.configure(.bilingual, dictionaries: UITextChecker.availableLanguages)
+            await withCheckedContinuation { continuation in vocabulary.load { continuation.resume() } }
+            return vocabulary
+        }
+        var vocabulary = await loadedVocabulary()
         let field = Field()
         precondition(SeeDocumentIdentifier(field) == field.documentIdentifier)
         precondition(SeeDocumentIdentifier(UIInputViewController().textDocumentProxy) == nil)
@@ -218,6 +225,26 @@ enum TypingVocabularyChecks {
         await typingEdits()
         gapHits()
         swipeWords(vocabulary)
+        // A user can pick the literal spelling, undo it, or keep typing after it.
+        func learnLiteral(_ word: String, after prefix: String, picked: Bool = false) {
+            field.documentContextBeforeInput = prefix + word
+            let trail = TapTrail(taps: word.map { Tap(typed: $0, shifted: false, point: nil) }, end: Caret(field))
+            vocabulary.learn(trail, chosen: word, picked: picked, layout: .standard(swedish: true))
+        }
+        learnLiteral("helpp", after: "We need ", picked: true)
+        learnLiteral("more", after: "We need help ")
+        precondition(suggestions("We need helpp").automatic == "help")
+        learnLiteral("helpp", after: "We need ", picked: true)
+        learnLiteral("today", after: "We need helpp ")
+        vocabulary = await loadedVocabulary()
+        precondition(suggestions("We need helpp").automatic == nil)
+        field.documentContextBeforeInput = "Det är br"
+        field.documentContextAfterInput = "aa"
+        vocabulary.observeEditInsideWord(Caret(field)!)
+        field.documentContextAfterInput = nil
+        learnLiteral("idag", after: "Det är braa ")
+        vocabulary = await loadedVocabulary()
+        precondition(suggestions("Det är braa").automatic == nil)
         print("English and Swedish typing checks passed")
     }
 }

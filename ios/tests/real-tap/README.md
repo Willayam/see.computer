@@ -25,3 +25,11 @@ python3 ios/tests/real-tap/detail.py "$D"
 ```
 
 The inferred raw keyboard uses the nearest letter center inside each supplied word group. Word error uses edit distance on the final field. Recovery counts raw-wrong words present in the first three suggestions before space. The breakdown scores each commit when its space is typed. Later revisions and multiword edits can change final sentence distance. Intervals resample sentences with replacement. They describe these participants and conditions.
+
+## Replay a phone log
+
+Run `ios/scripts/replay-typing-log.sh /path/to/typing-log.jsonl`. It creates a disposable simulator. Set `SIMULATOR_UDID` to use a booted simulator instead. The TSV contains private text and should stay outside the repository.
+
+Each line identifies a commit or a typing attempt interrupted by editing. The phone column shows the recorded insertion. Replay shows what the current keyboard inserts. For a suggestion pick, it shows the automatic candidate available before the pick, then follows the recorded pick. Kept follows later edits at the same position while the field context remains visible. An empty value means the span was erased during that observation. Next shows the replayed strip.
+
+The runner uses the recorded letter centers, pitch, space rectangle, timestamps, case and correction settings. It hit-tests letter and space taps when it can reproduce the geometry. For another geometry or a symbol key, it passes the recorded key and coordinates to the typist. Coverage goes to stderr. Moves and swipes restore recorded field context. At a word boundary the runner resynchronizes a divergent field so each new word has the user's actual preceding context. The simulator has its own system dictionaries. The log provides the starting touch spread but omits the phone's personal dictionary and complete touch history.

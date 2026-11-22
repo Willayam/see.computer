@@ -61,15 +61,16 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        keys.keyPrior = { [weak self] in
+        keys.keyPrior = { [weak self] layout in
             guard let self, let input = WordInput(self.textDocumentProxy), self.typist.trail.end == Caret(self.textDocumentProxy),
-                  let prior = self.completions.vocabulary.keyPrior(for: input, trail: self.typist.trail, layout: self.keys.keyLayout)
+                  let prior = self.completions.vocabulary.keyPrior(for: input, trail: self.typist.trail, layout: layout)
             else { return nil }
-            return (prior, self.completions.vocabulary.spread)
+            return (prior, self.completions.vocabulary.spread, self.completions.vocabulary.offsets(for: layout))
         }
         typist.reviseSwipe = completions.vocabulary.reviseSwipe
         typist.reconsider = { [completions, keys] in completions.vocabulary.reconsider($0, input: $1, trail: $2, chosen: $3, layout: keys.keyLayout) }
-        typist.committed = { [completions, keys] in completions.vocabulary.learn($0, chosen: $1, layout: keys.keyLayout) }
+        typist.editedInsideWord = completions.vocabulary.observeEditInsideWord
+        typist.committed = { [completions, keys] in completions.vocabulary.learn($0, chosen: $1, picked: $2, layout: keys.keyLayout) }
         layout()
         requestSupplementaryLexicon { [weak self] lexicon in
             DispatchQueue.main.async { self?.completions.use(lexicon) }
