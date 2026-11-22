@@ -51,6 +51,7 @@ final class Typist {
     private var lastSpace: (time: TimeInterval, caret: Caret)?
     private var lastLetter: Caret?
     private var suggestionSpace: Caret?
+    private var pendingSpace: Caret?
     private var lastCorrection: (caret: Caret, inserted: String, original: String)?
     struct HeldWord {
         let input: WordInput
@@ -97,7 +98,7 @@ final class Typist {
     }
 
     func startsSwipeWord(in proxy: UITextDocumentProxy) -> Bool {
-        if swipeChoices(in: proxy) != nil { return true }
+        if needsSpace(at: Caret(proxy)) { return true }
         guard let before = proxy.documentContextBeforeInput else { return !proxy.hasText }
         return Self.atWordStart(before)
     }
@@ -113,6 +114,11 @@ final class Typist {
     func swipeChoices(in proxy: UITextDocumentProxy) -> [String]? {
         guard let edit = swipeEdit, edit.caret == Caret(proxy) else { return nil }
         return edit.candidates
+    }
+
+    private func needsSpace(at caret: Caret?) -> Bool {
+        guard let caret else { return false }
+        return caret == swipeEdit?.caret || caret == pendingSpace
     }
 
     func insertSwipe(_ words: [String], uppercase: Bool, locked: Bool, in proxy: UITextDocumentProxy) {
@@ -156,9 +162,11 @@ final class Typist {
     }
 
     func checkSwipePosition(in proxy: UITextDocumentProxy) {
+        let caret = Caret(proxy)
+        if pendingSpace != caret { pendingSpace = nil }
         guard swipeEdit != nil || precedingSwipe != nil else { return }
         let expected = trail.end ?? swipeEdit?.caret ?? precedingSwipe?.caret
-        if expected != Caret(proxy) {
+        if expected != caret {
             precedingSwipe = nil
             swipeUndo = nil
             swipeEdit = nil
@@ -175,6 +183,7 @@ final class Typist {
         lastLetter = nil
         lastCorrection = nil
         suggestionSpace = nil
+        pendingSpace = nil
     }
 
     func choose(_ input: WordInput, _ candidate: String, in proxy: UITextDocumentProxy) {
@@ -193,15 +202,23 @@ final class Typist {
         }
         if trail.end == Caret(proxy) { committed?(trail, candidate) }
         forget()
-        let next = proxy.documentContextAfterInput?.first
+        let after = proxy.documentContextAfterInput
+        let next = after?.first
         let addSpace = next == nil || next.map { !$0.isWhitespace && !".,!?;:)]}".contains($0) } == true
         replaceSuffix(input.word, with: candidate + (addSpace ? " " : ""), in: proxy)
-        if next == " " { proxy.adjustTextPosition(byCharacterOffset: 1) }
-        if addSpace || next == " " { suggestionSpace = Caret(proxy) }
+        if next == " ", after?.count ?? 0 > 1 {
+            // Keep the separator before the next word so new taps don't join it.
+            if let caret = Caret(proxy), caret.field == input.field, caret.before.hasSuffix(candidate), caret.after == after {
+                pendingSpace = caret
+            }
+        } else {
+            if next == " " { proxy.adjustTextPosition(byCharacterOffset: 1) }
+            if addSpace || next == " " { suggestionSpace = Caret(proxy) }
+        }
     }
 
     func type(_ output: String, at point: CGPoint?, in proxy: UITextDocumentProxy) {
-        if output.count == 1, output.first?.isLetter == true, swipeChoices(in: proxy) != nil {
+        if output.count == 1, output.first?.isLetter == true, needsSpace(at: Caret(proxy)) {
             let swipe = precedingSwipe
             proxy.insertText(" ")
             if let swipe, let end = Caret(proxy), end.field == swipe.caret.field,
@@ -289,10 +306,14 @@ final class Typist {
                       moved.before == edit.caret.before + " " else { return }
                 proxy.deleteBackward()
             }
-            if let undo, edit.caret.before.hasSuffix(undo.inserted) {
-                replaceSuffix(undo.inserted, with: undo.original, in: proxy)
-            } else {
-                replaceSuffix(edit.prefix + edit.candidates[0], with: "", in: proxy)
+            let replacement = undo.flatMap { edit.caret.before.hasSuffix($0.inserted) ? $0 : nil }
+            let removed = replacement?.inserted ?? edit.prefix + edit.candidates[0]
+            let restored = replacement?.original ?? ""
+            replaceSuffix(removed, with: restored, in: proxy)
+            if let caret = Caret(proxy), caret.field == edit.caret.field,
+               caret.before == edit.caret.before.dropLast(removed.count) + restored,
+               !Self.atWordStart(caret.before) {
+                pendingSpace = caret
             }
             return
         }

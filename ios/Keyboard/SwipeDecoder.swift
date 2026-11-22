@@ -100,7 +100,8 @@ struct SwipeDecoder {
         let priority: Double
     }
 
-    func candidates(in lex: Lexicon, after previous: Int?) -> [(String, Double)] {
+    func candidates(in lex: Lexicon, after previous: Int?, relaxed: Bool = false) -> [(String, Double)] {
+        if relaxed { return candidates(along: path, passingLetters: true, in: lex, after: previous, relaxed: true) }
         let geometric = candidates(along: path, passingLetters: true, in: lex, after: previous)
         guard timedPath.count >= 2 else { return geometric }
         let timed = candidates(along: timedPath, passingLetters: false, in: lex, after: previous)
@@ -118,7 +119,7 @@ struct SwipeDecoder {
     }
 
     private func candidates(along path: [CGPoint], passingLetters: Bool, in lex: Lexicon,
-                            after previous: Int?) -> [(String, Double)] {
+                            after previous: Int?, relaxed: Bool = false) -> [(String, Double)] {
         guard path.count >= 2 else { return [] }
         var beam = [State(node: 0, segment: 0, fraction: 0, cost: 0, priority: 0)]
         var top = [(id: Int, score: Double)]()
@@ -130,8 +131,8 @@ struct SwipeDecoder {
                     let letter = lex.letter(child)
                     func advance(_ segment: Int, _ fraction: Double, _ penalty: Double) {
                         let cost = state.cost + penalty
-                        if segment == end, depth > 0, let id = lex.terminal(child) {
-                            let score = lex.logProbability(id, after: previous) - cost
+                        if (segment == end || relaxed), depth > 0, let id = lex.terminal(child) {
+                            let score = lex.logProbability(id, after: previous) - cost - 3 * Double(end - segment)
                             if top.count < 6 || score > top.last!.score {
                                 if let index = top.firstIndex(where: { $0.id == id }) {
                                     if top[index].score >= score { return }
@@ -142,7 +143,7 @@ struct SwipeDecoder {
                                 if top.count > 6 { top.removeLast() }
                             }
                         }
-                        let rank = cost - 3 * Double(segment) - lex.best(child) * 0.45
+                        let rank = cost - (relaxed ? 1.5 : 3) * Double(segment) - lex.best(child) * 0.45
                         next.append(State(node: child, segment: segment, fraction: fraction, cost: cost, priority: rank))
                     }
                     if state.node != 0 && (letter == lex.letter(state.node) || letter == 29) {
@@ -163,9 +164,15 @@ struct SwipeDecoder {
                     guard i < end else { continue }
                     let a = path[i], b = path[i + 1]
                     let d = distance(b)
-                    if d < 3.2 { advance(i + 1, 0, 4.8 * d) }
+                    if d < 3.2 || relaxed { advance(i + 1, 0, 4.8 * d) }
                     guard passingLetters else { continue }
-                    if let skip = skipCosts[i] {
+                    if relaxed {
+                        // A noisy stroke can contain turns that don't correspond to any letter.
+                        for segment in (i + 2)..<(end + 1) {
+                            let d = distance(path[segment])
+                            if d < 3.2 { advance(segment, 0, 4.8 * d + 3 * Double(segment - i - 1)) }
+                        }
+                    } else if let skip = skipCosts[i] {
                         let d = distance(path[i + 2])
                         if d < 3.2 { advance(i + 2, 0, 4.8 * d + skip) }
                     }
@@ -185,26 +192,6 @@ struct SwipeDecoder {
             }
             beam = Array(next.prefix(80))
         }
-        var candidates = top.map { (lex.displayForm(lex.text($0.id)), $0.score) }
-        var spelling = ""
-        var cost = 0.0
-        for point in path {
-            var nearest = 0, distance = Double.infinity
-            for (letter, center) in centers.enumerated() {
-                guard let center else { continue }
-                let dx = point.x - center.x, dy = point.y - center.y
-                let d = dx * dx + dy * dy
-                if d < distance { nearest = letter; distance = d }
-            }
-            guard distance < 1 else { return candidates }
-            let letter = Lexicon.alphabet[nearest]
-            if spelling.last != letter { spelling.append(letter) }
-            cost += 5 * distance
-        }
-        // Spell the keys only when no word fits the path, so a stray stroke never beats a real word.
-        if candidates.isEmpty, spelling.count >= 2, lex.node(spelling).flatMap(lex.terminal) == nil {
-            candidates.append((spelling, lex.unknown(spelling) - 6 - cost))
-        }
-        return candidates
+        return top.map { (lex.displayForm(lex.text($0.id)), $0.score) }
     }
 }

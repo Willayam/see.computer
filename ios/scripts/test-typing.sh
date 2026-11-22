@@ -10,6 +10,7 @@ xcrun --sdk iphonesimulator swiftc -target "$(uname -m)-apple-ios17.0-simulator"
     -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
     -import-objc-header "$root/Keyboard/DocumentIdentifier.h" \
     "$root/Keyboard/Lexicon.swift" "$root/Keyboard/TapDecoder.swift" "$root/Keyboard/SwipeDecoder.swift" "$root/Shared/Bridge.swift" "$root/Shared/TypingLanguages.swift" \
-    "$root/Keyboard/TypingVocabulary.swift" "$root/Keyboard/Typist.swift" "$root/tests/TypingVocabularyChecks.swift" \
+    "$root/Keyboard/TypingVocabulary.swift" "$root/Keyboard/Typist.swift" "$root/Keyboard/CompletionStrip.swift" \
+    "$root/Keyboard/TypingKeys.swift" "$root/Keyboard/KeyboardControls.swift" "$root/tests/TypingVocabularyChecks.swift" \
     -o "$scratch/check"
 xcrun simctl spawn "$device" "$scratch/check"

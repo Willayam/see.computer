@@ -71,7 +71,7 @@ private final class Pipeline {
             let words = endpoints ? SwipePrediction([String([nearest(samples.first!.point), nearest(samples.last!.point)])]) :
                 self.vocabulary.swipe(samples, layout: layout, before: self.field.text, previousChoices: self.typist.precedingChoices(in: self.field))
             self.swipeNanos.append(DispatchTime.now().uptimeNanoseconds - start)
-            if let shortWord, words.words.first?.word.lowercased() != shortWord { return false }
+            guard let best = words.words.first, shortWord == nil || best.word.lowercased() == shortWord else { return false }
             self.typist.insertSwipe(words, uppercase: upper, locked: locked, in: self.field)
             self.keys.updateCase(for: self.field)
             return true

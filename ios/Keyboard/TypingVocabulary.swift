@@ -204,13 +204,17 @@ final class TypingVocabulary {
         }
         let weights = languageWeights(previous)
         var scores = [String: Double]()
-        for (i, language) in languages.enumerated() {
-            guard let lex = tables[language.code] else { continue }
-            let prior = previous.isEmpty ? lex.sentenceStart : previous.last.flatMap(lex.node).flatMap(lex.terminal)
-            for (word, score) in decoder.candidates(in: lex, after: prior) {
-                scores[word] = max(scores[word] ?? -.infinity, score + weights[i])
+        func collect(relaxed: Bool) {
+            for (i, language) in languages.enumerated() {
+                guard let lex = tables[language.code] else { continue }
+                let prior = previous.isEmpty ? lex.sentenceStart : previous.last.flatMap(lex.node).flatMap(lex.terminal)
+                for (word, score) in decoder.candidates(in: lex, after: prior, relaxed: relaxed) {
+                    scores[word] = max(scores[word] ?? -.infinity, score + weights[i])
+                }
             }
         }
+        collect(relaxed: false)
+        if scores.isEmpty { collect(relaxed: true) }
         return scores.keys.sorted {
             scores[$0] == scores[$1] ? $0 < $1 : scores[$0]! > scores[$1]!
         }.prefix(6).map { SwipeChoice(word: $0, score: scores[$0]!) }
