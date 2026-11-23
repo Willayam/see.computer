@@ -20,7 +20,7 @@ struct SeeComputerApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(stats: session.stats)
                 .environmentObject(session)
                 .onOpenURL { url in
                     guard url == Bridge.armURL else { return }

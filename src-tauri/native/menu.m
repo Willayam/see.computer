@@ -201,22 +201,23 @@ static NSTextField *label_field(NSString *text, NSFont *font, NSColor *color,
 
 typedef struct {
     int present;
-    uint64_t total, previous, delta, today;
-    double wpm, times_typing, hours_saved, progress;
+    uint64_t total, previous, delta;
+    double wpm, times_typing, progress;
     int level_index;
-    uint64_t to_go;
-    const char *since, *level_name, *next_name;
+    const char *since_label, *today_label, *saved_label, *level_title, *level_detail;
 } SeeMenuHeader;
 
 static SeeMenuHeader gHeader;
-static NSString *gSince, *gLevelName, *gNextName;
+static NSString *gSinceLabel, *gTodayLabel, *gSavedLabel, *gLevelTitle, *gLevelDetail;
 static BOOL gOpeningHeader;
 
 void see_menu_set_header(const SeeMenuHeader *header) {
     gHeader = header ? *header : (SeeMenuHeader){0};
-    gSince = header && header->since ? @(header->since) : @"";
-    gLevelName = header && header->level_name ? @(header->level_name) : @"";
-    gNextName = header && header->next_name ? @(header->next_name) : @"";
+    gSinceLabel = header ? @(header->since_label) : @"";
+    gTodayLabel = header ? @(header->today_label) : @"";
+    gSavedLabel = header ? @(header->saved_label) : @"";
+    gLevelTitle = header ? @(header->level_title) : @"";
+    gLevelDetail = header ? @(header->level_detail) : @"";
 }
 
 static NSString *header_number(uint64_t value) {
@@ -234,6 +235,7 @@ static NSString *header_number(uint64_t value) {
 
 - (void)text:(NSString *)text x:(CGFloat)x y:(CGFloat)y width:(CGFloat)width
         size:(CGFloat)size weight:(NSFontWeight)weight color:(NSColor *)color {
+    if (!text.length) return;
     NSTextField *field = label_field(text, [NSFont monospacedDigitSystemFontOfSize:size weight:weight], color, 1);
     field.frame = NSMakeRect(x, y, width, size + 5);
     [self addSubview:field];
@@ -272,13 +274,14 @@ static NSString *header_number(uint64_t value) {
         BOOL dark = [[appearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]] isEqualToString:NSAppearanceNameDarkAqua];
         return dark ? accent : [NSColor colorWithSRGBRed:10/255.0 green:127/255.0 blue:180/255.0 alpha:1];
     }];
-    [self text:gSince.length ? [@"Dictated since " stringByAppendingString:gSince] : @"Words dictated"
+    [self text:gSinceLabel
              x:8 y:7 width:160 size:11 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
-    NSString *today = [NSString stringWithFormat:@"%@ today", header_number(gHeader.today)];
-    NSTextField *todayField = label_field(today, [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightMedium], NSColor.labelColor, 1);
-    todayField.alignment = NSTextAlignmentRight;
-    todayField.frame = NSMakeRect(160, 7, 84, 16);
-    [self addSubview:todayField];
+    if (gTodayLabel.length) {
+        NSTextField *todayField = label_field(gTodayLabel, [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightMedium], NSColor.labelColor, 1);
+        todayField.alignment = NSTextAlignmentRight;
+        todayField.frame = NSMakeRect(160, 7, 84, 16);
+        [self addSubview:todayField];
+    }
 
     NSString *digits = [NSString stringWithFormat:@"%llu", (unsigned long long)gHeader.total];
     NSString *gainText = gHeader.delta ? [@"+" stringByAppendingString:header_number(gHeader.delta)] : @"";
@@ -376,7 +379,9 @@ static NSString *header_number(uint64_t value) {
     }
     if (hasSpeed) {
         [self text:[NSString stringWithFormat:@"%.1fx faster than typing", gHeader.times_typing] x:8 y:124 width:136 size:11 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
-        NSTextField *saved = label_field(isnan(gHeader.hours_saved) ? @"" : [NSString stringWithFormat:@"%.1f hours saved", gHeader.hours_saved], [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular], NSColor.secondaryLabelColor, 1);
+    }
+    if (gSavedLabel.length) {
+        NSTextField *saved = label_field(gSavedLabel, [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular], NSColor.secondaryLabelColor, 1);
         saved.alignment = NSTextAlignmentRight;
         saved.frame = NSMakeRect(140, 124, 106, 16);
         [self addSubview:saved];
@@ -402,16 +407,20 @@ static NSString *header_number(uint64_t value) {
     badge.frame = NSMakeRect(17, 158 - top, 18, 18);
     badge.contentTintColor = NSColor.labelColor;
     [self addSubview:badge];
-    [self text:gLevelName.length ? gLevelName : @"First words" x:54 y:150 - top width:185 size:12 weight:NSFontWeightSemibold color:NSColor.labelColor];
-    [self text:gNextName.length ? [NSString stringWithFormat:@"%@ to %@", header_number(gHeader.to_go), gNextName] : @"All word levels reached" x:54 y:168 - top width:185 size:11 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
+    [self text:gLevelTitle x:54 y:150 - top width:185 size:12 weight:NSFontWeightSemibold color:NSColor.labelColor];
+    [self text:gLevelDetail x:54 y:168 - top width:185 size:11 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
     NSBox *line = [[NSBox alloc] initWithFrame:NSMakeRect(6, 196 - top, 240, 1)];
     line.boxType = NSBoxSeparator;
     [self addSubview:line];
     [self setAccessibilityElement:YES];
     [self setAccessibilityRole:NSAccessibilityGroupRole];
-    NSString *speed = hasSpeed ? [NSString stringWithFormat:@" %.0f words per minute, %.1f times typing speed.", gHeader.wpm, gHeader.times_typing] : @"";
-    NSString *next = gNextName.length ? [NSString stringWithFormat:@"%@ to %@", header_number(gHeader.to_go), gNextName] : @"All word levels reached";
-    [self setAccessibilityLabel:[NSString stringWithFormat:@"%@ words. %@ today.%@ %@. %@.", header_number(gHeader.total), header_number(gHeader.today), speed, gLevelName, next]];
+    NSString *speed = hasSpeed ? [NSString stringWithFormat:@"%.0f words per minute, %.1f times typing speed", gHeader.wpm, gHeader.times_typing] : @"";
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSString *part in @[gSinceLabel, [NSString stringWithFormat:@"%@ words", header_number(gHeader.total)],
+                             gTodayLabel, speed, gSavedLabel, gLevelTitle, gLevelDetail]) {
+        if (part.length) [parts addObject:part];
+    }
+    [self setAccessibilityLabel:[parts componentsJoinedByString:@". "]];
     [CATransaction commit];
 }
 @end
@@ -461,8 +470,8 @@ static CGFloat fill_body(NSView *body, CGFloat width, const SeeMenuRow *rows, in
     body.frame = NSMakeRect(0, 0, width, height);
     static SeeMenuHeaderView *cachedHeader;
     static NSString *cachedValues;
-    NSString *values = [NSString stringWithFormat:@"%@/%@/%@/%@/%@/%@/%@/%@", @(gHeader.total), @(gHeader.previous), @(gHeader.delta), @(gHeader.today), gSince, gLevelName, gNextName, @(gHeader.to_go)];
-    values = [values stringByAppendingFormat:@"/%@/%@/%@/%@", @(gHeader.wpm), @(gHeader.times_typing), @(gHeader.hours_saved), @(gHeader.progress)];
+    NSString *values = [NSString stringWithFormat:@"%@/%@/%@/%@/%@/%@/%@/%@", @(gHeader.total), @(gHeader.previous), @(gHeader.delta), gSinceLabel, gTodayLabel, gSavedLabel, gLevelTitle, gLevelDetail];
+    values = [values stringByAppendingFormat:@"/%@/%@/%@", @(gHeader.wpm), @(gHeader.times_typing), @(gHeader.progress)];
     values = [values stringByAppendingFormat:@"/%d", gHeader.level_index];
     BOOL reuse = !gOpeningHeader && [cachedValues isEqualToString:values];
     [body.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
