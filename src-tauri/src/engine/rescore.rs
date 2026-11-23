@@ -10,10 +10,10 @@ pub(super) struct Name {
 
 impl Name {
     pub(super) fn new(text: &str, pieces: &Pieces) -> Option<Self> {
-        let spoken = crate::learn::spoken(text);
+        let spoken = crate::sound::spoken(text);
         let classes = spoken
             .iter()
-            .map(|&c| crate::learn::sound_class(c))
+            .map(|&c| crate::sound::sound_class(c))
             .collect();
         Some(Self {
             lower: text.to_lowercase(),
@@ -47,10 +47,10 @@ pub(super) fn candidates(pieces: &[&str], names: &[Name]) -> Vec<SpanCandidate> 
     let word_spoken: Vec<(Vec<char>, Vec<u16>)> = words
         .iter()
         .map(|(_, _, text)| {
-            let spoken = crate::learn::spoken(text);
+            let spoken = crate::sound::spoken(text);
             let classes = spoken
                 .iter()
-                .map(|&c| crate::learn::sound_class(c))
+                .map(|&c| crate::sound::sound_class(c))
                 .collect();
             (spoken, classes)
         })
@@ -101,7 +101,7 @@ fn close(a: &[char], a_cls: &[u16], b: &[char], b_cls: &[u16]) -> bool {
     if a.len().abs_diff(b.len()) * 3 > n {
         return false;
     }
-    crate::learn::sound_cost_within(a, a_cls, b, b_cls, n as f32 * 0.27)
+    crate::sound::sound_cost_within(a, a_cls, b, b_cls, n as f32 * 0.27)
 }
 
 #[cfg(test)]
@@ -109,10 +109,10 @@ mod tests {
     use super::*;
 
     fn test_name(spelling: &str, token: usize) -> Name {
-        let spoken = crate::learn::spoken(spelling);
+        let spoken = crate::sound::spoken(spelling);
         let classes = spoken
             .iter()
-            .map(|&c| crate::learn::sound_class(c))
+            .map(|&c| crate::sound::sound_class(c))
             .collect();
         Name {
             lower: spelling.to_lowercase(),
@@ -154,12 +154,12 @@ mod tests {
             let lb = 1 + next() % 14;
             let a: Vec<char> = (0..la).map(|_| alphabet[next() % alphabet.len()]).collect();
             let b: Vec<char> = (0..lb).map(|_| alphabet[next() % alphabet.len()]).collect();
-            let ac: Vec<u16> = a.iter().map(|&c| crate::learn::sound_class(c)).collect();
-            let bc: Vec<u16> = b.iter().map(|&c| crate::learn::sound_class(c)).collect();
+            let ac: Vec<u16> = a.iter().map(|&c| crate::sound::sound_class(c)).collect();
+            let bc: Vec<u16> = b.iter().map(|&c| crate::sound::sound_class(c)).collect();
             let n = la.max(lb);
             let limit = n as f32 * 0.27;
-            let exact = crate::learn::sound_cost(&a, &b) <= limit;
-            let fast = crate::learn::sound_cost_within(&a, &ac, &b, &bc, limit);
+            let exact = crate::sound::sound_cost(&a, &b) <= limit;
+            let fast = crate::sound::sound_cost_within(&a, &ac, &b, &bc, limit);
             assert_eq!(fast, exact, "mismatch on {a:?} vs {b:?}");
         }
     }

@@ -23,6 +23,8 @@ mod filler;
 mod numbers;
 #[path = "../../../src-tauri/src/qos.rs"]
 mod qos;
+#[path = "../../../src-tauri/src/sound.rs"]
+mod sound;
 #[path = "../../../src-tauri/src/text.rs"]
 mod text;
 #[path = "../../../src-tauri/src/vocabulary.rs"]

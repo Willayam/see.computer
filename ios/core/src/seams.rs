@@ -51,6 +51,12 @@ pub mod context {
         pub source: &'static str,
     }
 
+    impl Term {
+        pub fn boosted(&self) -> bool {
+            self.source != "candidate"
+        }
+    }
+
     pub fn near_misses(
         text: &str,
         _terms: &[Term],

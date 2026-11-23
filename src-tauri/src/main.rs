@@ -33,6 +33,7 @@ mod setup;
 mod shadow;
 mod sharing;
 mod snapshot;
+mod sound;
 mod sounds_like;
 mod tally;
 mod target;
