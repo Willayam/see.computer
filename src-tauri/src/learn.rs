@@ -720,11 +720,14 @@ fn check_word(word: &str, language: &str) -> Option<bool> {
 
 /// Check a batch of pure-alphabetic words across `languages` with short-circuiting
 /// and a second pass on remaining unknowns (matching `memoized_word`'s race guard).
+/// Uses single-word `checkSpellingOfString:` for small batches (`<= 8`), where its
+/// ~0.15 ms/word cost beats `checkString:`'s ~1.5 ms fixed setup overhead.
 fn check_words_batch(
     words: &[&str],
     languages: &[String],
     deadline: std::time::Instant,
 ) -> Option<Vec<bool>> {
+    const SMALL_BATCH: usize = 8;
     let mut known = vec![false; words.len()];
     for _pass in 0..2 {
         for language in languages {
@@ -739,11 +742,22 @@ fn check_words_batch(
             if std::time::Instant::now() >= deadline {
                 return None;
             }
-            let subset: Vec<&str> = pending.iter().map(|&i| words[i]).collect();
-            let batch_res = check_batch_language(&subset, language)?;
-            for (idx, is_known) in pending.into_iter().zip(batch_res) {
-                if is_known {
-                    known[idx] = true;
+            if pending.len() <= SMALL_BATCH {
+                for idx in pending {
+                    if std::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    if check_word(words[idx], language)? {
+                        known[idx] = true;
+                    }
+                }
+            } else {
+                let subset: Vec<&str> = pending.iter().map(|&i| words[i]).collect();
+                let batch_res = check_batch_language(&subset, language)?;
+                for (idx, is_known) in pending.into_iter().zip(batch_res) {
+                    if is_known {
+                        known[idx] = true;
+                    }
                 }
             }
         }
@@ -1028,27 +1042,39 @@ pub fn warm_screen_words(text: &str, words: &Words) {
         }
     };
     for line in text.lines() {
+        let mut prev_cap_plain = false;
         for part in line.split_whitespace() {
-            let token = strip(strip(part).split(['\'', '’']).next().unwrap_or_default());
-            if token.len() > 64 {
+            let whole = strip(part);
+            let token = strip(whole.split(['\'', '’']).next().unwrap_or_default());
+            let contraction_lower =
+                token.len() < whole.len() && token.chars().all(char::is_lowercase);
+            let is_cap_plain = !contraction_lower
+                && token.len() <= 64
+                && token.chars().count() >= 3
+                && token.chars().all(char::is_alphabetic)
+                && token.chars().next().is_some_and(char::is_uppercase);
+            if contraction_lower || token.len() > 64 {
+                prev_cap_plain = false;
                 continue;
             }
             let letters = token.chars().filter(|c| c.is_alphabetic()).count();
             if letters < 2 {
+                prev_cap_plain = false;
                 continue;
             }
             if token.chars().all(char::is_alphabetic) {
                 let lower = token.to_lowercase();
-                if ORDINARY.contains(&lower.as_str()) {
-                    continue;
+                if !ORDINARY.contains(&lower.as_str()) {
+                    let upper = token.chars().filter(|c| c.is_uppercase()).count();
+                    let lower_n = token.chars().filter(|c| c.is_lowercase()).count();
+                    let capital_inside = token.chars().skip(1).any(char::is_uppercase);
+                    if upper > 0 && !(capital_inside && lower_n > 0) {
+                        push(token);
+                    }
+                    if letters >= 3 || prev_cap_plain {
+                        push(&lower);
+                    }
                 }
-                let upper = token.chars().filter(|c| c.is_uppercase()).count();
-                let lower_n = token.chars().filter(|c| c.is_lowercase()).count();
-                let capital_inside = token.chars().skip(1).any(char::is_uppercase);
-                if upper > 0 && !(capital_inside && lower_n > 0) {
-                    push(token);
-                }
-                push(&lower);
             } else if token.contains('-')
                 && !token.contains(['/', '.', '_'])
                 && !token.chars().any(char::is_numeric)
@@ -1059,6 +1085,7 @@ pub fn warm_screen_words(text: &str, words: &Words) {
                     }
                 }
             }
+            prev_cap_plain = is_cap_plain;
         }
     }
     words.warm_quickly(&batch);
@@ -1118,25 +1145,23 @@ pub fn screen_candidates(text: &str, words: &Words) -> Vec<String> {
     };
     for line in text.lines() {
         // "didn't" is a word, but its stem "didn" sounds like "don".
-        let tokens: Vec<&str> = line
+        let tokens: Vec<(&str, bool)> = line
             .split_whitespace()
             .map(|part| {
                 let whole = strip(part);
                 let stem = strip(whole.split(['\'', '’']).next().unwrap_or_default());
-                if stem.len() < whole.len() && stem.chars().all(char::is_lowercase) {
+                let token = if stem.len() < whole.len() && stem.chars().all(char::is_lowercase) {
                     ""
                 } else {
                     stem
-                }
+                };
+                (token, part.ends_with(['.', '!', '?', ':']))
             })
             .collect();
         let mut opens = true;
-        for (index, token) in tokens.iter().enumerate() {
+        for (index, &(token, closes)) in tokens.iter().enumerate() {
             let opened = opens;
-            opens = line
-                .split_whitespace()
-                .nth(index)
-                .is_some_and(|part| part.ends_with(['.', '!', '?', ':']));
+            opens = closes;
             let letters = token.chars().filter(|c| c.is_alphabetic()).count();
             if letters < 3 || token.len() > 64 {
                 continue;
@@ -1154,9 +1179,9 @@ pub fn screen_candidates(text: &str, words: &Words) -> Vec<String> {
                 || names_something(token, false, words)
                 || (plain && !ordinary(token));
             if unusual {
-                keep((*token).to_owned(), &mut found);
+                keep(token.to_owned(), &mut found);
             }
-            let Some(next) = tokens.get(index + 1) else {
+            let Some(&(next, _)) = tokens.get(index + 1) else {
                 continue;
             };
             let capitalized = |word: &str| word.chars().next().is_some_and(char::is_uppercase);
