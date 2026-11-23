@@ -1,21 +1,13 @@
 import AVFAudio
 import SwiftUI
 import UIKit
-import UniformTypeIdentifiers
 
 struct ContentView: View {
     @ObservedObject var stats: StatsStore
     @EnvironmentObject private var session: Session
     @Environment(\.scenePhase) private var scenePhase
-    @State private var tryIt = ""
-    @State private var pickingFolder = false
-    @State private var termCount = DictionaryFolder.termCount()
-    @State private var connected = DictionaryFolder.isConnected
+    @State private var showingSettings = false
     @State private var copied: Date?
-    @AppStorage(TypingLanguages.key, store: TypingLanguages.store) private var typingLanguages = TypingLanguages.device
-    @AppStorage(TypingLanguages.neuralSwipeKey, store: TypingLanguages.store) private var newSwipeModel = true
-    @AppStorage(TypingLog.key, store: TypingLog.store) private var keepsTypingLog = true
-    @FocusState private var tryItFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -26,30 +18,43 @@ struct ContentView: View {
                             .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                     }
                 }
-                Section { status }
-                Section {
-                    TextField("Try it. Switch to the see.computer keyboard here.", text: $tryIt, axis: .vertical)
-                        .focused($tryItFocused)
-                        .lineLimit(2...6)
+                if needsAttention {
+                    Section { status }
                 }
-                setup
-                settings
                 history
             }
             .navigationTitle("see.computer")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { micButton }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Settings")
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if copied != nil {
+                    CopiedToast()
+                        .padding(.bottom, 12)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+        }
+        .sheet(isPresented: $showingSettings) { SettingsView() }
+        .sensoryFeedback(trigger: copied) { _, new in new == nil ? nil : .success }
+        .task(id: copied) {
+            guard copied != nil else { return }
+            try? await Task.sleep(for: .seconds(1.6))
+            guard !Task.isCancelled else { return }
+            withAnimation(.smooth) { copied = nil }
         }
         .fullScreenCover(isPresented: $session.showSwipeBack) { SwipeBackView() }
-        .fileImporter(isPresented: $pickingFolder, allowedContentTypes: [.folder]) { result in
-            guard case .success(let url) = result else { return }
-            DictionaryFolder.connect(url)
-            connected = true
-            refreshDictionary()
-            session.stats.refresh()
-        }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
-            refreshDictionary()
-            session.stats.refresh()
+            syncDictionary()
         }
         .onChange(of: session.stage) { _, stage in
             // Auto-lock would suspend the app and kill the download.
@@ -59,39 +64,67 @@ struct ContentView: View {
                 UIApplication.shared.isIdleTimerDisabled = false
             }
         }
-        .task {
-            refreshDictionary()
-            session.stats.refresh()
-        }
+        .task { syncDictionary() }
     }
 
-    private func refreshDictionary() {
-        DispatchQueue.global(qos: .utility).async {
-            DictionaryFolder.sync()
-            let count = DictionaryFolder.termCount()
-            DispatchQueue.main.async { termCount = count }
+    private func syncDictionary() {
+        DispatchQueue.global(qos: .utility).async { DictionaryFolder.sync() }
+        session.stats.refresh()
+    }
+
+    private var micIsOff: Bool { session.state.phase == .off }
+    private var micDenied: Bool { AVAudioApplication.shared.recordPermission == .denied }
+
+    private var micNeedsAttention: Bool { micIsOff && (session.state.problem != nil || micDenied) }
+
+    private var needsAttention: Bool {
+        if case .ready = session.stage { return micNeedsAttention }
+        return true
+    }
+
+    private var micButton: some View {
+        Button {
+            if micIsOff {
+                Task { await session.arm() }
+            } else {
+                session.turnOff()
+            }
+        } label: {
+            Image(systemName: micIsOff ? "mic.slash" : "mic.fill")
+                .contentTransition(.symbolEffect(.replace))
         }
+        .tint(micIsOff ? .secondary : .accentColor)
+        .accessibilityLabel(micIsOff ? "Turn on the microphone" : "Turn off the microphone")
     }
 
     @ViewBuilder private var status: some View {
         switch session.stage {
         case .downloading(let percent):
-            Label("Downloading the speech model, \(percent)%. Keep this screen open.", systemImage: "arrow.down.circle")
+            ProgressView(value: Double(percent), total: 100) {
+                Text("Downloading the speech model")
+            } currentValueLabel: {
+                Text("\(percent)%. Keep this screen open.")
+            }
+            .padding(.vertical, 4)
         case .failed(let message):
             VStack(alignment: .leading, spacing: 8) {
                 Label(message, systemImage: "exclamationmark.triangle")
                 Button("Try again") { session.retryEngine() }
             }
         case .waiting, .loading:
-            Label("Loading the speech model", systemImage: "hourglass")
+            Label {
+                Text("Loading the speech model")
+            } icon: {
+                ProgressView()
+            }
         case .ready:
             EmptyView()
         }
-        if session.state.phase == .off {
+        if micNeedsAttention {
             HStack {
-                Label(session.state.problem ?? "Microphone off", systemImage: "mic.slash")
+                Label(session.state.problem ?? "Microphone access is off.", systemImage: "mic.slash")
                 Spacer()
-                if AVAudioApplication.shared.recordPermission == .denied {
+                if micDenied {
                     Button("Settings") {
                         UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
                     }
@@ -99,74 +132,80 @@ struct ContentView: View {
                     Button("Turn on") { Task { await session.arm() } }
                 }
             }
-        } else {
-            HStack {
-                Label("Microphone ready", systemImage: "mic.fill")
-                Spacer()
-                Button("Turn off") { session.turnOff() }
-            }
-        }
-    }
-
-    private var setup: some View {
-        Section("Keyboard") {
-            Picker("Typing languages", selection: $typingLanguages) {
-                ForEach(TypingLanguages.allCases) { Text($0.label).tag($0) }
-            }
-            .onChange(of: typingLanguages) { _, _ in Signals.post(.typingLanguagesChanged) }
-            Toggle("New swipe model", isOn: $newSwipeModel)
-            Text("Swipe typing powered by FUTO Swipe")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            Toggle("Keep a typing log", isOn: $keepsTypingLog)
-                .onChange(of: keepsTypingLog) { _, on in if !on { TypingLog.erase() } }
-            Button("Add the keyboard and allow Full Access") {
-                UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
-            }
-            Text("In Settings, open Keyboards, turn on see.computer, then turn on Allow Full Access. The keyboard needs it to talk to this app. Audio and text stay on this iPhone. The typing log records each key, swipe and correction so mistyped words can be studied later. Turning it off deletes it.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var settings: some View {
-        Section("Settings") {
-            Picker("Keep the mic ready for", selection: $session.readyFor) {
-                ForEach(ReadyFor.allCases) { Text($0.label).tag($0) }
-            }
-            if connected {
-                LabeledContent("Dictionary", value: "\(termCount) words")
-                Button("Disconnect the dictionary folder", role: .destructive) {
-                    DictionaryFolder.disconnect()
-                    connected = false
-                    session.stats.refresh()
-                }
-            } else {
-                Button("Use the dictionary from your Mac") { pickingFolder = true }
-                Text("Choose iCloud Drive, Documents, see.computer.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
         }
     }
 
     @ViewBuilder private var history: some View {
-        if !session.recent.isEmpty {
+        if session.recent.isEmpty {
+            Section {
+                ContentUnavailableView(
+                    "No dictations yet",
+                    systemImage: "waveform",
+                    description: Text("Switch to the see.computer keyboard in any app and tap Dictate.")
+                )
+            }
+        } else {
             Section("Recent") {
                 ForEach(session.recent) { entry in
                     Button {
                         UIPasteboard.general.string = entry.text
-                        copied = entry.at
+                        withAnimation(.smooth) { copied = Date() }
                     } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(entry.text).foregroundStyle(.primary)
-                            Text(copied == entry.at ? "Copied" : entry.at.formatted(date: .abbreviated, time: .shortened))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        // A button's hierarchical styles resolve to its tint, so the
+                        // colors here are concrete.
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(entry.text)
+                                .foregroundStyle(Color.primary)
+                                .multilineTextAlignment(.leading)
+                            Text(Self.stamp(entry.at))
+                                .font(.footnote)
+                                .foregroundStyle(Color.secondary)
                         }
+                        .padding(.vertical, 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .contextMenu {
+                        Button("Copy", systemImage: "doc.on.doc") {
+                            UIPasteboard.general.string = entry.text
+                            withAnimation(.smooth) { copied = Date() }
+                        }
+                        ShareLink(item: entry.text)
                     }
                 }
             }
+        }
+    }
+
+    private static func stamp(_ date: Date) -> String {
+        let time = date.formatted(date: .omitted, time: .shortened)
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) { return time }
+        if calendar.isDateInYesterday(date) { return "Yesterday, \(time)" }
+        if calendar.isDate(date, equalTo: Date(), toGranularity: .year) {
+            return "\(date.formatted(.dateTime.month(.abbreviated).day())), \(time)"
+        }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
+private struct CopiedToast: View {
+    var body: some View {
+        Label("Copied", systemImage: "checkmark.circle.fill")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(Color.primary)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .glassCapsule()
+    }
+}
+
+private extension View {
+    @ViewBuilder func glassCapsule() -> some View {
+        if #available(iOS 26, *) {
+            glassEffect(.regular, in: .capsule)
+        } else {
+            background(.regularMaterial, in: Capsule())
+                .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
         }
     }
 }
