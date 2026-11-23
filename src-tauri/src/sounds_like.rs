@@ -59,7 +59,7 @@ fn spelling(text: &str) -> String {
 fn protected_prefix(text: &str, name: &str) -> Option<usize> {
     let prefix = text.get(..name.len())?;
     (!prefix.is_empty()
-        && prefix.eq_ignore_ascii_case(name)
+        && prefix.to_lowercase() == name.to_lowercase()
         && !text[name.len()..].starts_with(char::is_alphanumeric))
     .then_some(name.len())
 }
@@ -125,6 +125,7 @@ pub fn rewrite(
                 ends.push(rest.len() - next.len() + len);
             }
         }
+        let opens = out.trim_end().is_empty() || out.trim_end().ends_with(['.', '!', '?']);
         let mut used = end;
         let mut replacement = None;
         if word.starts_with(char::is_uppercase) {
@@ -142,7 +143,12 @@ pub fn rewrite(
                 let mut hits = candidates.iter().filter(|(_, k, letters)| {
                     *k == sound && strsim::osa_distance(letters, &heard) <= 2
                 });
+                // A sentence capitalizes "Make", so it is a word, not a misheard
+                // "Mike". Mid-sentence, a capital marks a name ("Kayla").
                 if let (Some((name, _, _)), None) = (hits.next(), hits.next()) {
+                    if opens && span.split(' ').all(|part| words.knows_quickly(part)) {
+                        continue;
+                    }
                     replacement = Some(*name);
                     used = n;
                     break;
@@ -186,6 +192,30 @@ mod tests {
         assert_eq!(rewrite("Can we", &name, &[], &words), "Can we");
         let name = [term("Kavilo")];
         assert_eq!(rewrite("Cavillo said", &name, &[], &words), "Kavilo said");
+    }
+
+    #[test]
+    fn sentence_openers_stay_names_mid_sentence_change_and_swedish_saved_words_hold() {
+        let screen = |text: &str| crate::context::Term {
+            text: text.into(),
+            source: "screen",
+        };
+        let words = crate::learn::Words::from_list(&["make", "sure", "call", "a"]);
+        let names = [screen("Mike"), screen("Kalle")];
+        assert_eq!(rewrite("Make sure", &names, &[], &words), "Make sure");
+        assert_eq!(rewrite("Call a cab", &names, &[], &words), "Call a cab");
+        assert_eq!(
+            rewrite("Ok. Make sure", &names, &[], &words),
+            "Ok. Make sure"
+        );
+        let words = crate::learn::Words::from_list(&["kayla", "write"]);
+        let name = [screen("Kaylo")];
+        assert_eq!(
+            rewrite("write Kayla now", &name, &[], &words),
+            "write Kaylo now"
+        );
+        let name = [screen("Åland")];
+        assert_eq!(rewrite("Öland is", &name, &["öland"], &words), "Öland is");
     }
 
     #[test]

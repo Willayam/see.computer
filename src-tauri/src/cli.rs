@@ -376,6 +376,7 @@ fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
         let mut total = crate::eval::Score::default();
         let mut count = 0;
         let mut skipped = parse_skipped;
+        let mut screened = false;
         for clip in clips {
             if let Some(screen) = &clip.screen {
                 let text = std::fs::read_to_string(screen).unwrap_or_default();
@@ -395,6 +396,9 @@ fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
                     (started.elapsed() - extracted).as_secs_f64() * 1_000.0,
                     gathered.len()
                 );
+                screened = true;
+            } else if std::mem::take(&mut screened) {
+                engine.set_context(&context);
             }
             let audio = match crate::mic::Audio16k::from_wav(&clip.path) {
                 Ok(audio) => audio,

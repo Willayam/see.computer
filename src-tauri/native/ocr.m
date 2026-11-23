@@ -229,7 +229,9 @@ static void RecognizeDisplays(SCShareableContent *content, void (^complete)(NSAr
         }];
     }];
     dispatch_group_notify(group, queue, ^{
-        complete([texts containsObject:[NSNull null]] ? nil : texts);
+        // One sleeping or failed display shouldn't hide the text on the others.
+        [texts removeObject:[NSNull null]];
+        complete(texts);
     });
 }
 

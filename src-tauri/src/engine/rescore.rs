@@ -2,7 +2,7 @@ use crate::boost::Pieces;
 use parakeet_rs::SpanCandidate;
 
 pub(super) struct Name {
-    spelling: String,
+    lower: String,
     spoken: Vec<char>,
     classes: Vec<u16>,
     tokens: Vec<usize>,
@@ -16,7 +16,7 @@ impl Name {
             .map(|&c| crate::learn::sound_class(c))
             .collect();
         Some(Self {
-            spelling: text.to_owned(),
+            lower: text.to_lowercase(),
             spoken,
             classes,
             tokens: pieces.encode(text)?,
@@ -26,6 +26,9 @@ impl Name {
 
 pub(super) fn candidates(pieces: &[&str], names: &[Name]) -> Vec<SpanCandidate> {
     let mut words: Vec<(usize, usize, String)> = Vec::new();
+    // A word glued to punctuation ("\"Lar ston") can't take a name's
+    // leading space without leaving one after the quote.
+    let mut glued = Vec::new();
     for (index, piece) in pieces.iter().enumerate() {
         let text = piece.trim_start_matches('▁');
         if !text.chars().all(char::is_alphanumeric) {
@@ -39,6 +42,7 @@ pub(super) fn candidates(pieces: &[&str], names: &[Name]) -> Vec<SpanCandidate> 
             }
         }
         words.push((index, index + 1, text.to_owned()));
+        glued.push(index > 0 && !piece.starts_with('▁'));
     }
     let word_spoken: Vec<(Vec<char>, Vec<u16>)> = words
         .iter()
@@ -55,7 +59,7 @@ pub(super) fn candidates(pieces: &[&str], names: &[Name]) -> Vec<SpanCandidate> 
     let mut heard = String::new();
     let mut spoken = Vec::new();
     let mut classes = Vec::new();
-    for start in 0..words.len() {
+    for start in (0..words.len()).filter(|&start| !glued[start]) {
         heard.clear();
         spoken.clear();
         classes.clear();
@@ -75,10 +79,10 @@ pub(super) fn candidates(pieces: &[&str], names: &[Name]) -> Vec<SpanCandidate> 
             for name in names {
                 if !close(&spoken, &classes, &name.spoken, &name.classes)
                     || (spoken.len() > name.spoken.len() && spoken.starts_with(&name.spoken))
-                    || heard.eq_ignore_ascii_case(&name.spelling)
+                    || heard.to_lowercase() == name.lower
                     || heard
                         .split_whitespace()
-                        .any(|w| w.eq_ignore_ascii_case(&name.spelling))
+                        .any(|w| w.to_lowercase() == name.lower)
                 {
                     continue;
                 }
@@ -111,7 +115,7 @@ mod tests {
             .map(|&c| crate::learn::sound_class(c))
             .collect();
         Name {
-            spelling: spelling.into(),
+            lower: spelling.to_lowercase(),
             spoken,
             classes,
             tokens: vec![token],
@@ -126,6 +130,8 @@ mod tests {
         let split = candidates(&["▁Nor", "va", ".", "▁tek"], &names);
         assert!(split.iter().all(|c| c.span.end <= 2 || c.span.start >= 3));
         assert!(candidates(&["▁Norvatek"], &names).is_empty());
+        let quoted = candidates(&["▁\"", "Nor", "va", "▁tek", "\""], &names);
+        assert!(quoted.iter().all(|c| c.span.start != 1));
     }
 
     #[test]

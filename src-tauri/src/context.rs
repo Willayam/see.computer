@@ -345,7 +345,7 @@ mod tests {
             "Kindle about",
             "New",
             "didn",
-            "Mont",
+            "Finance Click",
         ] {
             assert!(
                 !candidates.contains(&ordinary.to_owned()),

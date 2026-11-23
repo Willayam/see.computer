@@ -1145,7 +1145,7 @@ pub fn screen_candidates(text: &str, words: &Words) -> Vec<String> {
     };
     for line in text.lines() {
         // "didn't" is a word, but its stem "didn" sounds like "don".
-        let tokens: Vec<(&str, bool)> = line
+        let tokens: Vec<(&str, bool, bool)> = line
             .split_whitespace()
             .map(|part| {
                 let whole = strip(part);
@@ -1155,11 +1155,15 @@ pub fn screen_candidates(text: &str, words: &Words) -> Vec<String> {
                 } else {
                     stem
                 };
-                (token, part.ends_with(['.', '!', '?', ':']))
+                (
+                    token,
+                    part.ends_with(['.', '!', '?', ':']),
+                    part.ends_with(char::is_alphanumeric),
+                )
             })
             .collect();
         let mut opens = true;
-        for (index, &(token, closes)) in tokens.iter().enumerate() {
+        for (index, &(token, closes, bare)) in tokens.iter().enumerate() {
             let opened = opens;
             opens = closes;
             let letters = token.chars().filter(|c| c.is_alphabetic()).count();
@@ -1181,12 +1185,14 @@ pub fn screen_candidates(text: &str, words: &Words) -> Vec<String> {
             if unusual {
                 keep(token.to_owned(), &mut found);
             }
-            let Some(&(next, _)) = tokens.get(index + 1) else {
+            let Some(&(next, _, _)) = tokens.get(index + 1) else {
                 continue;
             };
             let capitalized = |word: &str| word.chars().next().is_some_and(char::is_uppercase);
+            // "Pellmark. Click" and "Pellmark, Click" are two things.
             if capitalized(token)
                 && plain
+                && bare
                 && next.chars().count() >= 2
                 && next.chars().all(char::is_alphabetic)
                 && (capitalized(next) || !ordinary(next))

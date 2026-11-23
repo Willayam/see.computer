@@ -160,6 +160,14 @@ fn write_external(original: &Path, prepared: &Path) -> ort::Result<()> {
     Ok(())
 }
 
+/// Screen names with an empty vocabulary still need the rescoring pass.
+struct Unbiased;
+
+impl TokenBias for Unbiased {
+    fn bias(&mut self, _: &mut [f32]) {}
+    fn emitted(&mut self, _: usize) {}
+}
+
 /// The two passes every transcript goes through before anyone sees it.
 fn tidy(raw: &str) -> String {
     crate::numbers::normalise(&crate::filler::strip(raw))
@@ -201,8 +209,9 @@ impl Engine for Parakeet {
             self.rebuild_boost();
         }
         let active_terms = self.active_terms();
-        let pair =
-            self.boost.is_some() && std::env::var("SEE_COMPUTER_BOOST_MERGE").as_deref() != Ok("0");
+        let pair = (self.boost.is_some() || !self.names.is_empty())
+            && std::env::var("SEE_COMPUTER_BOOST_MERGE").as_deref() != Ok("0");
+        let mut unbiased = Unbiased;
         let (plain, result) = if pair {
             let (plain, boosted) = if self.names.is_empty() {
                 self.model.transcribe_samples_with_bias_pair(
@@ -218,7 +227,10 @@ impl Engine for Parakeet {
                     16_000,
                     1,
                     Some(TimestampMode::Sentences),
-                    self.boost.as_mut().expect("checked boost"),
+                    match self.boost.as_mut() {
+                        Some(boost) => boost as &mut dyn TokenBias,
+                        None => &mut unbiased,
+                    },
                     |pieces| super::rescore::candidates(pieces, &self.names),
                     12.0,
                 )
