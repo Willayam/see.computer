@@ -235,6 +235,14 @@ impl Panel {
         drop(totals);
         let mut rows = Vec::new();
         rows.extend(self.problem_rows());
+        if self.updater.ready() {
+            rows.push(item(
+                "update",
+                &self.updater.label(),
+                false,
+                Some("arrow.down.circle"),
+            ));
+        }
         // Words a slow engine still owes. App Support is local, so counting
         // here cannot stall the main thread the way ~/Documents can.
         let saved = self.saved.list().len();
@@ -398,7 +406,9 @@ impl Panel {
             open_at_login(&self.app),
             None,
         ));
-        rows.push(item("update", &self.updater.label(), false, None));
+        if !self.updater.ready() {
+            rows.push(item("update", &self.updater.label(), false, None));
+        }
         rows
     }
 
