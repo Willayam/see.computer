@@ -109,9 +109,14 @@ fn open(dir: &Path) -> Result<Parakeet, EngineError> {
         .map(|n| n.get())
         .unwrap_or(4)
         .min(8);
+    // The 17 MB decoder_joint runs tiny single-step ops dozens of times per
+    // utterance, so single-threaded prepacked execution avoids per-step
+    // thread-pool barriers while keeping the 621 MB encoder mmapped.
+    let decoder_config = parakeet_rs::ExecutionConfig::default().with_intra_threads(1);
     let config = parakeet_rs::ExecutionConfig::default()
         .with_intra_threads(threads)
-        .with_custom_configure(|builder| Ok(builder.with_prepacking(false)?));
+        .with_custom_configure(|builder| Ok(builder.with_prepacking(false)?))
+        .with_decoder_config(decoder_config);
     parakeet_rs::ParakeetTDT::from_pretrained(dir, Some(config))
         .map(|model| Parakeet {
             model,

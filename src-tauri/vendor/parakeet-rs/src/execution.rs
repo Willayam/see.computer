@@ -57,6 +57,9 @@ pub struct ModelConfig {
     /// Only used when execution_provider is CoreML.
     pub coreml_cache_dir: Option<PathBuf>,
     pub coreml_compute_units: CoreMLComputeUnits,
+    /// Optional separate execution config for `decoder_joint`, which runs
+    /// tiny single-step graphs where multi-thread barriers hurt latency.
+    pub decoder_config: Option<Box<ModelConfig>>,
 }
 
 impl fmt::Debug for ModelConfig {
@@ -88,6 +91,7 @@ impl Default for ModelConfig {
             configure: None,
             coreml_cache_dir: None,
             coreml_compute_units: CoreMLComputeUnits::default(),
+            decoder_config: None,
         }
     }
 }
@@ -131,6 +135,11 @@ impl ModelConfig {
     /// Defaults to [`CoreMLComputeUnits::CpuAndGpu`];
     pub fn with_coreml_compute_units(mut self, units: CoreMLComputeUnits) -> Self {
         self.coreml_compute_units = units;
+        self
+    }
+
+    pub fn with_decoder_config(mut self, config: ModelConfig) -> Self {
+        self.decoder_config = Some(Box::new(config));
         self
     }
     pub(crate) fn build_session(&self, path: &Path) -> Result<Session> {

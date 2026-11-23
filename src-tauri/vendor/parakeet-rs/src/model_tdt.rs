@@ -78,7 +78,11 @@ impl ParakeetTDTModel {
         let config = TDTModelConfig::new(vocab_size);
 
         let encoder = exec_config.build_session(&encoder_path)?;
-        let decoder_joint = exec_config.build_session(&decoder_joint_path)?;
+        let decoder_joint = exec_config
+            .decoder_config
+            .as_deref()
+            .unwrap_or(&exec_config)
+            .build_session(&decoder_joint_path)?;
 
         Ok(Self {
             encoder,
