@@ -4,6 +4,7 @@ import UIKit
 import UniformTypeIdentifiers
 
 struct ContentView: View {
+    @ObservedObject var stats: StatsStore
     @EnvironmentObject private var session: Session
     @Environment(\.scenePhase) private var scenePhase
     @State private var tryIt = ""
@@ -19,9 +20,11 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section {
-                    StatsCell(store: session.stats)
-                        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                if stats.value.total > 0 {
+                    Section {
+                        StatsCell(store: stats)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                    }
                 }
                 Section { status }
                 Section {

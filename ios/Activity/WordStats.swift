@@ -3,6 +3,7 @@ import Foundation
 struct WordStats: Codable, Hashable, Sendable {
     var total: Int
     var today: Int
+    var firstDictationDay: String? = nil
     var wpm: Int?
     var todayWpm: Int?
     var timesTyping: Double?
@@ -14,6 +15,21 @@ struct WordStats: Codable, Hashable, Sendable {
     var progress: Double
 
     static let empty = WordTally.compute(days: [], speedLines: "", today: Date())
+
+    var savedMinutes: Double? {
+        guard let wpm, wpm > 40 else { return nil }
+        let minutes = Double(total) * Double(wpm - 40) / (40 * Double(wpm))
+        return minutes >= 1 ? minutes : nil
+    }
+
+    func sinceLabel(today: Date = Date()) -> String {
+        let formatter = WordTally.dayFormatter()
+        guard let firstDictationDay, let first = formatter.date(from: firstDictationDay),
+              let elapsed = formatter.calendar.dateComponents([.day], from: first, to: today).day,
+              elapsed >= 7 else { return "Words dictated" }
+        formatter.dateFormat = "d MMM"
+        return "Dictated since \(formatter.string(from: first))"
+    }
 }
 
 enum WordTally {
@@ -49,7 +65,7 @@ enum WordTally {
         return date
     }
 
-    private static func dayFormatter() -> DateFormatter {
+    fileprivate static func dayFormatter() -> DateFormatter {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = Calendar(identifier: .gregorian)
@@ -63,6 +79,7 @@ enum WordTally {
         let todayKey = formatter.string(from: today)
         var total = 0
         var todayWords = 0
+        var firstDictationDay: String?
         let headings = try! NSRegularExpression(pattern: #"(?m)^## ([0-9]{2}):([0-9]{2}):([0-9]{2})\n\n"#)
         for day in days {
             guard let key = dayName(day.name) else { continue }
@@ -70,6 +87,9 @@ enum WordTally {
             let matches = headings.matches(in: day.text, range: NSRange(location: 0, length: text.length)).filter {
                 Int(text.substring(with: $0.range(at: 1)))! < 24 &&
                 Int(text.substring(with: $0.range(at: 2)))! < 60 && Int(text.substring(with: $0.range(at: 3)))! < 60
+            }
+            if !matches.isEmpty {
+                firstDictationDay = min(firstDictationDay ?? key, key)
             }
             for (index, heading) in matches.enumerated() {
                 let start = NSMaxRange(heading.range)
@@ -102,7 +122,8 @@ enum WordTally {
         let index = levels.prefix { total >= $0.1 }.count
         let at = index == 0 ? 0 : levels[index - 1].1
         let next = index < levels.count ? levels[index] : nil
-        return WordStats(total: total, today: todayWords, wpm: wpm, todayWpm: speed(todayTimed, todaySpoken),
+        return WordStats(total: total, today: todayWords, firstDictationDay: firstDictationDay,
+                         wpm: wpm, todayWpm: speed(todayTimed, todaySpoken),
                          timesTyping: wpm.map { round1(Double($0) / 40) },
                          hoursSaved: wpm.flatMap { $0 > 0 ? round1(Double(total) / 40 / 60 - Double(total) / Double($0) / 60) : nil },
                          levelIndex: index, levelName: index == 0 ? nil : levels[index - 1].0,

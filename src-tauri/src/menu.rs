@@ -52,16 +52,15 @@ pub struct Header {
     pub total: u64,
     pub previous: u64,
     pub delta: u64,
-    pub today: u64,
     pub wpm: Option<u64>,
     pub times_typing: Option<f64>,
-    pub hours_saved: Option<f64>,
-    pub since: String,
-    pub level_name: &'static str,
-    pub next_name: &'static str,
-    pub level_index: usize,
-    pub to_go: u64,
     pub progress: f64,
+    pub level_index: usize,
+    pub since_label: String,
+    pub today_label: String,
+    pub saved_label: String,
+    pub level_title: &'static str,
+    pub level_detail: String,
 }
 
 #[repr(C)]
@@ -70,16 +69,15 @@ struct NativeHeader {
     total: u64,
     previous: u64,
     delta: u64,
-    today: u64,
     wpm: f64,
     times_typing: f64,
-    hours_saved: f64,
     progress: f64,
     level_index: c_int,
-    to_go: u64,
-    since: *const c_char,
-    level_name: *const c_char,
-    next_name: *const c_char,
+    since_label: *const c_char,
+    today_label: *const c_char,
+    saved_label: *const c_char,
+    level_title: *const c_char,
+    level_detail: *const c_char,
 }
 
 pub fn is_open() -> bool {
@@ -91,24 +89,25 @@ pub fn set_header(header: Option<&Header>) {
         unsafe { see_menu_set_header(std::ptr::null()) };
         return;
     };
-    let since = CString::new(h.since.as_str()).unwrap_or_default();
-    let level = CString::new(h.level_name).unwrap_or_default();
-    let next = CString::new(h.next_name).unwrap_or_default();
+    let since_label = CString::new(h.since_label.as_str()).unwrap_or_default();
+    let today_label = CString::new(h.today_label.as_str()).unwrap_or_default();
+    let saved_label = CString::new(h.saved_label.as_str()).unwrap_or_default();
+    let level_title = CString::new(h.level_title).unwrap_or_default();
+    let level_detail = CString::new(h.level_detail.as_str()).unwrap_or_default();
     let native = NativeHeader {
         present: 1,
         total: h.total,
         previous: h.previous,
         delta: h.delta,
-        today: h.today,
         wpm: h.wpm.map_or(-1.0, |n| n as f64),
         times_typing: h.times_typing.unwrap_or(-1.0),
-        hours_saved: h.hours_saved.unwrap_or(f64::NAN),
         progress: h.progress,
         level_index: h.level_index as c_int,
-        to_go: h.to_go,
-        since: since.as_ptr(),
-        level_name: level.as_ptr(),
-        next_name: next.as_ptr(),
+        since_label: since_label.as_ptr(),
+        today_label: today_label.as_ptr(),
+        saved_label: saved_label.as_ptr(),
+        level_title: level_title.as_ptr(),
+        level_detail: level_detail.as_ptr(),
     };
     unsafe { see_menu_set_header(&native) };
 }

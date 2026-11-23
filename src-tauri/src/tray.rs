@@ -215,7 +215,7 @@ impl Panel {
             .header_totals
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let header = tally.as_ref().map(|tally| {
+        let header = tally.as_ref().and_then(|tally| {
             build_header(
                 tally,
                 chrono::Local::now().date_naive(),
@@ -753,31 +753,76 @@ fn build_header(
     tally: &crate::tally::Tally,
     today: chrono::NaiveDate,
     previous: Option<u64>,
-) -> menu::Header {
+) -> Option<menu::Header> {
     let summary = crate::tally::summary(tally, today);
-    let level = crate::tally::level(summary.total);
+    if summary.total == 0 {
+        return None;
+    }
+    let level = summary.level;
     let progress = level.next.as_ref().map_or(1.0, |next| {
         (summary.total - level.at) as f64 / (next.at - level.at) as f64
     });
     let previous = previous.unwrap_or(summary.total).min(summary.total);
-    menu::Header {
+    let today_words = tally.on(today).words;
+    let today_label = if today_words < summary.total {
+        format!("{} today", header_number(today_words))
+    } else {
+        String::new()
+    };
+    let typing = summary.typing_wpm;
+    let saved_label = summary
+        .wpm
+        .filter(|&wpm| wpm > typing)
+        .map_or_else(String::new, |wpm| {
+            let minutes =
+                summary.total as f64 * (wpm - typing) as f64 / (typing as f64 * wpm as f64);
+            if minutes >= 60.0 {
+                format!("{:.1} hours saved", minutes / 60.0)
+            } else if minutes >= 1.0 {
+                format!("{} min saved", minutes.floor())
+            } else {
+                String::new()
+            }
+        });
+    let since_label = summary
+        .since
+        .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok())
+        .filter(|&d| (today - d).num_days() >= 7)
+        .map_or_else(
+            || "Words dictated".to_owned(),
+            |d| format!("Dictated since {}", d.format("%-d %b")),
+        );
+    let level_detail = match &level.next {
+        Some(next) if level.index == 0 => format!("{} to go", header_number(next.to_go)),
+        Some(next) => format!("{} to {}", header_number(next.to_go), next.name),
+        None => "All word levels reached".to_owned(),
+    };
+    Some(menu::Header {
         total: summary.total,
         previous,
         delta: summary.total - previous,
-        today: tally.on(today).words,
         wpm: summary.wpm,
         times_typing: summary.times_typing,
-        hours_saved: summary.hours_saved,
-        since: summary
-            .since
-            .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok())
-            .map_or(String::new(), |d| d.format("%-d %b").to_string()),
-        level_name: level.name.unwrap_or(""),
-        next_name: level.next.as_ref().map_or("", |n| n.name),
-        level_index: level.index,
-        to_go: level.next.as_ref().map_or(0, |n| n.to_go),
         progress,
+        level_index: level.index,
+        since_label,
+        today_label,
+        saved_label,
+        level_title: level.name.unwrap_or("A letter is 1,000 words"),
+        level_detail,
+    })
+}
+
+fn header_number(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
     }
+    grouped
 }
 
 #[cfg(test)]
@@ -810,37 +855,84 @@ mod header_tests {
             ]),
             ..Tally::default()
         };
-        let h = build_header(&tally, today, Some(112_622));
-        assert_eq!(
-            (h.total, h.previous, h.delta, h.today),
-            (112_660, 112_622, 38, 473)
-        );
+        let h = build_header(&tally, today, Some(112_622)).unwrap();
+        assert_eq!((h.total, h.previous, h.delta), (112_660, 112_622, 38));
+        assert_eq!(h.today_label, "473 today");
         assert_eq!(h.wpm, Some(121));
         assert_eq!(h.times_typing, Some(3.0));
-        assert_eq!(h.hours_saved, Some(31.4));
-        assert_eq!(
-            (h.level_name, h.next_name, h.to_go),
-            ("Novel", "Epic", 137_340)
-        );
+        assert_eq!(h.saved_label, "31.4 hours saved");
+        assert_eq!(h.level_title, "Novel");
+        assert_eq!(h.level_detail, "137,340 to Epic");
         assert_eq!(h.progress, 0.0844);
-        assert_eq!(h.since, "26 Aug");
-        assert_eq!(build_header(&tally, today, None).delta, 0);
-        assert_eq!(build_header(&tally, today, Some(200_000)).previous, 112_660);
-        let empty = build_header(&Tally::default(), today, None);
+        assert_eq!(h.since_label, "Dictated since 26 Aug");
+        assert_eq!(build_header(&tally, today, None).unwrap().delta, 0);
         assert_eq!(
-            (empty.wpm, empty.times_typing, empty.hours_saved),
-            (None, None, None)
-        );
-        assert_eq!(
-            (empty.level_name, empty.next_name, empty.progress),
-            ("", "Letter", 0.0)
+            build_header(&tally, today, Some(200_000)).unwrap().previous,
+            112_660
         );
         let mut million = tally;
         million.days.get_mut(&today).unwrap().words = 1_000_000;
-        let top = build_header(&million, today, None);
-        assert_eq!(
-            (top.level_name, top.next_name, top.progress),
-            ("Million", "", 1.0)
+        let top = build_header(&million, today, None).unwrap();
+        assert_eq!(top.level_title, "Million");
+        assert_eq!(top.level_detail, "All word levels reached");
+        assert_eq!(top.progress, 1.0);
+    }
+
+    #[test]
+    fn first_words_and_since_threshold() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+        let mut tally = Tally::default();
+        assert!(build_header(&tally, today, None).is_none());
+
+        tally.days.insert(
+            today,
+            Count {
+                words: 51,
+                ..Count::default()
+            },
         );
+        let first = build_header(&tally, today, None).unwrap();
+        assert_eq!(first.level_title, "A letter is 1,000 words");
+        assert_eq!(first.level_detail, "949 to go");
+        assert_eq!(first.today_label, "");
+        assert_eq!(first.wpm, None);
+        assert_eq!(first.times_typing, None);
+        assert_eq!(first.saved_label, "");
+
+        let sixth_day = build_header(&tally, today + chrono::Days::new(6), None).unwrap();
+        assert_eq!(sixth_day.today_label, "0 today");
+        assert_eq!(sixth_day.since_label, "Words dictated");
+        let seventh_day = build_header(&tally, today + chrono::Days::new(7), None).unwrap();
+        assert_eq!(seventh_day.since_label, "Dictated since 18 Nov");
+    }
+
+    #[test]
+    fn saved_time_thresholds() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+        for (words, wpm, label) in [
+            (800, 0, ""),
+            (800, 20, ""),
+            (800, 40, ""),
+            (79, 80, ""),
+            (80, 80, "1 min saved"),
+            (320, 80, "4 min saved"),
+            (4_799, 80, "59 min saved"),
+            (4_800, 80, "1.0 hours saved"),
+            (5_760, 80, "1.2 hours saved"),
+        ] {
+            let mut tally = Tally::default();
+            tally.days.insert(
+                today,
+                Count {
+                    words,
+                    timed_words: wpm,
+                    spoken_ms: 60_000,
+                    ..Count::default()
+                },
+            );
+            let header = build_header(&tally, today, None).unwrap();
+            assert_eq!(header.wpm, Some(wpm));
+            assert_eq!(header.saved_label, label, "{words} words at {wpm} wpm");
+        }
     }
 }

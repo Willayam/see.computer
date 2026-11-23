@@ -14,35 +14,48 @@ struct StatsPanel: View, Animatable {
 
     private var amount: Int { Int((Double(value.total) * fraction).rounded()) }
     private var speed: Int? { value.wpm.map { Int((Double($0) * fraction).rounded()) } }
+    private var showsToday: Bool { value.today < value.total }
+    private var saved: (number: String, unit: String)? {
+        guard let minutes = value.savedMinutes else { return nil }
+        if minutes >= 60 {
+            return (String(format: "%.1f", minutes / 60), "hours")
+        }
+        return (String(Int(minutes)), "min")
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            ZStack(alignment: .topTrailing) {
-                HStack(spacing: compact ? 12 : 14) {
-                    ring
-                    VStack(alignment: .leading, spacing: 1) {
-                        if !compact { level }
-                        (Text(amount.formatted()).font(.system(size: compact ? 28 : 40, weight: .bold)).tracking(compact ? -0.8 : -1.2)
-                         + Text(" words").font(.system(size: compact ? 14 : 17)).foregroundColor(.secondary))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.6)
-                            .padding(.trailing, compact ? 52 : 0)
-                        if compact {
-                            level
-                        } else if let next = value.nextName {
-                            Text("\(value.toGo.formatted()) to \(next)")
-                                .font(.system(size: 13)).foregroundStyle(.secondary)
+            HStack(spacing: compact ? 12 : 14) {
+                ring
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack {
+                        Text(value.sinceLabel())
+                        if compact, let saved {
+                            Spacer(minLength: 4)
+                            Text("\(saved.number) \(saved.unit) saved")
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if compact {
-                    VStack(alignment: .trailing, spacing: 0) {
-                        Text(value.hoursSaved.map { String(format: "%.1f h", $0 * fraction) } ?? "–")
-                            .font(.system(size: 17, weight: .semibold))
-                        Text("saved").font(.system(size: 11)).foregroundStyle(.secondary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    if !compact, value.levelIndex > 0 { level }
+                    (Text(amount.formatted()).font(.system(size: compact ? 28 : 40, weight: .bold)).tracking(compact ? -0.8 : -1.2)
+                     + Text(" words").font(.system(size: compact ? 14 : 17)).foregroundColor(.secondary))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                    if value.levelIndex == 0 {
+                        Text("A letter is 1,000 words · \(value.toGo.formatted()) to go")
+                            .font(.system(size: compact ? 11 : 13)).foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                    } else if compact {
+                        level
+                    } else if let next = value.nextName {
+                        Text("\(value.toGo.formatted()) to \(next)")
+                            .font(.system(size: 13)).foregroundStyle(.secondary)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.top, compact ? 0 : 14)
             .padding(.bottom, compact ? 11 : 14)
@@ -53,7 +66,7 @@ struct StatsPanel: View, Animatable {
                     .padding(.top, compact ? 8 : 12)
                     .padding(.bottom, compact ? 0 : 8)
             }
-            if !compact {
+            if !compact, value.timesTyping != nil || saved != nil || showsToday {
                 Divider()
                 footer
             }
@@ -100,14 +113,18 @@ struct StatsPanel: View, Animatable {
         HStack(alignment: .top, spacing: 0) {
             if let times = value.timesTyping {
                 figure(String(format: "%.1fx", times * fraction), unit: "", caption: "typing speed")
-                Divider()
+                if saved != nil || showsToday { Divider() }
             }
-            figure(value.hoursSaved.map { String(format: "%.1f", $0 * fraction) } ?? "–", unit: "hours", caption: "saved so far")
-                .padding(.leading, value.timesTyping == nil ? 0 : 12)
-            Divider()
-            figure(Int((Double(value.today) * fraction).rounded()).formatted(), unit: "today",
-                   caption: value.todayWpm.map { "at \(Int((Double($0) * fraction).rounded())) wpm" } ?? "")
-                .padding(.leading, 12)
+            if let saved {
+                figure(saved.number, unit: saved.unit, caption: "saved")
+                    .padding(.leading, value.timesTyping == nil ? 0 : 12)
+                if showsToday { Divider() }
+            }
+            if showsToday {
+                figure(Int((Double(value.today) * fraction).rounded()).formatted(), unit: "today",
+                       caption: value.todayWpm.map { "at \(Int((Double($0) * fraction).rounded())) wpm" } ?? "")
+                    .padding(.leading, value.timesTyping != nil || saved != nil ? 12 : 0)
+            }
         }
         .fixedSize(horizontal: false, vertical: true)
         .padding(.bottom, 12)
