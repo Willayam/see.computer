@@ -76,6 +76,7 @@ mod transcriber;
 mod vocab;
 
 pub use bias::TokenBias;
+pub use model_tdt::SpanCandidate;
 pub use error::{Error, Result};
 pub use execution::{CoreMLComputeUnits, ExecutionProvider, ModelConfig as ExecutionConfig};
 pub use parakeet::Parakeet;

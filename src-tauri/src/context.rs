@@ -16,10 +16,25 @@ pub struct Term {
 const SCREEN_TERMS: usize = 32;
 /// Daybook describes the last two hours, so it gets fewer and ranks last.
 const DAYBOOK_TERMS: usize = 8;
+/// Every other unusual word or pair on screen, for matching after decoding
+/// only. Boosting this many terms would pull ordinary speech toward them.
+const CANDIDATES: usize = 400;
 
-/// The terms one dictation is boosted with: screen terms before Daybook
-/// ones, each source ranked and capped, no spelling twice.
-pub fn gather(screen: &[String], daybook: &[String]) -> Vec<Term> {
+/// The terms one dictation gets from what is on screen and from Daybook.
+/// Live capture and the eval both come through here.
+pub fn from_screen(text: &str, daybook: &[String]) -> Vec<Term> {
+    let words = crate::learn::Words::shared();
+    crate::learn::warm_screen_words(text, words);
+    gather(
+        &crate::learn::context_terms(text, words),
+        &crate::learn::screen_candidates(text, words),
+        daybook,
+    )
+}
+
+/// Screen terms, then Daybook ones, each ranked and capped, then the
+/// candidates that only post-decode matching reads. No spelling twice.
+pub fn gather(screen: &[String], candidates: &[String], daybook: &[String]) -> Vec<Term> {
     let mut seen = HashSet::new();
     screen
         .iter()
@@ -31,7 +46,9 @@ pub fn gather(screen: &[String], daybook: &[String]) -> Vec<Term> {
                 .take(DAYBOOK_TERMS)
                 .map(|text| (text, "daybook")),
         )
+        .chain(candidates.iter().map(|text| (text, "candidate")))
         .filter(|(text, _)| seen.insert(text.to_lowercase()))
+        .take(SCREEN_TERMS + DAYBOOK_TERMS + CANDIDATES)
         .map(|(text, source)| Term {
             text: text.clone(),
             source,
@@ -39,81 +56,20 @@ pub fn gather(screen: &[String], daybook: &[String]) -> Vec<Term> {
         .collect()
 }
 
-/// Writes an on-screen name over a near miss of it. Boosting cannot reach a
-/// name the model hears as another spelling: with "Larsten" on screen, the
-/// boosted pass takes its opening token and then leaves it ("Lauriston"),
-/// and the plain pass writes "Larston". The miss must be a capitalized word
-/// the word list does not know, at least five letters, and one changed or
-/// swapped letter from exactly one screen term that starts with the same two
-/// letters. A letter added or dropped is left alone: in the user's own lines
-/// those were Swedish inflections, "Fridag" and "Fridas" beside "Frida".
+impl Term {
+    /// Whether the decoder is pushed toward this term while it decodes.
+    pub fn boosted(&self) -> bool {
+        self.source != "candidate"
+    }
+}
+
 pub fn near_misses(
     text: &str,
     terms: &[Term],
     saved: &[&str],
     words: &crate::learn::Words,
 ) -> String {
-    let names: Vec<&str> = terms
-        .iter()
-        .filter(|term| term.source == "screen" && term.text.chars().all(char::is_alphabetic))
-        .map(|term| term.text.as_str())
-        .collect();
-    if names.is_empty() {
-        return text.to_owned();
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find(char::is_alphabetic) {
-        let end = rest[start..]
-            .find(|c: char| !c.is_alphabetic())
-            .map_or(rest.len(), |offset| start + offset);
-        let word = &rest[start..end];
-        out.push_str(&rest[..start]);
-        // A saved vocabulary word came out as meant.
-        let keep = saved.iter().any(|term| term.eq_ignore_ascii_case(word));
-        out.push_str(
-            (!keep)
-                .then(|| near_miss(word, &names, words))
-                .flatten()
-                .unwrap_or(word),
-        );
-        rest = &rest[end..];
-    }
-    out.push_str(rest);
-    out
-}
-
-fn near_miss<'a>(word: &str, names: &[&'a str], words: &crate::learn::Words) -> Option<&'a str> {
-    let mut chars = word.chars();
-    let capitalized = chars.next().is_some_and(char::is_uppercase) && chars.all(char::is_lowercase);
-    if !capitalized || word.chars().count() < 5 || words.knows_quickly(word) {
-        return None;
-    }
-    let lower = word.to_lowercase();
-    let prefix: String = lower.chars().take(2).collect();
-    let mut found = names.iter().filter(|name| {
-        let name = name.to_lowercase();
-        name != lower && name.starts_with(&prefix) && one_letter(&lower, &name)
-    });
-    match (found.next(), found.next()) {
-        (Some(name), None) => Some(name),
-        _ => None,
-    }
-}
-
-/// The same length, and one letter changed or two neighbours swapped.
-fn one_letter(a: &str, b: &str) -> bool {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    if a.len() != b.len() {
-        return false;
-    }
-    let differ: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
-    match differ.as_slice() {
-        [_] => true,
-        [i, j] => j - i == 1 && a[*i] == b[*j] && a[*j] == b[*i],
-        _ => false,
-    }
+    crate::sounds_like::rewrite(text, terms, saved, words)
 }
 
 fn enabled(name: &str) -> bool {
@@ -143,15 +99,15 @@ fn daybook_cache() -> Arc<Mutex<Vec<String>>> {
 
 /// The receiver is polled by the engine. An AX timeout or a slow database
 /// never holds up release-to-paste.
-pub fn begin() -> mpsc::Receiver<Vec<Term>> {
+pub fn begin(
+    ledger: crate::ledger::Ledger,
+) -> (mpsc::Receiver<Vec<Term>>, mpsc::Sender<crate::ledger::Id>) {
     let (tx, rx) = mpsc::channel();
+    let (accepted, take) = mpsc::channel();
     let cache = enabled("SEE_COMPUTER_DAYBOOK_CONTEXT").then(daybook_cache);
     crate::qos::spawn("see-screen-context", crate::qos::Class::Upkeep, move || {
-        let screen = enabled("SEE_COMPUTER_SCREEN_CONTEXT")
-            .then(crate::readback::screen_text)
-            .flatten()
-            .map(|text| crate::learn::context_terms(&text, crate::learn::Words::shared()))
-            .unwrap_or_default();
+        let snapshot = crate::snapshot::Snapshot::capture();
+        let text = snapshot.as_ref().map(crate::snapshot::Snapshot::render);
         let daybook = cache
             .map(|cache| {
                 cache
@@ -160,9 +116,15 @@ pub fn begin() -> mpsc::Receiver<Vec<Term>> {
                     .clone()
             })
             .unwrap_or_default();
-        let _ = tx.send(gather(&screen, &daybook));
+        let _ = tx.send(from_screen(text.as_deref().unwrap_or_default(), &daybook));
+        if let Some(text) = text {
+            // The ledger gets the audio first and can reject an already-pruned take.
+            if let Ok(id) = take.recv() {
+                ledger.screen(id, text);
+            }
+        }
     });
-    rx
+    (rx, accepted)
 }
 
 fn daybook_path() -> PathBuf {
@@ -333,11 +295,11 @@ mod tests {
         );
         let daybook = ["Larsten".to_owned(), "Klarna".to_owned()];
         let screen: Vec<String> = (0..40).map(|n| format!("Term{n}")).collect();
-        let terms = gather(&screen, &daybook);
+        let terms = gather(&screen, &[], &daybook);
         assert_eq!(terms.len(), SCREEN_TERMS + 2);
         assert!(terms[..SCREEN_TERMS].iter().all(|t| t.source == "screen"));
         assert_eq!(terms[SCREEN_TERMS].text, "Larsten");
-        let terms = gather(&["Larsten".to_owned()], &daybook);
+        let terms = gather(&["Larsten".to_owned()], &[], &daybook);
         assert_eq!(
             terms,
             [
@@ -351,6 +313,49 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn candidates_keep_lowercase_products_pairs_and_capitals_mid_sentence() {
+        let words = crate::learn::Words::from_list(&[
+            "open", "the", "board", "in", "and", "ask", "about", "it", "bot", "finance", "kindle",
+            "settings", "we", "use", "click", "new", "didn't",
+        ]);
+        let screen = "Settings\nOpen the zorboard in Quillo Bot and ask Kindle about it.\n\
+                      We use Pellmark Finance. Click New Board, we didn't open it.\nnew board";
+        let candidates = crate::learn::screen_candidates(screen, &words);
+        for expected in [
+            "zorboard",
+            "Quillo",
+            "Quillo Bot",
+            "Kindle",
+            "Pellmark Finance",
+        ] {
+            assert!(
+                candidates.contains(&expected.to_owned()),
+                "{expected} in {candidates:?}"
+            );
+        }
+        for ordinary in [
+            "Settings",
+            "Open",
+            "We",
+            "board",
+            "Bot and",
+            "Kindle about",
+            "New",
+            "didn",
+            "Finance Click",
+        ] {
+            assert!(
+                !candidates.contains(&ordinary.to_owned()),
+                "{ordinary} in {candidates:?}"
+            );
+        }
+        let terms = gather(&["Quillo".to_owned()], &candidates, &[]);
+        assert_eq!(terms.iter().filter(|term| term.text == "Quillo").count(), 1);
+        assert!(terms[0].boosted());
+        assert!(terms[1..].iter().all(|term| !term.boosted()));
     }
 
     #[test]

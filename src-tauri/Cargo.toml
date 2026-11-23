@@ -21,6 +21,7 @@ tauri-plugin-updater = { version = "2", default-features = false, features = ["r
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+strsim = "0.11"
 cpal = "0.18"
 hound = "3"
 arboard = { version = "3", default-features = false }

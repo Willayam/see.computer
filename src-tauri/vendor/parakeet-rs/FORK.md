@@ -6,7 +6,7 @@ boosting has to add a bonus to those logits *before* the argmax — after the fa
 you can do is string replacement, which cannot recover a word the decoder never
 emitted.
 
-So this is upstream 0.3.7 verbatim plus one addition:
+So this is upstream 0.3.7 verbatim with the following changes:
 
 - `src/bias.rs` — the `TokenBias` trait (new file).
 - `src/model_tdt.rs` — `forward` and `greedy_decode` take `Option<&mut dyn TokenBias>`
@@ -15,7 +15,9 @@ So this is upstream 0.3.7 verbatim plus one addition:
 - `src/parakeet_tdt.rs` — `transcribe_samples_with_bias`, the public entry point.
 - `src/model_tdt.rs` and `src/parakeet_tdt.rs` — paired plain and biased decoding
   shares one encoder output and applies the same timestamp processing to both.
-- `src/lib.rs` — re-exports `TokenBias`.
+- `src/model_tdt.rs` and `src/parakeet_tdt.rs` also score candidate token sequences against a plain span using its encoder frames and prediction history.
+- `src/decoder_tdt.rs` provides crate-local access to the original sentence pieces for span selection.
+- `src/lib.rs` re-exports `TokenBias` and `SpanCandidate`.
 
 Everything else is untouched, examples and dev-dependencies aside. Keep it that way:
 the delta is meant to go upstream as a pull request, after which this directory and

@@ -5,6 +5,10 @@ pub struct Clip {
     pub written_path: String,
     pub path: PathBuf,
     pub reference: String,
+    /// Screen text to replay this clip with, from an optional third column.
+    pub screen: Option<PathBuf>,
+    /// Terms to score this clip on, `|`-separated in an optional fourth column.
+    pub terms: Vec<String>,
 }
 
 pub fn parse_manifest(path: &Path, text: &str) -> (Vec<Clip>, Vec<String>) {
@@ -14,10 +18,33 @@ pub fn parse_manifest(path: &Path, text: &str) -> (Vec<Clip>, Vec<String>) {
         if line.trim().is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some((written_path, reference)) = line.split_once('\t') else {
+        let mut columns = line.split('\t');
+        let (Some(written_path), Some(reference)) = (columns.next(), columns.next()) else {
             errors.push(format!("line {}: expected a tab", index + 1));
             continue;
         };
+        let resolve = |written: &str| {
+            let file = Path::new(written);
+            if file.is_absolute() {
+                file.to_path_buf()
+            } else {
+                path.parent().unwrap_or(Path::new("")).join(file)
+            }
+        };
+        let screen = columns
+            .next()
+            .filter(|column| !column.is_empty())
+            .map(resolve);
+        let terms = columns
+            .next()
+            .map(|column| {
+                column
+                    .split('|')
+                    .filter(|term| !term.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
         let wav = Path::new(written_path);
         clips.push(Clip {
             line: index + 1,
@@ -28,6 +55,8 @@ pub fn parse_manifest(path: &Path, text: &str) -> (Vec<Clip>, Vec<String>) {
                 path.parent().unwrap_or(Path::new("")).join(wav)
             },
             reference: reference.to_owned(),
+            screen,
+            terms,
         });
     }
     (clips, errors)
@@ -151,5 +180,24 @@ mod tests {
         assert_eq!(clips[0].path, Path::new("/tmp/corpus/clip.wav"));
         assert_eq!(clips[0].written_path, "clip.wav");
         assert_eq!(clips[1].path, Path::new("/elsewhere/a.wav"));
+        assert_eq!((clips[0].screen.as_ref(), clips[0].terms.len()), (None, 0));
+    }
+
+    #[test]
+    fn manifest_screen_and_terms_columns() {
+        let (clips, errors) = parse_manifest(
+            Path::new("/tmp/corpus/list.tsv"),
+            "a.wav\tUse Norvatek.\tscreens/a.txt\tNorvatek|Quillo Bot\nb.wav\tHi\t\tPellmark",
+        );
+        assert!(errors.is_empty());
+        assert_eq!(
+            clips[0].screen.as_deref(),
+            Some(Path::new("/tmp/corpus/screens/a.txt"))
+        );
+        assert_eq!(clips[0].terms, ["Norvatek", "Quillo Bot"]);
+        assert_eq!(
+            (clips[1].screen.as_ref(), clips[1].terms.as_slice()),
+            (None, &["Pellmark".to_owned()][..])
+        );
     }
 }

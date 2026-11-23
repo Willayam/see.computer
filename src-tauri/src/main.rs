@@ -32,6 +32,9 @@ mod session;
 mod setup;
 mod shadow;
 mod sharing;
+mod snapshot;
+mod sound;
+mod sounds_like;
 mod tally;
 mod target;
 mod text;
@@ -75,6 +78,7 @@ fn main() {
     }
 
     let _instance = acquire_single_instance();
+    snapshot::warm_ocr();
     let mic = match std::env::var_os("SEE_COMPUTER_AUDIO_FILE") {
         Some(path) => mic::Source::Replay(path.into()),
         None => mic::Source::Default,

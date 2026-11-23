@@ -11,6 +11,8 @@ pub enum Cmd {
     TranscribeLive(PathBuf),
     TranscribePreview(PathBuf),
     Clip(PathBuf),
+    Ocr(Vec<PathBuf>),
+    Snapshot,
     /// The manifest, and the vocabulary to score terms against when it should
     /// differ from the one the decoder is boosting, as in a boost-off run.
     Eval(PathBuf, Option<PathBuf>),
@@ -30,6 +32,11 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
             Some(path) => Some(Cmd::Transcribe(PathBuf::from(path))),
             None => None,
         },
+        Some("ocr") => {
+            let paths: Vec<_> = args.map(PathBuf::from).collect();
+            (!paths.is_empty()).then_some(Cmd::Ocr(paths))
+        }
+        Some("snapshot") => Some(Cmd::Snapshot),
         Some("clip") => args.next().map(PathBuf::from).map(Cmd::Clip),
         Some("eval") => args
             .next()
@@ -55,6 +62,8 @@ pub fn run(cmd: Cmd) -> i32 {
         Cmd::Transcribe(path) => transcribe(path),
         Cmd::TranscribeLive(path) => transcribe_live(path),
         Cmd::TranscribePreview(path) => transcribe_preview(path),
+        Cmd::Ocr(paths) => ocr(paths),
+        Cmd::Snapshot => snapshot(),
         Cmd::Clip(path) => clip(path),
         Cmd::Eval(path, terms) => eval(path, terms),
         Cmd::Meetings => meetings(),
@@ -71,6 +80,58 @@ pub fn run(cmd: Cmd) -> i32 {
         },
         Cmd::Tap(seconds, path, bundle) => tap(seconds, path, bundle),
     }
+}
+
+fn ocr(paths: Vec<PathBuf>) -> i32 {
+    if !crate::snapshot::ocr_enabled() {
+        eprintln!("Screen OCR is disabled.");
+        return 1;
+    }
+    let mut status = 0;
+    for path in paths {
+        let start = Instant::now();
+        let text = crate::snapshot::ocr_file(&path);
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        match text {
+            Some(text) => {
+                println!("{text}");
+                eprintln!("OCR {elapsed:.1} ms");
+            }
+            None => {
+                eprintln!("OCR failed for {} after {elapsed:.1} ms", path.display());
+                status = 1;
+            }
+        }
+    }
+    status
+}
+
+fn snapshot() -> i32 {
+    let Some(snapshot) = crate::snapshot::Snapshot::capture_for_cli() else {
+        eprintln!("Screen context is disabled.");
+        return 0;
+    };
+    println!("{}", snapshot.render());
+    let ax = &snapshot.ax;
+    eprintln!("Bundle ID: {}", ax.bundle);
+    eprintln!(
+        "AX window lines {}, on-screen windows {}, OCR displays {}",
+        ax.window.lines().count(),
+        snapshot.windows.len(),
+        snapshot.displays.len()
+    );
+    eprintln!(
+        "Focus {} ms, field {} ms, AX window {} ms, window titles {} ms, OCR {}, total {} ms",
+        ax.focus_ms,
+        ax.field_ms,
+        ax.window_ms,
+        snapshot.windows_ms,
+        snapshot
+            .ocr_ms
+            .map_or_else(|| "disabled".into(), |ms| format!("{ms} ms")),
+        snapshot.total_ms
+    );
+    0
 }
 
 fn tap(seconds: u64, path: PathBuf, bundle: Option<String>) -> i32 {
@@ -298,22 +359,47 @@ fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
         .iter()
         .map(|term| term.text.clone())
         .collect();
-    let extract = |name: &str| {
+    let read = |name: &str| {
         std::env::var_os(name)
             .and_then(|path| std::fs::read_to_string(path).ok())
-            .map(|text| crate::learn::context_terms(&text, crate::learn::Words::shared()))
             .unwrap_or_default()
     };
-    let context = crate::context::gather(
-        &extract("SEE_COMPUTER_EVAL_SCREEN_TEXT"),
-        &extract("SEE_COMPUTER_EVAL_DAYBOOK_TEXT"),
+    let context = crate::context::from_screen(
+        &read("SEE_COMPUTER_EVAL_SCREEN_TEXT"),
+        &crate::learn::context_terms(
+            &read("SEE_COMPUTER_EVAL_DAYBOOK_TEXT"),
+            crate::learn::Words::shared(),
+        ),
     );
     let scored = match on_engine_thread(move |engine| {
         engine.set_context(&context);
         let mut total = crate::eval::Score::default();
         let mut count = 0;
         let mut skipped = parse_skipped;
+        let mut screened = false;
         for clip in clips {
+            if let Some(screen) = &clip.screen {
+                let text = std::fs::read_to_string(screen).unwrap_or_default();
+                let started = Instant::now();
+                let gathered = crate::context::from_screen(&text, &[]);
+                let extracted = started.elapsed();
+                engine.set_context(&gathered);
+                if std::env::var_os("SEE_COMPUTER_EVAL_PRINT_TERMS").is_some() {
+                    let listed: Vec<&str> =
+                        gathered.iter().map(|term| term.text.as_str()).collect();
+                    eprintln!("clip {}: terms {}", clip.line, listed.join("|"));
+                }
+                eprintln!(
+                    "clip {}: context {:.3} ms, boost {:.3} ms, {} terms",
+                    clip.line,
+                    extracted.as_secs_f64() * 1_000.0,
+                    (started.elapsed() - extracted).as_secs_f64() * 1_000.0,
+                    gathered.len()
+                );
+                screened = true;
+            } else if std::mem::take(&mut screened) {
+                engine.set_context(&context);
+            }
             let audio = match crate::mic::Audio16k::from_wav(&clip.path) {
                 Ok(audio) => audio,
                 Err(error) => {
@@ -334,7 +420,12 @@ fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
                     continue;
                 }
             };
-            let score = crate::eval::score(&clip.reference, &hypothesis, &terms);
+            let clip_terms = if clip.terms.is_empty() {
+                &terms
+            } else {
+                &clip.terms
+            };
+            let score = crate::eval::score(&clip.reference, &hypothesis, clip_terms);
             println!(
                 "{:.1}\t{}/{}\t{}\t{}",
                 score.wer() * 100.0,

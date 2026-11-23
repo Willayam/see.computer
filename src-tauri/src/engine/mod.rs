@@ -8,6 +8,7 @@ use crate::text::Text;
 
 pub mod models;
 pub mod parakeet;
+mod rescore;
 
 pub use models::{ModelFiles, Models};
 

@@ -629,7 +629,9 @@ fn a_failed_late_job_keeps_its_audio_and_a_retry_delivers_it() {
 
     controller.step(Msg::RetrySaved);
     let retry = match controller.late.as_slice() {
-        [(retry, Some(_))] => *retry,
+        [LateJob {
+            job, path: Some(_), ..
+        }] => *job,
         other => panic!("expected one retry, got {}", other.len()),
     };
     // A second pick while it runs does not queue the same audio twice.

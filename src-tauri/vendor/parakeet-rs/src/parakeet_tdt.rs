@@ -5,7 +5,7 @@ use crate::decoder_tdt::ParakeetTDTDecoder;
 use crate::error::{Error, Result};
 use crate::execution::ModelConfig as ExecutionConfig;
 use crate::model_tdt::ParakeetTDTModel;
-use crate::timestamps::{process_timestamps, rebuild_text, TimestampMode};
+use crate::timestamps::{TimestampMode, process_timestamps, rebuild_text};
 use crate::transcriber::Transcriber;
 use crate::vocab::Vocabulary;
 use std::path::{Path, PathBuf};
@@ -120,9 +120,48 @@ impl ParakeetTDT {
         bias: &mut dyn crate::bias::TokenBias,
     ) -> Result<(TranscriptionResult, TranscriptionResult)> {
         let features = audio::extract_features_with_cache(
-            audio, sample_rate, channels, &self.preprocessor_config, &self.feature_cache,
+            audio,
+            sample_rate,
+            channels,
+            &self.preprocessor_config,
+            &self.feature_cache,
         )?;
         let (plain, boosted) = self.model.forward_pair(features, bias)?;
+        Ok((
+            self.decode_result(plain.0, plain.1, plain.2, mode)?,
+            self.decode_result(boosted.0, boosted.1, boosted.2, mode)?,
+        ))
+    }
+
+    pub fn transcribe_samples_with_rescored_pair(
+        &mut self,
+        audio: Vec<f32>,
+        sample_rate: u32,
+        channels: u16,
+        mode: Option<TimestampMode>,
+        bias: &mut dyn crate::bias::TokenBias,
+        candidates: impl FnOnce(&[&str]) -> Vec<crate::SpanCandidate>,
+        margin: f32,
+    ) -> Result<(TranscriptionResult, TranscriptionResult)> {
+        let features = audio::extract_features_with_cache(
+            audio,
+            sample_rate,
+            channels,
+            &self.preprocessor_config,
+            &self.feature_cache,
+        )?;
+        let (plain, boosted) = self.model.forward_rescored_pair(
+            features,
+            bias,
+            |ids| {
+                let pieces: Vec<_> = ids
+                    .iter()
+                    .map(|&id| self.decoder.piece(id).unwrap_or(""))
+                    .collect();
+                candidates(&pieces)
+            },
+            margin,
+        )?;
         Ok((
             self.decode_result(plain.0, plain.1, plain.2, mode)?,
             self.decode_result(boosted.0, boosted.1, boosted.2, mode)?,
