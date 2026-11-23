@@ -189,6 +189,12 @@ final class Typist {
         pendingSpace = nil
     }
 
+    /// The next letter starts a new word, as after a picked suggestion.
+    func startNewWord(in proxy: UITextDocumentProxy) {
+        forget()
+        if let caret = Caret(proxy), !Self.atWordStart(caret.before) { pendingSpace = caret }
+    }
+
     func choose(_ input: WordInput, _ candidate: String, in proxy: UITextDocumentProxy) {
         if let edit = swipeEdit, edit.caret == Caret(proxy), edit.candidates.contains(candidate) {
             let undo = swipeUndo

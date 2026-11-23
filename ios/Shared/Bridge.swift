@@ -128,14 +128,53 @@ struct Draft: Codable {
     }
 }
 
+/// The user edited the field mid-take. The words shown by then stay as the user's
+/// text, and only the rest of the take lands at `target`. Only the keyboard writes it.
 struct ManualEdit: Codable {
     let startID: UUID?
     var target: DictationTarget?
+    var kept: String? = nil
 
     func target(for start: DictationStart, at current: DictationTarget) -> DictationTarget? {
         guard startID == start.id, let target, target.field == start.target.field,
             target.selected == nil, target.matches(current) else { return nil }
         return target
+    }
+}
+
+enum Transcript {
+    /// What `final` says after `kept`, an earlier pass over how it starts. Words match
+    /// loosely, because the last pass can still change a few of them.
+    static func rest(of final: String, after kept: String) -> String {
+        let keptForms = kept.split(whereSeparator: \.isWhitespace).map(form)
+        guard !keptForms.isEmpty else { return final }
+        let words = final.split(whereSeparator: \.isWhitespace)
+        let forms = words.prefix(keptForms.count + 32).map(form)
+        let n = keptForms.count, m = forms.count
+        guard m > 0 else { return "" }
+        // Word edit distance from the kept words to each start of the final text. The
+        // start that costs least is what they stood for.
+        var row = (0...m).map(Double.init)
+        for i in 1...n {
+            var next = [Double(i)] + [Double](repeating: 0, count: m)
+            for j in 1...m {
+                next[j] = min(row[j] + 1, next[j - 1] + 1, row[j - 1] + cost(keptForms[i - 1], forms[j - 1]))
+            }
+            row = next
+        }
+        // On a tie, the start nearest the kept word count: a word heard differently stands for one word.
+        let cut = (0...m).min { (row[$0], abs($0 - n)) < (row[$1], abs($1 - n)) }!
+        return cut < words.count ? String(final[words[cut].startIndex...]) : ""
+    }
+
+    /// A word cut short or spelled a little differently is mostly the same word.
+    private static func cost(_ a: String, _ b: String) -> Double {
+        if a == b { return 0 }
+        return a.hasPrefix(b) || b.hasPrefix(a) || (a.count > 1 && a.prefix(2) == b.prefix(2)) ? 0.5 : 1
+    }
+
+    private static func form(_ word: Substring) -> String {
+        word.trimmingCharacters(in: .alphanumerics.inverted).lowercased()
     }
 }
 

@@ -88,6 +88,22 @@ enum DraftChecks {
         precondition(oldHandoff.start == nil)
         precondition(oldDraft.placement(at: target("hello old"), ownsMark: true) == nil)
         precondition(oldEdit.startID == nil && oldEdit.target == nil)
+        let final = "Hello world, this is a test of the keyboard."
+        precondition(Transcript.rest(of: final, after: "") == final)
+        precondition(Transcript.rest(of: final, after: "Hello world this") == "is a test of the keyboard.")
+        precondition(Transcript.rest(of: final, after: "hello world, this is a test of the keyboard") == "")
+        precondition(Transcript.rest(of: final, after: "Hello world thi") == "is a test of the keyboard.")
+        precondition(Transcript.rest(of: final, after: "Hello word this is") == "a test of the keyboard.")
+        precondition(Transcript.rest(of: "the cat saw the dog", after: "the") == "cat saw the dog")
+        precondition(Transcript.rest(of: "", after: "kept") == "")
+        precondition(Transcript.rest(of: "one two", after: "something else entirely here") == "")
+        precondition(Transcript.rest(of: "and then I told him that I said no", after: "and then I said") == "him that I said no")
+        precondition(Transcript.rest(of: "so I think it is fine and that is all", after: "so I think that") == "is fine and that is all")
+        precondition(Transcript.rest(of: "I'm going to go home", after: "I'm gonna") == "to go home")
+        let keptEdit = ManualEdit(startID: start.id, target: edited, kept: "a long preview")
+        let savedKept = try decoder.decode(ManualEdit.self, from: encoder.encode(keptEdit))
+        precondition(savedKept.kept == "a long preview")
+        precondition(savedEdit.kept == nil && oldEdit.kept == nil)
         print("Draft checks passed")
     }
 }

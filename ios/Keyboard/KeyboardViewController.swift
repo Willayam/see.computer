@@ -171,7 +171,9 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     override func selectionDidChange(_ textInput: UITextInput?) {
+        _ = endTakeIfFieldWasSent()
         checkMark()
+        rememberEditedField(byHost: true)
         checkForFinishedTake()
         updateTypingContext()
     }
@@ -182,16 +184,26 @@ final class KeyboardViewController: UIInputViewController {
         switchAwayFromFieldsThatNeedTheirOwnKeys()
         _ = endTakeIfFieldWasSent()
         checkMark()
+        rememberEditedField(byHost: true)
         checkForFinishedTake()
         updateTypingContext()
     }
 
     private func checkMark() {
         guard let draft = markedDraft else { return }
-        if draft.placement(at: currentTarget, ownsMark: true) == .marked {
+        let placement = draft.placement(at: currentTarget, ownsMark: true)
+        if placement == .marked {
             markWasVisible = true
-        } else {
-            markedDraft = nil
+            return
+        }
+        // An emptied field is left for `endTakeIfFieldWasSent`, which needs the mark.
+        guard currentTarget?.hasText != false else { return }
+        markedDraft = nil
+        // A caret moved in the host commits the marked words where they stand.
+        if placement == nil, manualEdit == nil, !takeWasSent, let start = state.start, draft.start?.id == start.id,
+            state.phase == .recording || state.phase == .transcribing, currentTarget?.field == start.target.field
+        {
+            keepWordsInField(start)
         }
     }
 
@@ -199,17 +211,20 @@ final class KeyboardViewController: UIInputViewController {
     /// field can say so, because a keyboard never sees the send button.
     private func endTakeIfFieldWasSent() -> Bool {
         let proxy = textDocumentProxy
-        guard state.phase == .recording || state.phase == .transcribing, wordsInField, !takeWasSent,
-            let draft = Bridge.read(Draft.self, "draft.json"), let start = state.start,
-            draft.start?.id == start.id, markWasVisible, ownsMark(draft),
+        guard state.phase == .recording || state.phase == .transcribing, !takeWasSent, let start = state.start,
             SeeDocumentIdentifier(proxy) == start.target.field, !proxy.hasText,
             proxy.selectedText?.isEmpty != false, proxy.documentContextBeforeInput?.isEmpty != false,
             proxy.documentContextAfterInput?.isEmpty != false
         else { return false }
-        Diagnostics.log("sent_seen", ["phase": state.phase.rawValue, "chars": draft.text.count, "active": isActive])
+        let draft = Bridge.read(Draft.self, "draft.json").flatMap { $0.start?.id == start.id ? $0 : nil }
+        let marked = draft.map { wordsInField && markWasVisible && ownsMark($0) } ?? false
+        // After an edit the keyboard knows what the field held, so an empty field is the host's doing.
+        let edited = manualEdit?.startID == start.id && manualEdit?.target?.hasText == true
+        guard marked || edited else { return false }
+        Diagnostics.log("sent_seen", ["phase": state.phase.rawValue, "chars": draft?.text.count ?? 0, "active": isActive])
         takeWasSent = true
         markedDraft = nil
-        if isActive {
+        if isActive, marked {
             proxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
             proxy.unmarkText()
         }
@@ -311,10 +326,14 @@ final class KeyboardViewController: UIInputViewController {
             !putInField(words)
         {
             Diagnostics.log("words_left_field", ["chars": words.count])
+            if manualEdit == nil, let start = state.start, start.target.selected == nil,
+                currentTarget?.field == start.target.field {
+                keepWordsInField(start)
+            }
             wordsInField = false
             render()
         }
-        liveWords = wordsInField ? "" : words
+        liveWords = wordsInField ? "" : Transcript.rest(of: words, after: manualEdit?.kept ?? "")
         if !wordsInField { render() }
     }
 
@@ -416,10 +435,19 @@ final class KeyboardViewController: UIInputViewController {
             } else {
                 guard start.target.matches(current) else { return }
             }
-            let spacing = current.selected == nil ? Spacing.prefix(before: proxy.documentContextBeforeInput) : ""
-            proxy.insertText(spacing + take.text)
+            let rest = Transcript.rest(of: take.text, after: edit?.kept ?? "")
+            if !rest.isEmpty {
+                let spacing = current.selected == nil ? Spacing.prefix(before: proxy.documentContextBeforeInput) : ""
+                // The caret can sit before text the user moved it in front of.
+                let next = proxy.documentContextAfterInput?.first
+                let separator = next.map { !$0.isWhitespace && !".,!?;:)]}…’”".contains($0) } == true ? " " : ""
+                proxy.insertText(spacing + rest + separator)
+            }
         }
-        Diagnostics.log("inserted", ["chars": take.text.count, "age_s": now.timeIntervalSince(take.finished), "draft": draft != nil])
+        Diagnostics.log("inserted", [
+            "chars": take.text.count, "age_s": now.timeIntervalSince(take.finished), "draft": draft != nil,
+            "kept": edit?.kept?.count ?? 0,
+        ])
     }
 
     private func startAfterReturningFromTheApp() {
@@ -557,30 +585,63 @@ final class KeyboardViewController: UIInputViewController {
     private func prepareForManualEdit() {
         guard state.phase == .recording || state.phase == .transcribing, let start = state.start,
             let current = currentTarget, start.target.field == current.field else { return }
-        wordsInField = false
-        let target: DictationTarget?
-        if let edit = manualEdit {
-            target = edit.target(for: start, at: current)
-        } else if let draft = Bridge.read(Draft.self, "draft.json"), draft.start?.id == start.id {
-            if takeDraftBack(draft) {
-                Bridge.remove("draft.json")
-                target = currentTarget
-            } else {
-                target = nil
+        if var edit = manualEdit {
+            // After Done, an edit the keyboard did not make leaves the insertion point unknown.
+            if state.phase == .transcribing, edit.target(for: start, at: current) == nil, edit.target != nil {
+                edit.target = nil
+                manualEdit = edit
+                Bridge.write(edit, "manual-edit.json")
             }
         } else {
-            target = start.target.matches(current) ? current : nil
+            keepWordsInField(start)
         }
-        let edit = ManualEdit(startID: start.id, target: target)
-        manualEdit = edit
-        Bridge.write(edit, "manual-edit.json")
         showWords()
     }
 
-    private func rememberEditedField() {
-        guard state.phase == .recording || state.phase == .transcribing,
-            var edit = manualEdit, let target = edit.target else { return }
-        guard let current = currentTarget, target.field == current.field else { return }
+    /// The words shown so far stay in the field as the user's own text, and the rest
+    /// of the take lands at the caret when it ends. Nothing the user saw is taken back.
+    private func keepWordsInField(_ start: DictationStart) {
+        wordsInField = false
+        let proxy = textDocumentProxy
+        var kept = ""
+        var known = state.phase == .recording
+        if let draft = Bridge.read(Draft.self, "draft.json"), draft.start?.id == start.id {
+            kept = draft.words
+            let placement = draft.placement(at: currentTarget, ownsMark: ownsMark(draft))
+            markedDraft = nil
+            if isActive, placement == .marked {
+                // Typed in again as plain text, so the context the next key reads holds them.
+                proxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+                proxy.unmarkText()
+                proxy.insertText(draft.text)
+                typist.startNewWord(in: proxy)
+            } else if isActive {
+                // Some hosts already committed them. Others still hold them marked, and the next key would replace them.
+                proxy.unmarkText()
+            }
+            known = known || placement != nil
+            Bridge.remove("draft.json")
+        } else {
+            known = known || start.target.matches(currentTarget)
+        }
+        Diagnostics.log("words_kept", ["chars": kept.count, "phase": state.phase.rawValue, "known": known])
+        let edit = ManualEdit(startID: start.id, target: known ? currentTarget : nil, kept: kept)
+        manualEdit = edit
+        Bridge.write(edit, "manual-edit.json")
+    }
+
+    /// While recording, wherever the user leaves the caret in the take's field is where
+    /// the rest goes. After Done, only the keyboard's own edits keep that point known.
+    private func rememberEditedField(byHost: Bool = false) {
+        guard state.phase == .recording || state.phase == .transcribing, var edit = manualEdit,
+            let start = state.start, edit.startID == start.id,
+            let current = currentTarget, current.field == start.target.field else { return }
+        if state.phase == .transcribing {
+            guard !byHost, edit.target != nil else { return }
+        } else if byHost, !current.hasText {
+            // An emptied field is a sent message, which `endTakeIfFieldWasSent` handles.
+            return
+        }
         edit.target = current
         manualEdit = edit
         Bridge.write(edit, "manual-edit.json")
