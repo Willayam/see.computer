@@ -165,11 +165,51 @@ extern "C" {
     fn see_ocr_displays(timeout_ms: u32) -> *mut c_char;
     fn see_ocr_warm() -> bool;
     fn see_ocr_file(path: *const c_char) -> *mut c_char;
+    #[cfg(test)]
+    fn see_ocr_file_hash(path: *const c_char, out_hash: *mut u64) -> bool;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_hash_is_stable_and_detects_single_pixel_change() {
+        let dir = std::env::temp_dir().join(format!("see-ocr-hash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.bmp");
+        let b = dir.join("b.bmp");
+        let c = dir.join("c.bmp");
+        let write_bmp = |path: &Path, flip: bool| {
+            // 2x2 24-bit BMP (54-byte header + 2 rows of 8 bytes = 70 bytes)
+            let mut bmp = vec![0u8; 70];
+            bmp[0..2].copy_from_slice(b"BM");
+            bmp[2..6].copy_from_slice(&70u32.to_le_bytes());
+            bmp[10..14].copy_from_slice(&54u32.to_le_bytes());
+            bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+            bmp[18..22].copy_from_slice(&2i32.to_le_bytes());
+            bmp[22..26].copy_from_slice(&2i32.to_le_bytes());
+            bmp[26..28].copy_from_slice(&1u16.to_le_bytes());
+            bmp[28..30].copy_from_slice(&24u16.to_le_bytes());
+            bmp[54..70].fill(100);
+            if flip {
+                bmp[57] = 101;
+            }
+            std::fs::write(path, bmp).unwrap();
+        };
+        write_bmp(&a, false);
+        write_bmp(&b, false);
+        write_bmp(&c, true);
+        let hash_of = |p: &Path| {
+            let cs = CString::new(p.as_os_str().as_bytes()).unwrap();
+            let mut h = 0u64;
+            assert!(unsafe { see_ocr_file_hash(cs.as_ptr(), &raw mut h) });
+            h
+        };
+        assert_eq!(hash_of(&a), hash_of(&b));
+        assert_ne!(hash_of(&a), hash_of(&c));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn renders_titles_as_labels_and_preserves_prose_lines() {

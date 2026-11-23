@@ -95,11 +95,96 @@ char *see_window_titles(void) {
     }
 }
 
+static uint64_t MixBytes(uint64_t h, const uint8_t *bytes, size_t len) {
+    size_t words = len / 8;
+    for (size_t i = 0; i < words; i++) {
+        uint64_t v;
+        memcpy(&v, bytes + i * 8, sizeof(v));
+        h ^= v;
+        h *= 1099511628211ULL;
+    }
+    for (size_t i = words * 8; i < len; i++) {
+        h ^= bytes[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static bool ImageHash(CGImageRef image, uint64_t *outHash) {
+    if (!image || !outHash) return false;
+    CGDataProviderRef provider = CGImageGetDataProvider(image);
+    if (!provider) return false;
+    CFDataRef data = CGDataProviderCopyData(provider);
+    if (!data) return false;
+    const uint8_t *bytes = CFDataGetBytePtr(data);
+    size_t total = (size_t)CFDataGetLength(data);
+    size_t width = CGImageGetWidth(image);
+    size_t height = CGImageGetHeight(image);
+    size_t bpr = CGImageGetBytesPerRow(image);
+    size_t bpp = CGImageGetBitsPerPixel(image);
+    size_t rowBytes = (width * bpp + 7) / 8;
+    if (rowBytes > bpr) rowBytes = bpr;
+
+    uint64_t h = 14695981039346656037ULL;
+    uint64_t meta[4] = {(uint64_t)width, (uint64_t)height, (uint64_t)bpp, (uint64_t)rowBytes};
+    for (int i = 0; i < 4; i++) {
+        h ^= meta[i];
+        h *= 1099511628211ULL;
+    }
+    if (rowBytes == bpr) {
+        size_t active = height * bpr;
+        if (active > total) active = total;
+        h = MixBytes(h, bytes, active);
+    } else {
+        for (size_t y = 0; y < height; y++) {
+            size_t offset = y * bpr;
+            if (offset + rowBytes > total) break;
+            h = MixBytes(h, bytes + offset, rowBytes);
+        }
+    }
+    CFRelease(data);
+    *outHash = h;
+    return true;
+}
+
+bool see_ocr_file_hash(const char *path, uint64_t *outHash) {
+    @autoreleasepool {
+        NSURL *url = [NSURL fileURLWithFileSystemRepresentation:path isDirectory:NO relativeToURL:nil];
+        CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
+        if (!source) return false;
+        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+        CFRelease(source);
+        if (!image) return false;
+        bool ok = ImageHash(image, outHash);
+        CGImageRelease(image);
+        return ok;
+    }
+}
+
+static NSMutableDictionary<NSNumber *, NSArray *> *DisplayCache(void) {
+    static NSMutableDictionary<NSNumber *, NSArray *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary new]; });
+    return cache;
+}
+
 static void RecognizeDisplays(SCShareableContent *content, void (^complete)(NSArray *)) {
     dispatch_group_t group = dispatch_group_create();
     NSMutableArray *texts = [NSMutableArray array];
-    for (NSUInteger index = 0; index < content.displays.count; index++) [texts addObject:[NSNull null]];
+    NSMutableSet<NSNumber *> *liveIds = [NSMutableSet setWithCapacity:content.displays.count];
+    for (SCDisplay *display in content.displays) {
+        [texts addObject:[NSNull null]];
+        [liveIds addObject:@(display.displayID)];
+    }
+    NSMutableDictionary<NSNumber *, NSArray *> *cache = DisplayCache();
+    @synchronized (cache) {
+        for (NSNumber *key in cache.allKeys) {
+            if (![liveIds containsObject:key]) [cache removeObjectForKey:key];
+        }
+    }
+    dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
     [content.displays enumerateObjectsUsingBlock:^(SCDisplay *display, NSUInteger index, BOOL *stop __unused) {
+        NSNumber *displayKey = @(display.displayID);
         SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
         SCStreamConfiguration *config = [SCStreamConfiguration new];
         config.width = lround(display.width * filter.pointPixelScale);
@@ -113,9 +198,27 @@ static void RecognizeDisplays(SCShareableContent *content, void (^complete)(NSAr
                 return;
             }
             CGImageRetain(image);
-            dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            dispatch_group_async(group, queue, ^{
                 @autoreleasepool {
-                    NSString *text = Recognize(image);
+                    uint64_t hash = 0;
+                    bool hashed = ImageHash(image, &hash);
+                    NSString *text = nil;
+                    if (hashed) {
+                        @synchronized (cache) {
+                            NSArray *entry = cache[displayKey];
+                            if (entry && [entry[0] unsignedLongLongValue] == hash) {
+                                text = entry[1];
+                            }
+                        }
+                    }
+                    if (!text) {
+                        text = Recognize(image);
+                        if (text && hashed) {
+                            @synchronized (cache) {
+                                cache[displayKey] = @[@(hash), text];
+                            }
+                        }
+                    }
                     CGImageRelease(image);
                     @synchronized (texts) {
                         if (text) texts[index] = text;
@@ -125,7 +228,7 @@ static void RecognizeDisplays(SCShareableContent *content, void (^complete)(NSAr
             dispatch_group_leave(group);
         }];
     }];
-    dispatch_group_notify(group, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    dispatch_group_notify(group, queue, ^{
         complete([texts containsObject:[NSNull null]] ? nil : texts);
     });
 }
