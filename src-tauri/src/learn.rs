@@ -386,16 +386,26 @@ pub(crate) fn sound_cost(a: &[char], b: &[char]) -> f32 {
 pub struct Words(WordSource);
 
 enum WordSource {
-    Checker(std::sync::mpsc::Sender<Ask>),
+    Checker {
+        tx: std::sync::mpsc::Sender<Ask>,
+        memo: std::sync::Arc<std::sync::RwLock<HashMap<String, bool>>>,
+    },
     #[cfg(test)]
     List(HashSet<String>),
 }
 
-struct Ask {
-    word: String,
-    question: Question,
-    reply: std::sync::mpsc::Sender<bool>,
-    deadline: std::time::Instant,
+enum Ask {
+    Single {
+        word: String,
+        question: Question,
+        reply: std::sync::mpsc::Sender<bool>,
+        deadline: std::time::Instant,
+    },
+    Batch {
+        words: Vec<String>,
+        reply: std::sync::mpsc::Sender<()>,
+        deadline: std::time::Instant,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -409,6 +419,8 @@ impl Words {
         static SHARED: std::sync::OnceLock<Words> = std::sync::OnceLock::new();
         SHARED.get_or_init(|| {
             let (tx, rx) = std::sync::mpsc::channel::<Ask>();
+            let shared_memo = std::sync::Arc::new(std::sync::RwLock::new(HashMap::new()));
+            let worker_memo = shared_memo.clone();
             // NSSpellChecker is not safe to call concurrently: eight threads
             // got 16 wrong answers in 4,000 on 2026-11-02.
             crate::qos::spawn("see-words", crate::qos::Class::Upkeep, move || {
@@ -416,33 +428,127 @@ impl Words {
                 let mut memo = HashMap::new();
                 let mut slips = HashMap::new();
                 while let Ok(ask) = rx.recv() {
-                    let answer = match ask.question {
-                        Question::Knows => memoized_word(&mut memo, &ask.word, || {
-                            if languages.is_empty() || std::time::Instant::now() >= ask.deadline {
-                                return None;
+                    match ask {
+                        Ask::Single {
+                            word,
+                            question,
+                            reply,
+                            deadline,
+                        } => {
+                            let answer = match question {
+                                Question::Knows => {
+                                    let had = memo.contains_key(&word);
+                                    let known = memoized_word(&mut memo, &word, || {
+                                        if languages.is_empty()
+                                            || std::time::Instant::now() >= deadline
+                                        {
+                                            return None;
+                                        }
+                                        let mut found = false;
+                                        for language in &languages {
+                                            if check_word(&word, language)? {
+                                                found = true;
+                                                break;
+                                            }
+                                        }
+                                        (std::time::Instant::now() < deadline).then_some(found)
+                                    });
+                                    if !had && memo.contains_key(&word) {
+                                        worker_memo
+                                            .write()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                            .insert(word, known);
+                                    }
+                                    known
+                                }
+                                // No answer counts as a slip, as a failed spelling check
+                                // counts as known: the word waits rather than landing.
+                                Question::OneSlipFromAWord => {
+                                    memoized_word(&mut slips, &word, || {
+                                        if languages.is_empty()
+                                            || std::time::Instant::now() >= deadline
+                                        {
+                                            return None;
+                                        }
+                                        Some(languages.iter().any(|language| {
+                                            correction(&word, language)
+                                                .is_some_and(|fixed| one_slip_apart(&word, &fixed))
+                                        }))
+                                    })
+                                }
+                            };
+                            let _ = reply.send(answer);
+                        }
+                        Ask::Batch {
+                            words,
+                            reply,
+                            deadline,
+                        } => {
+                            if !languages.is_empty() && std::time::Instant::now() < deadline {
+                                let mut batchable = Vec::new();
+                                let mut other = Vec::new();
+                                for word in words {
+                                    if memo.contains_key(&word) {
+                                        continue;
+                                    }
+                                    if !word.is_empty() && word.chars().all(char::is_alphabetic) {
+                                        batchable.push(word);
+                                    } else {
+                                        other.push(word);
+                                    }
+                                }
+                                let mut newly_resolved = Vec::new();
+                                if !batchable.is_empty() {
+                                    let refs: Vec<&str> =
+                                        batchable.iter().map(String::as_str).collect();
+                                    if let Some(results) =
+                                        check_words_batch(&refs, &languages, deadline)
+                                    {
+                                        for (word, known) in batchable.into_iter().zip(results) {
+                                            memo.insert(word.clone(), known);
+                                            newly_resolved.push((word, known));
+                                        }
+                                    }
+                                }
+                                for word in other {
+                                    if std::time::Instant::now() >= deadline {
+                                        break;
+                                    }
+                                    let known = memoized_word(&mut memo, &word, || {
+                                        if std::time::Instant::now() >= deadline {
+                                            return None;
+                                        }
+                                        let mut found = false;
+                                        for language in &languages {
+                                            if check_word(&word, language)? {
+                                                found = true;
+                                                break;
+                                            }
+                                        }
+                                        (std::time::Instant::now() < deadline).then_some(found)
+                                    });
+                                    if memo.contains_key(&word) {
+                                        newly_resolved.push((word, known));
+                                    }
+                                }
+                                if !newly_resolved.is_empty() {
+                                    let mut guard = worker_memo
+                                        .write()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    for (word, known) in newly_resolved {
+                                        guard.insert(word, known);
+                                    }
+                                }
                             }
-                            let mut known = false;
-                            for language in &languages {
-                                known |= check_word(&ask.word, language)?;
-                            }
-                            (std::time::Instant::now() < ask.deadline).then_some(known)
-                        }),
-                        // No answer counts as a slip, as a failed spelling check
-                        // counts as known: the word waits rather than landing.
-                        Question::OneSlipFromAWord => memoized_word(&mut slips, &ask.word, || {
-                            if languages.is_empty() || std::time::Instant::now() >= ask.deadline {
-                                return None;
-                            }
-                            Some(languages.iter().any(|language| {
-                                correction(&ask.word, language)
-                                    .is_some_and(|fixed| one_slip_apart(&ask.word, &fixed))
-                            }))
-                        }),
-                    };
-                    let _ = ask.reply.send(answer);
+                            let _ = reply.send(());
+                        }
+                    }
                 }
             });
-            Words(WordSource::Checker(tx))
+            Words(WordSource::Checker {
+                tx,
+                memo: shared_memo,
+            })
         })
     }
 
@@ -461,6 +567,41 @@ impl Words {
         self.ask(word, Question::Knows, std::time::Duration::from_millis(50))
     }
 
+    /// Pre-check a batch of candidate words in one spellchecker pass so later
+    /// `knows_quickly` lookups hit the shared cache without channel roundtrips.
+    pub fn warm_quickly(&self, words: &[String]) {
+        let (tx, memo) = match &self.0 {
+            #[cfg(test)]
+            WordSource::List(_) => return,
+            WordSource::Checker { tx, memo } => (tx, memo),
+        };
+        let unseen: Vec<String> = {
+            let guard = memo
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            words
+                .iter()
+                .filter(|w| !guard.contains_key(w.as_str()))
+                .cloned()
+                .collect()
+        };
+        if unseen.is_empty() {
+            return;
+        }
+        let limit = std::time::Duration::from_millis(200);
+        let (reply, rx) = std::sync::mpsc::channel();
+        if tx
+            .send(Ask::Batch {
+                words: unseen,
+                reply,
+                deadline: std::time::Instant::now() + limit,
+            })
+            .is_ok()
+        {
+            let _ = rx.recv_timeout(limit);
+        }
+    }
+
     /// Whether autocorrect would turn this into a word by one typing slip.
     pub fn one_slip_from_a_word(&self, word: &str) -> bool {
         self.ask(
@@ -477,10 +618,19 @@ impl Words {
                 Question::Knows => set.contains(word) || set.contains(&word.to_lowercase()),
                 Question::OneSlipFromAWord => set.iter().any(|known| one_slip_apart(word, known)),
             },
-            WordSource::Checker(tx) => {
+            WordSource::Checker { tx, memo } => {
+                if matches!(question, Question::Knows) {
+                    if let Some(&known) = memo
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(word)
+                    {
+                        return known;
+                    }
+                }
                 let (reply, rx) = std::sync::mpsc::channel();
                 if tx
-                    .send(Ask {
+                    .send(Ask::Single {
                         word: word.into(),
                         question,
                         reply,
@@ -565,6 +715,136 @@ fn check_word(word: &str, language: &str) -> Option<bool> {
             startingAt: 0isize, language: language, wrap: false,
             inSpellDocumentWithTag: 0isize, wordCount: count];
         Some(range.length == 0)
+    })
+}
+
+/// Check a batch of pure-alphabetic words across `languages` with short-circuiting
+/// and a second pass on remaining unknowns (matching `memoized_word`'s race guard).
+fn check_words_batch(
+    words: &[&str],
+    languages: &[String],
+    deadline: std::time::Instant,
+) -> Option<Vec<bool>> {
+    let mut known = vec![false; words.len()];
+    for _pass in 0..2 {
+        for language in languages {
+            let pending: Vec<usize> = known
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &k)| (!k).then_some(i))
+                .collect();
+            if pending.is_empty() {
+                return Some(known);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            let subset: Vec<&str> = pending.iter().map(|&i| words[i]).collect();
+            let batch_res = check_batch_language(&subset, language)?;
+            for (idx, is_known) in pending.into_iter().zip(batch_res) {
+                if is_known {
+                    known[idx] = true;
+                }
+            }
+        }
+    }
+    (std::time::Instant::now() < deadline).then_some(known)
+}
+
+fn check_batch_language(words: &[&str], language: &str) -> Option<Vec<bool>> {
+    use objc2::{
+        msg_send,
+        runtime::{AnyClass, AnyObject},
+    };
+    if words.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut joined = String::new();
+    let mut ranges = Vec::with_capacity(words.len());
+    let mut utf16_pos = 0usize;
+    for (i, &w) in words.iter().enumerate() {
+        if i > 0 {
+            joined.push(' ');
+            utf16_pos += 1;
+        }
+        let len = w.encode_utf16().count();
+        ranges.push((utf16_pos, utf16_pos + len));
+        joined.push_str(w);
+        utf16_pos += len;
+    }
+    let c_joined = std::ffi::CString::new(joined).ok()?;
+    let c_lang = std::ffi::CString::new(language).ok()?;
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let checker_cls = AnyClass::get(c"NSSpellChecker")?;
+        let string_cls = AnyClass::get(c"NSString")?;
+        let orth_cls = AnyClass::get(c"NSOrthography")?;
+        let dict_cls = AnyClass::get(c"NSDictionary")?;
+        let checker: *mut AnyObject = msg_send![checker_cls, sharedSpellChecker];
+        if checker.is_null() {
+            return None;
+        }
+        let text_ns: *mut AnyObject =
+            msg_send![string_cls, stringWithUTF8String: c_joined.as_ptr()];
+        let lang_ns: *mut AnyObject = msg_send![string_cls, stringWithUTF8String: c_lang.as_ptr()];
+        let key_ns: *mut AnyObject =
+            msg_send![string_cls, stringWithUTF8String: c"Orthography".as_ptr()];
+        if text_ns.is_null() || lang_ns.is_null() || key_ns.is_null() {
+            return None;
+        }
+        let orth: *mut AnyObject = msg_send![orth_cls, defaultOrthographyForLanguage: lang_ns];
+        if orth.is_null() {
+            return None;
+        }
+        let options: *mut AnyObject =
+            msg_send![dict_cls, dictionaryWithObject: orth, forKey: key_ns];
+        let prev_auto: bool = msg_send![checker, automaticallyIdentifiesLanguages];
+        let prev_lang_raw: *mut AnyObject = msg_send![checker, language];
+        let prev_lang: *mut AnyObject = if prev_lang_raw.is_null() {
+            std::ptr::null_mut()
+        } else {
+            msg_send![string_cls, stringWithString: prev_lang_raw]
+        };
+        let _: () = msg_send![checker, setAutomaticallyIdentifiesLanguages: false];
+        let _: bool = msg_send![checker, setLanguage: lang_ns];
+        let full_len: usize = msg_send![text_ns, length];
+        let orth_out: *mut *mut AnyObject = std::ptr::null_mut();
+        let word_count: *mut isize = std::ptr::null_mut();
+        // NSTextCheckingTypeSpelling = 1 << 1 = 2.
+        let results: *mut AnyObject = msg_send![
+            checker,
+            checkString: text_ns,
+            range: SpellRange { location: 0, length: full_len },
+            types: 2u64,
+            options: options,
+            inSpellDocumentWithTag: 0isize,
+            orthography: orth_out,
+            wordCount: word_count
+        ];
+        if !prev_lang.is_null() {
+            let _: bool = msg_send![checker, setLanguage: prev_lang];
+        }
+        let _: () = msg_send![checker, setAutomaticallyIdentifiesLanguages: prev_auto];
+        if results.is_null() {
+            return None;
+        }
+        let mut known = vec![true; words.len()];
+        let count: usize = msg_send![results, count];
+        let mut wi = 0usize;
+        for i in 0..count {
+            let item: *mut AnyObject = msg_send![results, objectAtIndex: i];
+            let r: SpellRange = msg_send![item, range];
+            let loc = r.location;
+            let end = loc.saturating_add(r.length);
+            while wi < ranges.len() && ranges[wi].1 <= loc {
+                wi += 1;
+            }
+            let mut j = wi;
+            while j < ranges.len() && ranges[j].0 < end {
+                known[j] = false;
+                j += 1;
+            }
+        }
+        Some(known)
     })
 }
 
@@ -737,6 +1017,53 @@ fn capitalizes_a_word(swap: &Swap, words: &Words) -> bool {
 /// like "Comparing prices" would otherwise be boosted like a name. So does a
 /// dictionary word capitalized mid-sentence: boosted from a quoted "Yeah.",
 /// the decoder wrote "Yeah. Yeah." into the silence before every dictation.
+/// Pre-warm `words` with every token `context_terms` and `screen_candidates`
+/// will query, so one batched spellcheck pass populates the shared cache.
+pub fn warm_screen_words(text: &str, words: &Words) {
+    let mut unique = HashSet::new();
+    let mut batch = Vec::new();
+    let mut push = |word: &str| {
+        if !word.is_empty() && unique.insert(word.to_owned()) {
+            batch.push(word.to_owned());
+        }
+    };
+    for line in text.lines() {
+        for part in line.split_whitespace() {
+            let token = strip(strip(part).split(['\'', '’']).next().unwrap_or_default());
+            if token.len() > 64 {
+                continue;
+            }
+            let letters = token.chars().filter(|c| c.is_alphabetic()).count();
+            if letters < 2 {
+                continue;
+            }
+            if token.chars().all(char::is_alphabetic) {
+                let lower = token.to_lowercase();
+                if ORDINARY.contains(&lower.as_str()) {
+                    continue;
+                }
+                let upper = token.chars().filter(|c| c.is_uppercase()).count();
+                let lower_n = token.chars().filter(|c| c.is_lowercase()).count();
+                let capital_inside = token.chars().skip(1).any(char::is_uppercase);
+                if upper > 0 && !(capital_inside && lower_n > 0) {
+                    push(token);
+                }
+                push(&lower);
+            } else if token.contains('-')
+                && !token.contains(['/', '.', '_'])
+                && !token.chars().any(char::is_numeric)
+            {
+                for piece in token.split('-') {
+                    if !piece.is_empty() {
+                        push(piece);
+                    }
+                }
+            }
+        }
+    }
+    words.warm_quickly(&batch);
+}
+
 pub fn context_terms(text: &str, words: &Words) -> Vec<String> {
     let mut found: Vec<(String, usize)> = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();

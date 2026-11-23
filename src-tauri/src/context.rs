@@ -24,6 +24,7 @@ const CANDIDATES: usize = 400;
 /// Live capture and the eval both come through here.
 pub fn from_screen(text: &str, daybook: &[String]) -> Vec<Term> {
     let words = crate::learn::Words::shared();
+    crate::learn::warm_screen_words(text, words);
     gather(
         &crate::learn::context_terms(text, words),
         &crate::learn::screen_candidates(text, words),
