@@ -125,7 +125,12 @@ pub fn rewrite(
                 ends.push(rest.len() - next.len() + len);
             }
         }
-        let opens = out.trim_end().is_empty() || out.trim_end().ends_with(['.', '!', '?']);
+        // Quotes and brackets before the word don't end the sentence: "“Make".
+        let opens = out
+            .chars()
+            .rev()
+            .find(|c| c.is_alphanumeric() || matches!(c, '.' | '!' | '?'))
+            .is_none_or(|c| !c.is_alphanumeric());
         let mut used = end;
         let mut replacement = None;
         if word.starts_with(char::is_uppercase) {
@@ -208,6 +213,9 @@ mod tests {
             rewrite("Ok. Make sure", &names, &[], &words),
             "Ok. Make sure"
         );
+        for quoted in ["“Make sure.”", "Ok. (Make sure)", "Ok. \"Make sure\""] {
+            assert_eq!(rewrite(quoted, &names, &[], &words), quoted);
+        }
         let words = crate::learn::Words::from_list(&["kayla", "write"]);
         let name = [screen("Kaylo")];
         assert_eq!(
