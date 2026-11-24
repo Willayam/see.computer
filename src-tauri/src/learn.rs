@@ -1644,6 +1644,30 @@ mod tests {
     }
 
     #[test]
+    fn marks_put_back_on_a_word_land_as_a_boost_on_the_first_fix() {
+        let words = Words::from_list(&[
+            "intressant", "om", "kanske", "applet", "äpplet", "for", "för", "the", "kids",
+        ]);
+        let promoted: Vec<_> = promotions(
+            &fix(
+                "1",
+                "intressant om Applet kanske",
+                "intressant om äpplet kanske",
+                Source::ReadBack,
+            ),
+            &[],
+            &words,
+        )
+        .into_iter()
+        .map(|p| (p.term, p.heard))
+        .collect();
+        assert_eq!(promoted, [("äpplet".to_owned(), None)]);
+
+        let stripped = fix("1", "för the kids", "for the kids", Source::ReadBack);
+        assert!(promotions(&stripped, &[], &words).is_empty());
+    }
+
+    #[test]
     fn an_old_log_adds_only_its_real_words() {
         let words = Words::from_list(&["we", "see", "on", "light", "delight", "vuxen", "the"]);
         let mut events = Vec::new();
