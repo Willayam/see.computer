@@ -8,11 +8,6 @@
   --screen: var(--deep);
   --dim: rgba(248, 241, 228, 0.6);
   --hi: #f5c94e;
-  --chip: rgba(20, 20, 22, 0.92);
-  --chip-ink: #f4f2ed;
-  --chip-edge: transparent;
-  --listen: #5ac8fa;
-  --rec: #ff3b30;
   --word-size: 16.57vw;
 }
 @media (prefers-color-scheme: dark) {
@@ -23,8 +18,6 @@
     --mark: var(--ember);
     --screen: var(--deep);
     --dim: rgba(241, 237, 228, 0.56);
-    --chip: #08090d;
-    --chip-edge: rgba(255, 255, 255, 0.2);
   }
 }
 
@@ -32,8 +25,6 @@
 .glyph { width: 1em; height: 1em; flex: none; }
 code { font-family: var(--mono); font-size: 0.88em; overflow-wrap: anywhere; }
 .brand svg { box-shadow: 0 0 0 1px var(--cap-edge); }
-.fine { font-size: 15px; line-height: 1.45; color: var(--muted); }
-.deep .fine { color: var(--on-deep-muted); }
 .nb { white-space: nowrap; }
 br.wide { display: none; }
 
@@ -83,13 +74,11 @@ main :is(p, li) a:not(.key, .link):is(:hover, :focus-visible) { text-decoration-
   box-shadow: inset 0 0 0 1px var(--cap-edge);
   font: 13px/1.6 var(--mono);
 }
-.deep .screen { background: var(--deep-card); }
-.screen figcaption, .screen .label { display: block; margin-bottom: 8px; font: 500 13px/1.4 var(--text); color: var(--dim); }
+.screen .label { display: block; margin-bottom: 8px; font: 500 13px/1.4 var(--text); color: var(--dim); }
 .screen pre { margin: 0; font: inherit; white-space: pre; overflow-x: auto; }
 .screen pre.prewrap { white-space: pre-wrap; overflow-wrap: anywhere; }
 .screen .tree, .screen .dim { color: var(--dim); }
 .screen .tree b { font-weight: inherit; color: var(--on-deep); }
-.screen .tree .root { white-space: pre-wrap; overflow-wrap: anywhere; }
 .screen .c { font-family: var(--text); }
 .screen .prompt { color: var(--ember); }
 .screen .hi { color: var(--hi); }
@@ -98,9 +87,6 @@ main :is(p, li) a:not(.key, .link):is(:hover, :focus-visible) { text-decoration-
 .panes { display: grid; gap: 16px; }
 .panes > div + div { padding-top: 16px; box-shadow: 0 -1px 0 var(--deep-line); }
 .caret { display: inline-block; width: 0.55em; height: 1.15em; margin-left: 2px; vertical-align: text-bottom; background: var(--ember); }
-/* Two screens share a row once each is wide enough for the build command: 39 characters and the padding. */
-.screens { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(346px, 100%), 1fr)); }
-.screens .fine { grid-column: 1 / -1; }
 
 .tiles { margin-top: 28px; }
 .reasons .tiles { margin-top: 0; }
@@ -148,17 +134,13 @@ main :is(p, li) a:not(.key, .link):is(:hover, :focus-visible) { text-decoration-
   font-family: var(--serif);
   font-weight: 600;
   font-variation-settings: "opsz" 144, "SOFT" 100, "WONK" 0;
-  font-size: 60px;
+  font-size: min(60px, 12.6vw);
   line-height: 1;
   letter-spacing: -0.02em;
   white-space: nowrap;
   color: var(--ink);
 }
 .art-stat small { display: block; margin-top: 8px; font: 400 14px/1.3 var(--text); letter-spacing: 0; color: var(--muted); }
-/* What was said sits over what was pasted. */
-.art-stat small:first-child { margin: 0 0 4px; }
-.art-stat s { text-decoration-color: var(--mark); text-decoration-thickness: 1.5px; }
-
 /* Three frames of one clip. The sidebar creeps over the table, and the agent
    is sent to the frame the narration points at. */
 .art-frames { gap: 14px; padding-top: 22px; }
@@ -170,151 +152,55 @@ main :is(p, li) a:not(.key, .link):is(:hover, :focus-visible) { text-decoration-
 .frame.picked + .frame { --side: 62%; }
 .frame b { position: absolute; left: 50%; bottom: calc(100% + 11px); transform: translateX(-50%); white-space: nowrap; font: 600 13px/1 var(--text); color: var(--mark); }
 
-.notes { display: grid; gap: 14px var(--col, 24px); margin-top: 24px; }
-.notes p { max-width: 32em; font-size: 15px; line-height: 1.45; color: var(--muted); }
-.notes b, .facts b, .soon b { font-weight: 600; color: var(--ink); }
+.facts b { font-weight: 600; color: var(--ink); }
 
 .split { display: grid; gap: 28px; }
 :is(h2, .lede) + .split { margin-top: 28px; }
-.prose p + p { margin-top: 14px; }
 
-.defs { margin: 0; display: grid; gap: 18px 24px; }
-.defs dt { font-weight: 600; }
-.defs dd { margin: 2px 0 0; font-size: 15px; line-height: 1.45; color: var(--muted); }
-.files { gap: 14px; }
-.files dt { font: 600 14px/1.5 var(--mono); }
 
-.ledger { width: 100%; border-collapse: collapse; font-size: 15px; line-height: 1.4; }
-.ledger th, .ledger td { padding: 11px 16px 11px 0; text-align: left; vertical-align: baseline; font-weight: 400; }
-.ledger :is(th, td):last-child { padding-right: 0; }
-.ledger thead th { padding-top: 2px; font-size: 13px; font-weight: 600; color: var(--muted); }
-.ledger tbody :is(th, td) { border-top: 1px solid var(--line); }
-.ledger tbody tr:last-child :is(th, td) { padding-bottom: 4px; }
-.ledger .num { width: 2.6em; font-size: 13px; font-variant-numeric: tabular-nums; color: var(--muted); }
-.ledger .said, .ledger .pass, .ledger .nil { color: var(--muted); }
-.ledger .pasted { font-weight: 600; }
-.ledger .nil { font-weight: 400; }
-.ledger .pass { font-size: 13px; }
-.ledger .lbl { display: none; }
-.rules { display: grid; gap: 24px; align-content: start; }
-.rules p { max-width: 36em; margin-top: 6px; font-size: 15px; line-height: 1.45; color: var(--muted); }
-
-/* The pill is the product's own interface, so it keeps the product's colours and size. */
-.quad .art { height: 84px; }
-.pill {
-  position: relative;
+/* The iPhone keyboard, drawn at a fifth of its size: suggestions and the Dictate button over the letters. */
+.kb { display: grid; gap: 5px; width: 100%; max-width: 208px; }
+.kb-top { display: flex; align-items: center; gap: 12px; height: 26px; margin-bottom: 3px; padding-left: 8px; }
+.kb .sug { width: 26px; height: 5px; border-radius: 3px; background: var(--line); }
+.kb .dictate {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 3px;
-  height: 32px;
-  min-width: 92px;
-  padding: 0 12px;
-  border-radius: 16px;
-  background: var(--chip);
-  box-shadow: 0 0 0 1px var(--chip-edge), 0 8px 14px -8px rgba(0, 0, 0, 0.5);
+  gap: 5px;
+  height: 26px;
+  margin-left: auto;
+  padding: 0 11px;
+  --r: 13px;
+  font: 600 12px/1 var(--text);
+  color: var(--mark);
+  background: linear-gradient(var(--key-top), var(--key-bot));
+  box-shadow: inset 0 1px 0 var(--key-light), 0 0 0 1px var(--cap-edge), 0 2px 0 var(--key-lip);
 }
-.pill.locked::before { content: ""; position: absolute; inset: -4px; border-radius: 20px; border: 2px solid var(--listen); opacity: 0.9; }
-.pill .bar { width: 3px; height: 16px; border-radius: 2px; background: var(--listen); transform: scaleY(var(--h, 0.6)); }
-.pill.recording .bar { background: var(--rec); }
-.pill .rec { width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--rec); }
-.card {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  width: min(100%, 328px);
-  min-height: 40px;
-  padding: 5px 6px 5px 16px;
-  border-radius: 20px;
-  background: var(--chip);
-  color: var(--chip-ink);
-  font: 13px/1.3 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-  box-shadow: 0 0 0 1px var(--chip-edge), 0 8px 14px -8px rgba(0, 0, 0, 0.5);
-}
-/* The sentence wraps and only its first line shows, so the cut always falls after a whole word.
-   Every line ends in three dots drawn in its own padding, which stand in for the ellipsis. Chrome
-   leaves that padding out when it breaks a line, so the wrapper keeps the same room free and lets it show. */
-.card .said { height: 1.3em; padding-right: 0.86em; overflow: hidden; overflow: visible clip; }
-.card .said span {
-  --dot: radial-gradient(circle closest-side, currentColor 85%, transparent);
-  padding-right: 0.86em;
-  -webkit-box-decoration-break: clone;
-  box-decoration-break: clone;
-  background: var(--dot), var(--dot), var(--dot);
-  background-repeat: no-repeat;
-  background-size: 0.15em 0.15em;
-  background-position: right 0.69em bottom 0.23em, right 0.4em bottom 0.23em, right 0.11em bottom 0.23em;
-}
-.card button { position: relative; min-width: 62px; padding: 8px 12px; border-radius: 10px; background: rgba(255, 255, 255, 0.14); color: #fff; font-weight: 600; line-height: 1; }
-/* The button stays the product's size and takes taps on a 44 px area. */
-.card button::after { content: ""; position: absolute; inset: -8px -4px; }
-
-/* Nothing focused is one state with two examples: the card that works, and a capture of the real one. */
-.quad > .full > .art { justify-content: flex-start; }
-.capture { margin: 0; }
-/* The capture's shadow is cut off at the picture's edge, so the edge is faded out.
-   The bar starts 24 px into the picture, and the pull to the left puts it on the text's edge. */
-.real {
-  position: relative;
-  width: min(688px, 100% + 24px);
-  margin: -8px 0 -14px -24px;
-  --mask: linear-gradient(to right, transparent, #000 3%, #000 97%, transparent);
-  -webkit-mask-image: var(--mask), linear-gradient(#000 74%, transparent);
-  -webkit-mask-composite: source-in;
-  mask-image: var(--mask), linear-gradient(#000 74%, transparent);
-  mask-composite: intersect;
-}
-.real img { width: 100%; height: auto; }
-/* A hairline around the bar in the picture, placed by the bar's position in the file. It only shows on dark paper. */
-.real::after { content: ""; position: absolute; inset: 32.143% 3.488%; border-radius: 99px; box-shadow: 0 0 0 1px var(--chip-edge); }
-.capture figcaption { display: grid; gap: 8px; max-width: 40em; }
-
-.ruled { gap: 0; box-shadow: 0 1px 0 var(--line); }
-h2 + .ruled { margin-top: 28px; }
-.ruled > div { padding: 14px 0 16px; border-top: 1px solid var(--line); }
-.ruled dt { font-size: 20px; }
-.ruled dd { margin-top: 4px; }
-.ruled + .fine { max-width: 44em; margin-top: 20px; }
+.kb .dictate svg { width: 9px; height: 12px; }
+.kb-row { display: flex; justify-content: center; gap: 3px; }
+.kb-row i { flex: 0 0 calc((100% - 27px) / 10); height: 18px; border-radius: 4px; background: linear-gradient(var(--key-top), var(--key-bot)); box-shadow: inset 0 1px 0 var(--key-light), 0 0 0 1px var(--line), 0 2px 0 var(--key-lip); }
+.kb-row .mod { flex: 1; background: var(--key-bot); }
+.kb-row .space { flex-basis: calc((100% - 27px) / 2 + 12px); }
 
 .rows { margin: 0; }
 .rows > div { padding: 18px 0; box-shadow: 0 1px 0 var(--line); }
 .rows > div:first-child { padding-top: 0; }
 .perm > div { display: grid; gap: 4px 24px; }
-:is(.perm, .ruled) dt { font-family: var(--serif-48); font-weight: 600; font-variation-settings: "opsz" 48, "SOFT" 100, "WONK" 0; line-height: 1.15; letter-spacing: -0.01em; }
-.perm dt { font-size: 22px; }
+.perm dt { font-family: var(--serif-48); font-weight: 600; font-variation-settings: "opsz" 48, "SOFT" 100, "WONK" 0; font-size: 22px; line-height: 1.15; letter-spacing: -0.01em; }
 .perm dd { margin: 0; font-size: 15px; line-height: 1.45; color: var(--muted); }
-.perm small { display: block; margin-top: 4px; font-size: 15px; color: var(--muted); }
 
-.soon { margin-top: 24px; }
-.facts { list-style: none; margin: 0; padding: 0; display: grid; gap: 16px; }
+.facts { list-style: none; max-width: 40em; margin: 0; padding: 0; display: grid; gap: 16px; }
 .facts li { position: relative; padding-left: 22px; font-size: 15px; line-height: 1.45; color: var(--muted); }
 .facts li::before { content: ""; position: absolute; left: 1px; top: 7px; width: 8px; height: 8px; border-radius: 50%; background: var(--mark); }
-#free { padding-bottom: 40px; }
+#permissions { padding-bottom: 40px; }
 
-.install-grid { display: grid; gap: 40px; }
-.install .muted { margin-top: 10px; font-size: 15px; color: var(--on-deep-muted); }
+.install-grid { display: grid; gap: 24px; justify-items: start; }
 .acts { display: flex; flex-wrap: wrap; gap: 10px; }
-.install .acts { margin-top: 24px; }
 footer nav b { font-weight: 600; color: var(--on-deep); }
 
 @media (prefers-reduced-motion: no-preference) {
   .caret { animation: blink 1.1s steps(1) infinite; }
-  .pill.live .bar { animation: level 1.1s ease-in-out infinite alternate; }
-  .pill.live .bar:nth-child(2) { animation-delay: -0.2s; }
-  .pill.live .bar:nth-child(3) { animation-delay: -0.5s; }
-  .pill.live .bar:nth-child(4) { animation-delay: -0.8s; }
-  .pill.live .bar:nth-child(5) { animation-delay: -0.35s; }
-  .pill.live .bar:nth-child(6) { animation-delay: -0.65s; }
-  .pill.live .bar:nth-child(7) { animation-delay: -0.1s; }
-  .pill.locked::before { animation: ring 1.6s ease-in-out infinite alternate; }
 }
 @keyframes blink { 50% { opacity: 0; } }
-@keyframes level {
-  from { transform: scaleY(calc(var(--h, 0.6) * 0.35)); }
-  to { transform: scaleY(var(--h, 0.6)); }
-}
-@keyframes ring { from { opacity: 0.45; } to { opacity: 1; } }
 
 @media (max-width: 599px) {
   .hero .note .first { display: block; }
@@ -322,59 +208,19 @@ footer nav b { font-weight: 600; color: var(--on-deep); }
   .gestures > .tile > .art { justify-content: flex-start; height: auto; margin: 0 0 4px; }
   .gestures .cap { width: 56px; height: 56px; --r: 16px; font-size: 24px; }
   .gestures .cap .glyph { width: 24px; height: 24px; }
-  /* A state reads across: its chip, then its name and line. */
-  .quad > .tile:not(.full) { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 4px 20px; }
-  .quad > .tile:not(.full) > .art { grid-row: 1 / span 2; align-self: center; height: auto; }
-  .quad > .tile:not(.full) > h3 { align-self: end; }
-  /* The fourth state stacks: name, line, the drawn card, a rule, then the capture. */
-  .quad > .full { overflow: hidden; }
-  .quad > .full > .art { order: 1; height: auto; margin-top: 6px; }
-  .quad > .full .card { width: 100%; }
-  .quad > .full > .capture { order: 2; margin-top: 6px; padding-top: 18px; border-top: 1px solid var(--line); }
-  /* The whole capture is too small to read on a phone, so only its end shows, cut off by the
-     tile on the left. --vis is how many of the picture's 688 px show. The picture scales with
-     the screen so that cut always falls in the gap before the same word, and the Copy button
-     always ends on the text's right edge. The mask softens the shadow where the picture's
-     lower edge cuts it. */
-  .real {
-    --vis: 346;
-    --k: calc((100vw - 42px) / var(--vis));
-    width: auto;
-    margin: calc(var(--k) * -36) -24px calc(var(--k) * -14) -18px;
-    -webkit-mask-image: linear-gradient(#000 74%, transparent);
-    mask-image: linear-gradient(#000 74%, transparent);
-  }
-  .real img { width: calc(var(--k) * 688); max-width: none; margin-left: calc(100% - var(--k) * 688); }
-  .real::after { inset: 32.143% calc(24 / var(--vis) * 100%) 32.143% -40px; }
   .tile :is(h2, h3) { margin-top: 0; }
-  /* Small enough that the longest italic line, "the microphone is doing.", stays whole on a 360 px phone. */
   h2 { font-size: min(38px, 10vw); }
+  /* On a phone the keyboard is drawn nearly as wide as its tile, like the frames above it. */
+  .kb { max-width: 320px; }
+  .kb-row i { height: 26px; border-radius: 5px; }
   .screen { font-size: clamp(11.5px, 3.3vw, 13px); }
-  .install .screen { padding-inline: 16px; }
-  /* A record is two lines beside its number: what was said, then what was pasted and the pass that did it. */
-  .ledger thead, .ledger .lbl { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-  .ledger .lbl { display: block; }
-  .ledger tbody tr { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: baseline; gap: 2px 12px; padding: 10px 0; border-top: 1px solid var(--line); }
-  .ledger tbody tr:first-child { padding-top: 0; border-top: 0; }
-  .ledger tbody tr:last-child { padding-bottom: 0; }
-  .ledger tbody tr :is(th, td), .ledger tbody tr:last-child :is(th, td) { padding: 0; border: 0; }
-  .ledger tbody .num { grid-row: 1 / span 2; width: auto; }
-  .ledger tbody .said { grid-column: 2 / -1; }
-  .ledger tbody .pasted { grid-column: 2; }
-  .ledger tbody .pass { white-space: nowrap; }
-}
-@media (min-width: 440px) and (max-width: 599px) {
-  /* Wider phones show from one sentence earlier, so the picture is never blown up far past its own size. */
-  .real { --vis: 420; }
 }
 @media (max-width: 767px) {
-  /* The three reasons stack: title, words, then the picture. A figure follows its title,
-     because the paragraph under it opens with "That is". */
-  .trio > .tile > .art { order: 1; height: 120px; margin-top: 4px; }
-  .trio > .tile > .art-stat { order: 0; height: auto; margin: 12px 0; }
+  /* The three tiles stack with the picture first, as the gesture tiles under them do. */
+  .trio { --frame: none; }
+  .trio > .tile > .art { justify-content: flex-start; height: auto; margin-bottom: 14px; }
   .trio > .tile > h2 { margin-top: 0; }
   .trio > .tile > p { max-width: 36em; }
-  .pairs .prose p:not(.fine) { font-size: 15px; }
   .brand { min-height: 44px; }
   .preview kbd { min-height: 44px; padding: 0 18px; }
   /* Room for a thumb around the two smallest footer links, without moving them. */
@@ -394,10 +240,7 @@ footer nav b { font-weight: 600; color: var(--on-deep); }
   h2 em { white-space: nowrap; }
   .panes { grid-template-columns: minmax(0, 1fr) auto; gap: 0 22px; }
   .panes > div + div { padding: 0 0 0 22px; box-shadow: -1px 0 0 var(--deep-line); }
-  .quad { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .tiles > .full { grid-column: 1 / -1; }
-  .ruled { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .ruled > div { padding-right: 24px; }
   .perm > div { grid-template-columns: 184px minmax(0, 1fr); align-items: baseline; }
   /* A tile on its side: picture left, words right. */
   .gestures > .tile { display: grid; grid-template-columns: var(--art, 200px) minmax(0, 1fr); gap: 0 24px; align-content: center; }
@@ -405,7 +248,6 @@ footer nav b { font-weight: 600; color: var(--on-deep); }
   .gestures > .tile > :where(:not(.art)) { grid-column: 2; max-width: 36em; }
   .gestures > .tile > h3 { margin-top: 0; }
   .gestures > .tile > p { margin-top: 8px; }
-  .gestures > .tile > p + p { margin-top: 10px; }
 }
 @media (min-width: 600px) and (max-width: 1039px) {
   .tile br.soft { display: none; }
@@ -417,54 +259,35 @@ footer nav b { font-weight: 600; color: var(--on-deep); }
   .hero h1 br.soft { display: none; }
 }
 @media (min-width: 768px) {
-  .notes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .split { gap: 40px; align-items: start; }
-  /* The paste paragraph stands beside the tree, and the four files run under both. */
-  .pairs { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); }
-  .pairs > .screen { grid-area: 1 / 2; }
-  .pairs > .prose { grid-area: 1 / 1; }
-  .pairs > .files { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 40px; }
   /* The reasons turn on their side here and not at 600 px, because three frames need a 296 px column.
      All three tiles take that column, so their titles share a left edge. */
   .trio { --art: 296px; }
-  .trio > .tile { display: grid; grid-template-columns: var(--art) minmax(0, 1fr); gap: 0 24px; align-content: center; }
-  .trio > .tile > .art { grid-column: 1; grid-row: 1 / span 4; align-self: center; justify-content: flex-start; height: auto; }
+  /* The spare rows above and below centre the words on the picture. */
+  .trio > .tile { display: grid; grid-template-columns: var(--art) minmax(0, 1fr); grid-template-rows: 1fr repeat(3, auto) 1fr; gap: 0 24px; }
+  .trio > .tile > .art { grid-column: 1; grid-row: 1 / -1; align-self: center; justify-content: flex-start; height: auto; }
   .trio > .tile > :where(:not(.art)) { grid-column: 2; max-width: 36em; }
-  .trio > .tile > h2 { margin-top: 0; }
-  .trio > .tile > p { margin-top: 8px; }
-  .trio > .tile > p + p { margin-top: 10px; }
+  .trio > .tile > h2 { grid-row: 2; margin-top: 0; }
+  .trio > .tile > p { grid-row: 3; margin-top: 8px; }
+  .trio > .tile > p + p { grid-row: 4; margin-top: 10px; }
 }
 @media (min-width: 768px) and (max-width: 1279px) {
   .hero .plate { margin: 0; --r: 36px; }
   .hero h1, .hero .say, .hero .cta-row { padding-inline: 36px; }
   .hero h1 { --inset: 72px; padding-top: 28px; }
-  .rules > div { display: grid; grid-template-columns: 184px minmax(0, 1fr); column-gap: 24px; align-items: baseline; }
-  .rules p { margin-top: 0; }
 }
 @media (min-width: 1040px) {
   br.wide { display: inline; }
-  .split.wide, .install-grid { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: start; }
-  .split, .install-grid { column-gap: 72px; }
-  .ruled { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  /* A gesture reads across like a row of a shortcut list: keys, name, what happens.
-     The notes under the list keep its columns, so the second note starts where the descriptions do. */
+  .split.wide { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: start; }
+  .split { column-gap: 72px; }
+  /* The closing section reads like the hero plate: the words on the left, the keys on the right. */
+  .install-grid { grid-template-columns: minmax(0, 1fr) auto; align-items: end; column-gap: 72px; }
+  /* A gesture reads across like a row of a shortcut list: keys, name, what happens. */
   #gestures { --art: 200px; --name: 280px; --col: 32px; }
   .gestures > .tile { grid-template-columns: var(--art) var(--name) minmax(0, 1fr); grid-template-rows: 1fr auto auto 1fr; column-gap: var(--col); align-content: stretch; align-items: baseline; }
   .gestures > .tile > .art { grid-row: 1 / -1; }
   .gestures > .tile > h3 { grid-area: 2 / 2 / span 2; }
   .gestures > .tile > p { grid-area: 2 / 3; margin-top: 0; }
-  .gestures > .tile > p + p { grid-row: 3; margin-top: 10px; }
-  .notes { grid-template-columns: calc(24px + var(--art) + var(--col) + var(--name)) minmax(0, 1fr); }
-  /* The fourth state keeps the first column of the three above it, and its capture starts on the second. */
-  .quad > .full { display: grid; grid-template-columns: subgrid; grid-template-rows: auto auto auto 1fr; gap: 8px normal; }
-  .quad > .full > * { grid-column: 1; margin-right: 24px; }
-  .quad > .full > .capture { grid-column: 2 / -1; grid-row: 1 / -1; margin-right: 0; padding-left: 24px; }
-  /* The bar in the picture centres on the card beside it, and the caption starts on the title's baseline. */
-  .real { --half: calc(min(688px, 100% + 24px) * 0.0814); margin-top: calc(42px - var(--half)); margin-bottom: calc(62px - var(--half)); }
-}
-@media (min-width: 1040px) and (max-width: 1279px) {
-  /* The real capture beside it is scaled to 89% at these widths, so the drawn card matches it. */
-  .quad > .full .card { zoom: 0.89; }
 }
 @media (min-width: 1280px) {
   .hero { padding: 24px 0 0; }
@@ -473,19 +296,16 @@ footer nav b { font-weight: 600; color: var(--on-deep); }
   .preview { grid-column: 2; grid-row: 1; margin: 0; }
   .hero .plate { grid-column: 1 / 3; grid-row: 2; align-self: stretch; margin: 20px 0 0; --r: 36px; }
   .hero .say { grid-column: 1 / 3; grid-row: 2; align-self: center; margin: 20px 0 0; padding: 26px 0 28px 36px; }
-  .hero .lede { font-size: 19px; max-width: min(34em, 100cqw - 340px); }
+  .hero .lede { font-size: 19px; max-width: min(38em, 100cqw - 340px); }
   .hero .cta-row { grid-column: 2; grid-row: 2; justify-content: flex-end; align-self: center; margin: 20px 0 0; padding: 0 36px 0 0; }
-  .cleanup { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); }
-  .cleanup .rules { order: -1; }
-  /* Uneven tracks put the third file on the left edge of the screen above it. */
-  .pairs > .files { grid-template-columns: repeat(2, minmax(0, 234fr)) repeat(2, minmax(0, 266fr)); }
-  /* Two figures share a row and the take runs under both: its frames under the first tile, its words under the second. */
+  /* The take runs across the top: its frames on the left half, its words on the right. Two tiles share the row under it. */
   .trio { grid-template-columns: repeat(2, minmax(0, 1fr)); --art: 184px; }
-  .trio > .tile { align-content: start; }
-  /* The spoken phrase starts level with the title, and the first figure leaves the same room
-     above it, so both rows of digits share a line. */
-  .trio > .tile > .art-stat { align-self: start; }
-  .trio > .tile:first-child > .art-stat { padding-top: 22.2px; }
-  .trio > .full { --art: calc(50% + 12px); --frame: 156px; align-content: center; }
+  /* The two half tiles stand upright, picture over words, so their titles share a line. */
+  .trio > .tile:not(.full) { display: flex; gap: 8px; }
+  .trio > .tile:not(.full) > .art { align-self: stretch; height: 132px; }
+  .trio > .tile:not(.full) > h2 { margin-top: 6px; }
+  .trio > .tile:not(.full) > p { margin-top: 0; }
+  .trio > .tile:not(.full) > p + p { margin-top: 2px; }
+  .trio > .full { --art: calc(50% + 12px); --frame: 156px; }
   .trio > .full > .art { gap: 16px; padding-right: 48px; }
 }
