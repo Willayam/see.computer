@@ -11,7 +11,15 @@ final class CompletionStrip: UIStackView {
     private var cached: WordSuggestions?
     private var canCorrect = false
     private var pending: DispatchWorkItem?
-    private let choices = (0..<3).map { _ in UIButton(type: .custom) }
+    /// Keeps a word clear of the dividers and of the capsule's rounded ends.
+    private final class Choice: UIButton {
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            // Insetting a button narrower than the inset gives a null rectangle, which a layer rejects.
+            if bounds.width > 8 { titleLabel?.frame = bounds.insetBy(dx: 4, dy: 0) }
+        }
+    }
+    private let choices = (0..<3).map { _ in Choice(type: .custom) }
     /// Apple marks the word that space will accept with a pale capsule rather than a bolder face.
     private let capsules = (0..<3).map { _ in UIView() }
     private static let text = UIColor {
@@ -47,7 +55,13 @@ final class CompletionStrip: UIStackView {
                 capsule.topAnchor.constraint(equalTo: button.topAnchor, constant: -Self.textDrop),
                 capsule.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: -Self.textDrop),
             ])
-            button.titleLabel?.lineBreakMode = .byTruncatingTail
+            // A third of the strip is narrower than most long words. Shrink them, and keep both
+            // ends of a word that still does not fit, because completions differ at the end.
+            button.titleLabel?.textAlignment = .center
+            button.titleLabel?.adjustsFontSizeToFitWidth = true
+            button.titleLabel?.minimumScaleFactor = 0.6
+            button.titleLabel?.baselineAdjustment = .alignCenters
+            button.titleLabel?.lineBreakMode = .byTruncatingMiddle
             button.addTarget(self, action: #selector(chosen(_:)), for: .touchUpInside)
             addArrangedSubview(button)
             if index > 0 {

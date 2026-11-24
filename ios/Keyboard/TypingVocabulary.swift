@@ -6,6 +6,8 @@ struct WordInput: Equatable {
     let previous: [String]
     let followsEnglishI: Bool
     let sentenceStart: Bool
+    /// The field will capitalize the next word, so a suggestion for it starts with a capital too.
+    let capitalizesNext: Bool
     let smartQuotes: Bool
 
     static func opensWord(_ c: Character) -> Bool { "([{\"“‘'«".contains(c) }
@@ -22,14 +24,15 @@ struct WordInput: Equatable {
 
     init?(_ proxy: UITextDocumentProxy) {
         guard Self.allowsCorrection(in: proxy), proxy.selectedText?.isEmpty != false,
-              let before = proxy.documentContextBeforeInput,
+              // Some hosts report an empty field as no context rather than as an empty string.
+              let before = proxy.documentContextBeforeInput ?? (proxy.hasText ? nil : ""),
               proxy.documentContextAfterInput?.first.map({ Self.wordCharacter($0) || $0.isNumber || $0 == "_" }) != true
         else { return nil }
         let token = before.suffix(128).reversed().prefix(while: Self.wordCharacter)
         word = String(token.reversed()).trimmingCharacters(in: CharacterSet(charactersIn: "'’"))
         let leading = before.dropLast(word.count)
         if word.isEmpty {
-            guard before.last?.isWhitespace == true else { return nil }
+            guard before.last?.isWhitespace ?? true else { return nil }
         } else {
             guard word.count <= 36, before.hasSuffix(word),
                   leading.last.map({ $0.isWhitespace || Self.opensWord($0) }) ?? true else { return nil }
@@ -40,6 +43,11 @@ struct WordInput: Equatable {
         let recent = sentenceStart ? [] : (sentence?.split(whereSeparator: { !Self.wordCharacter($0) }).suffix(4) ?? [])
         followsEnglishI = recent.last == "I"
         previous = recent.map { $0.lowercased().replacingOccurrences(of: "’", with: "'") }
+        switch proxy.autocapitalizationType {
+        case .sentences: capitalizesNext = word.isEmpty && sentenceStart
+        case .words: capitalizesNext = word.isEmpty
+        default: capitalizesNext = false
+        }
         guard let identifier = SeeDocumentIdentifier(proxy) else { return nil }
         field = identifier
         smartQuotes = proxy.smartQuotesType != .no
@@ -513,6 +521,26 @@ final class TypingVocabulary {
 
     private var lastWeights: [Double] = []
 
+    private struct Follower {
+        let text: String
+        let score: Double
+        let path: [Int]
+    }
+    private var following: [String: (previous: Int, before: Int?, words: [Follower])] = [:]
+
+    /// The words the tables have seen after `previous`, or after `before` and `previous`, most likely first.
+    private func followers(of previous: Int, _ before: Int?, in language: String, lex: Lexicon) -> [Follower] {
+        if let cached = following[language], cached.previous == previous, cached.before == before { return cached.words }
+        var words = lex.followers(previous, before, within: 8).map { id in
+            let path = lex.path(id)
+            let letters = path.map { Lexicon.alphabet[lex.letter($0)] }
+            return Follower(text: String(letters), score: lex.logProbability(id, after: previous, before), path: path)
+        }
+        words.sort { $0.score == $1.score ? $0.text < $1.text : $0.score > $1.score }
+        following[language] = (previous, before, words)
+        return words
+    }
+
     func suggestions(for input: WordInput) -> WordSuggestions {
         suggestions(for: input, trail: TapTrail(), layout: .standard(swedish: languages.contains { $0.code == "sv" }))
     }
@@ -533,7 +561,7 @@ final class TypingVocabulary {
         var result = WordSuggestions(titles: typed.isEmpty ? [] : [typed])
         func display(_ candidate: String) -> String {
             var text = candidate
-            if typed.first?.isUppercase == true {
+            if typed.first?.isUppercase == true || input.capitalizesNext {
                 text = candidate.prefix(1).uppercased() + candidate.dropFirst()
             }
             return input.smartQuotes ? text.replacingOccurrences(of: "'", with: "’") : text
@@ -581,8 +609,11 @@ final class TypingVocabulary {
             guard let lex = tables[language.code] else { continue }
             let prev =
                 input.sentenceStart ? lex.sentenceStart : input.previous.last.flatMap(lex.node).flatMap(lex.terminal)
+            // A lone earlier word opened the sentence.
+            let before = input.previous.count == 1 ? lex.sentenceStart
+                : input.previous.dropLast().last.flatMap(lex.node).flatMap(lex.terminal)
             let context = weight[index]
-            func score(_ id: Int) -> Double { context + lex.logProbability(id, after: prev) }
+            func score(_ id: Int) -> Double { context + lex.logProbability(id, after: prev, before) }
             if word.isEmpty {
                 if let prev {
                     let evidence: Double
@@ -592,10 +623,8 @@ final class TypingVocabulary {
                     } else {
                         evidence = context
                     }
-                    for next in lex.followers(prev, limit: 3) {
-                        if let id = lex.node(next).flatMap(lex.terminal) {
-                            completions.append((lex.displayForm(next), evidence + lex.logProbability(id, after: prev)))
-                        }
+                    for next in followers(of: prev, before, in: language.code, lex: lex).prefix(4) {
+                        completions.append((lex.displayForm(next.text), evidence + next.score))
                     }
                 }
                 continue
@@ -622,7 +651,10 @@ final class TypingVocabulary {
                    readings[TapDecoder.Reading(first: first, last: reading.last, compound: true)] != nil,
                    lex.text(first).count >= 3, lex.text(reading.last).count >= 3,
                    lex.text(first) + lex.text(reading.last) == word { return nil }
-                return (reading, context + (reading.compound ? lex.unigram(reading.last) : lex.logProbability(reading.last, after: reading.first ?? prev)) - cost)
+                let likelihood = reading.compound ? lex.unigram(reading.last)
+                    : reading.first.map { lex.logProbability(reading.last, after: $0) }
+                        ?? lex.logProbability(reading.last, after: prev, before)
+                return (reading, context + likelihood - cost)
             }
             ranked.sort {
                 if $0.1 != $1.1 { return $0.1 > $1.1 }
@@ -633,9 +665,24 @@ final class TypingVocabulary {
                 let lead = reading.first.map { lex.displayForm(lex.text($0)) + (reading.compound ? "" : " ") } ?? ""
                 candidates.append((lead + (reading.compound ? lex.text(reading.last) : lex.displayForm(lex.text(reading.last))), value))
             }
-            for next in decoders[language.code]?.completions(limit: 4) ?? [] {
+            for next in decoders[language.code]?.completions(limit: 8) ?? [] {
                 let text = lex.text(next.id)
-                if text.count > word.count { completions.append((lex.displayForm(text), context + next.score)) }
+                guard text.count > word.count else { continue }
+                completions.append((lex.displayForm(text), next.score - lex.unigram(next.id) + score(next.id)))
+            }
+            // A word seen after the previous one can outrank a commoner word the pair table never saw there.
+            if let prev, let prefixes = decoders[language.code]?.prefixCosts() {
+                for next in followers(of: prev, before, in: language.code, lex: lex) where next.text.count > word.count {
+                    let cost = next.path.dropLast().compactMap { prefixes[$0] }.min()
+                    if let cost { completions.append((lex.displayForm(next.text), context + next.score - cost)) }
+                }
+            }
+        }
+        if word.isEmpty, completions.isEmpty {
+            // Word ids are in order of frequency. After a word no table knows, offer the commonest.
+            for (index, language) in languages.enumerated() {
+                guard let lex = tables[language.code] else { continue }
+                for id in 0..<3 { completions.append((lex.displayForm(lex.text(id)), weight[index] + lex.unigram(id))) }
             }
         }
         let shiftedName = !input.sentenceStart && typed.first?.isUppercase == true &&
@@ -678,12 +725,12 @@ final class TypingVocabulary {
                hitsOwnKeys(word, trail: trail, layout: layout) {
                 threshold += 5
             }
-            if best.1 >= threshold - literalCost {
+            // One typed letter is nearly always the start of a longer word, not a word missing a letter.
+            if best.1 >= threshold - literalCost, word.count > 1 || replacement.count == 1 {
                 result.automatic = display(best.0)
                 append(display(best.0))
             }
         }
-        if let alternate = candidates.first(where: { display($0.0) != typed }) { append(display(alternate.0)) }
         for next in (completions + candidates).sorted(by: { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }) {
             append(display(next.0))
         }

@@ -4,6 +4,8 @@ The English and Swedish word models include vocabulary and frequency estimates d
 
 Word and pair counts use the Leipzig Corpora Collection datasets `eng_news_2023_1M`, `eng-com_web-public_2018_1M`, `swe_news_2023_1M`, and `swe_news_2022_1M` from Leipzig University. The keyboard tokenizes and aggregates the text under CC BY 4.0. [Collection](https://wortschatz.uni-leipzig.de/en/download) · [License](https://creativecommons.org/licenses/by/4.0/)
 
+Word, pair and three-word counts also use English and Swedish sentences from [Tatoeba](https://tatoeba.org) contributors under [CC BY 2.0 FR](https://creativecommons.org/licenses/by/2.0/fr/). The keyboard tokenizes and aggregates the text.
+
 Word and pair counts also use CC0 English and Swedish sentences from Mozilla Common Voice Sentence Collector contributors. [Source](https://github.com/common-voice/common-voice/tree/1b139004ffcff2ad9f7907a984397730992f237c/server/data) · [CC0](https://creativecommons.org/publicdomain/zero/1.0/)
 
 ## AOSP notice

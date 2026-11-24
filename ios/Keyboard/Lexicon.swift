@@ -6,6 +6,7 @@ struct Lexicon {
     private let frequency: Data?
     private let data: Data
     private let nodes, wordNodes, unigrams, rows, backoff, pairs, chars: Int
+    private let tripleRows, contexts, contextStarts, triples: Int
     let sentenceStart: Int
 
     init?(language: String) {
@@ -13,12 +14,15 @@ struct Lexicon {
             let mapped = try? Data(contentsOf: url, options: .alwaysMapped), mapped.count >= 64,
             mapped.starts(with: "SCLX".utf8)
         else { return nil }
-        func field(_ i: Int) -> Int {
-            mapped.withUnsafeBytes { Int($0.loadUnaligned(fromByteOffset: i * 4, as: UInt32.self)) }
+        func uint(at offset: Int) -> Int {
+            mapped.withUnsafeBytes { Int($0.loadUnaligned(fromByteOffset: offset, as: UInt32.self)) }
         }
-        let sections = (5...11).map(field)
-        guard field(1) == 1, sections[0] >= 64, zip(sections, sections.dropFirst()).allSatisfy({ $0 <= $1 }),
-              field(11) + 31 * 31 * 31 == mapped.count else { return nil }
+        func field(_ i: Int) -> Int { uint(at: i * 4) }
+        let sections = (5...15).map(field)
+        // The last context offset counts the triples, which run to the end of the file.
+        guard field(1) == 2, sections[0] >= 64, zip(sections, sections.dropFirst()).allSatisfy({ $0 <= $1 }),
+              field(11) + 31 * 31 * 31 == field(12), field(14) + 4 <= field(15), field(15) <= mapped.count,
+              field(15) + 4 * uint(at: field(15) - 4) == mapped.count else { return nil }
         let frequencies = Bundle.main.url(forResource: "frequency-\(language)", withExtension: "bin")
             .flatMap { try? Data(contentsOf: $0, options: .alwaysMapped) }
         frequency = frequencies?.count == field(3) ? frequencies : nil
@@ -31,6 +35,10 @@ struct Lexicon {
         backoff = field(9)
         pairs = field(10)
         chars = field(11)
+        tripleRows = field(12)
+        contexts = field(13)
+        contextStarts = field(14)
+        triples = field(15)
     }
 
     private func uint(_ offset: Int) -> Int {
@@ -56,11 +64,12 @@ struct Lexicon {
         return n
     }
 
-    func text(_ id: Int) -> String {
+    /// The nodes that spell a word, from its first letter to its last.
+    func path(_ id: Int) -> [Int] {
         var n = uint(wordNodes + 4 * id)
-        var letters: [Character] = []
+        var path: [Int] = []
         while n > 0 {
-            letters.append(Self.alphabet[letter(n)])
+            path.append(n)
             var low = 0
             var high = n
             while low + 1 < high {
@@ -69,8 +78,10 @@ struct Lexicon {
             }
             n = low
         }
-        return String(letters.reversed())
+        return path.reversed()
     }
+
+    func text(_ id: Int) -> String { String(path(id).map { Self.alphabet[letter($0)] }) }
 
     func displayForm(_ word: String) -> String {
         guard let n = node(word), uint(nodes + n * 8) & (1 << 30) != 0 else { return word }
@@ -82,33 +93,59 @@ struct Lexicon {
     private func pairRange(_ prev: Int) -> Range<Int> {
         uint(rows + prev * 4)..<uint(rows + (prev + 1) * 4)
     }
-    func logProbability(_ id: Int, after prev: Int?) -> Double {
-        let base = unigram(id)
-        guard let prev else { return base }
-        let range = pairRange(prev)
+    /// The first entry of a sorted run whose low 20 bits are not below `id`.
+    private func lowerBound(_ id: Int, in range: Range<Int>, of section: Int) -> Int {
         var low = range.lowerBound
         var high = range.upperBound
         while low < high {
             let mid = (low + high) / 2
-            if uint(pairs + mid * 4) & 0xfffff < id { low = mid + 1 } else { high = mid }
+            if uint(section + mid * 4) & 0xfffff < id { low = mid + 1 } else { high = mid }
         }
-        let backed = base - Double(data[backoff + prev]) / 10
-        guard low < range.upperBound else { return backed }
-        let pair = uint(pairs + low * 4)
-        guard pair & 0xfffff == id else { return backed }
-        return log(exp(backed) + exp(-Double(pair >> 20) / 128))
+        return low
     }
 
-    func followers(_ prev: Int, limit: Int) -> [String] {
-        var top: [(id: Int, cost: Int)] = []
-        for offset in pairRange(prev) {
-            let pair = uint(pairs + offset * 4)
-            let cost = pair >> 20
-            if top.count == limit && cost >= top.last!.cost { continue }
-            top.insert((pair & 0xfffff, cost), at: top.firstIndex { $0.cost > cost } ?? top.count)
-            if top.count > limit { top.removeLast() }
+    private func seen(_ id: Int, in range: Range<Int>, of section: Int, over backed: Double) -> Double {
+        let found = lowerBound(id, in: range, of: section)
+        guard found < range.upperBound else { return backed }
+        let entry = uint(section + found * 4)
+        guard entry & 0xfffff == id else { return backed }
+        return log(exp(backed) + exp(-Double(entry >> 20) / 128))
+    }
+
+    /// Where the table keeps the words seen after `before` and then `prev`.
+    private func context(_ before: Int?, _ prev: Int) -> Int? {
+        guard let before, prev < sentenceStart else { return nil }
+        let range = uint(tripleRows + prev * 4)..<uint(tripleRows + (prev + 1) * 4)
+        let found = lowerBound(before, in: range, of: contexts)
+        return found < range.upperBound && uint(contexts + found * 4) & 0xfffff == before ? found : nil
+    }
+
+    private func tripleRange(_ context: Int) -> Range<Int> {
+        uint(contextStarts + context * 4)..<uint(contextStarts + (context + 1) * 4)
+    }
+
+    /// `before` is the word ahead of `prev`. It sharpens the estimate when the three were seen together.
+    func logProbability(_ id: Int, after prev: Int?, _ before: Int? = nil) -> Double {
+        let base = unigram(id)
+        guard let prev else { return base }
+        let pair = seen(id, in: pairRange(prev), of: pairs, over: base - Double(data[backoff + prev]) / 10)
+        guard let context = context(before, prev) else { return pair }
+        let backed = pair - Double(uint(contexts + context * 4) >> 20) / 10
+        return seen(id, in: tripleRange(context), of: triples, over: backed)
+    }
+
+    /// Every word seen after `prev`, or after `before` and `prev`, with a probability of at least `exp(-floor)`.
+    func followers(_ prev: Int, _ before: Int?, within floor: Double) -> Set<Int> {
+        let limit = Int(floor * 128)
+        func likely(_ range: Range<Int>, of section: Int) -> [Int] {
+            range.compactMap { offset in
+                let entry = uint(section + offset * 4)
+                return entry >> 20 <= limit ? entry & 0xfffff : nil
+            }
         }
-        return top.map { text($0.id) }
+        var words = Set(likely(pairRange(prev), of: pairs))
+        if let context = context(before, prev) { words.formUnion(likely(tripleRange(context), of: triples)) }
+        return words
     }
 
     func completions(_ prefix: String, limit: Int) -> [String] {

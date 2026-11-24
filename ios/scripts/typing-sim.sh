@@ -1,6 +1,8 @@
 #!/bin/sh
 # Type the held-out sentences on the real keyboard views in a booted iOS Simulator.
-# Usage: typing-sim.sh <simulator UDID> [--set dev|test] [--languages bilingual|english] [--out <tsv>]
+# Usage: typing-sim.sh <simulator UDID> [--set dev|test] [--languages bilingual|english|swedish] [--out <tsv>]
+# Suggestions: typing-sim.sh <UDID> --mode suggest prints the keystrokes the strip saves and how often
+# it offers the next word. Add --input <sentences.txt> to score another file, one sentence per line.
 # Real data: typing-sim.sh <UDID> --mode real-swipe --input sample.jsonl --layout qwerty.json --out results.tsv
 # Encoder parity: use --mode neural-swipe with the same input, layout and output arguments.
 # Synthetic export: typing-sim.sh <UDID> --mode swipe --export-sv <output-prefix>
@@ -47,6 +49,13 @@ cp "$root"/Keyboard/words-*.bin "$scratch/"
 if [ "$mode" = real-swipe ] || [ "$mode" = neural-swipe ] || [ "$mode" = swipe-geometry ]; then
     xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --mode "$mode" --languages english $native_only \
         --input "${input:?Pass --input sample.jsonl}" --layout "${layout:?Pass --layout qwerty.json}" --out "${out:?Pass --out results.tsv}"
+    exit
+fi
+if [ "$mode" = suggest ]; then
+    set --
+    if [ -n "$input" ]; then set -- --input "$input"; fi
+    # shellcheck disable=SC2086
+    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" "$@" $pass
     exit
 fi
 if [ -n "$typing_log" ]; then

@@ -9,6 +9,7 @@ private final class Field: NSObject, UITextDocumentProxy {
     var documentInputMode: UITextInputMode? { nil }
     let documentIdentifier = UUID()
     var autocorrectionType = UITextAutocorrectionType.default
+    var autocapitalizationType = UITextAutocapitalizationType.sentences
     var keyboardType = UIKeyboardType.default
     var hasText: Bool { documentContextBeforeInput?.isEmpty == false || documentContextAfterInput?.isEmpty == false }
     func insertText(_ text: String) {
@@ -297,6 +298,16 @@ enum TypingVocabularyChecks {
         precondition(suggestions("Vi ses imorg").titles.contains("imorgon"))
         precondition(suggestions("Jag ").titles.contains("har"))
         precondition(suggestions("We ").titles.contains("are"))
+        precondition(suggestions("How are ").titles.first == "you", "The two words before pick the next one")
+        precondition(suggestions("Thank you ").titles.contains("for"))
+        precondition(suggestions("I think we sho").titles.contains("should"), "A completion follows the word before it")
+        precondition(Set(suggestions("Recom").titles) == ["Recom", "Recommend", "Recommended"],
+                     "A likelier longer word comes before a rare word of the typed length")
+        precondition(suggestions("").titles.contains("I"), "An empty field offers a first word")
+        precondition(suggestions("Thanks. ").titles.allSatisfy { $0.first?.isUppercase == true },
+                     "A word offered at the start of a sentence has its capital")
+        precondition(suggestions("We met Zorblat ").titles.count == 3, "An unknown word still leads somewhere")
+        precondition(suggestions("They are in t").automatic == nil, "One letter is the start of a word, not a typo")
         for input in ["user@teh", "example.teh", "some_teh", "#teh"] {
             precondition(suggestions(input).titles.isEmpty, "Leave identifier \(input) alone")
         }
