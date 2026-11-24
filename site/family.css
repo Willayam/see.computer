@@ -387,7 +387,8 @@ kbd {
 html.scrolled .top::before { opacity: 1; transform: none; }
 .top .wrap { display: flex; align-items: center; gap: 12px; height: 64px; }
 .brand { display: flex; align-items: center; gap: 10px; }
-.brand img, .brand svg { width: 30px; height: 30px; border-radius: 23%; }
+picture { display: contents; }
+.brand img { width: 30px; height: 30px; border-radius: 22.4%; box-shadow: 0 0 0 1px var(--cap-edge); }
 .brand .name {
   font-family: var(--serif-48);
   font-weight: 600;

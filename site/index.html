@@ -7,6 +7,9 @@
 <meta name="description" content="Show your agent what it needs as fast as you can say it. Hold the Globe key and speak, and the words land at your cursor. Add Shift, and your screen and voice become a folder a coding agent can read. Free and open source, no account. macOS 14, Apple Silicon.">
 <meta name="theme-color" content="#f8f1e4" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0c1427" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="icon-dark.png" type="image/png" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="icon.png" type="image/png" media="(prefers-color-scheme: light)">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="preload" as="font" type="font/woff2" href="fonts/fraunces-latin.woff2" crossorigin>
 <link rel="preload" as="font" type="font/woff2" href="fonts/gabarito-latin.woff2" crossorigin>
 <link rel="preload" as="font" type="font/woff2" href="fonts/fraunces-italic-latin.woff2" crossorigin>
@@ -31,11 +34,7 @@
 <header class="top">
   <div class="wrap">
     <a class="brand" href="#top" aria-label="see.computer, home">
-      <svg viewBox="0 0 26 26" role="img" aria-label="see.computer icon, a white ring and a black dot on a black rounded square">
-        <rect width="26" height="26" rx="6.5" fill="#141414"/>
-        <circle cx="13" cy="13" r="6.5" fill="none" stroke="#f4f2ed" stroke-width="2"/>
-        <circle cx="13" cy="13" r="2.4" fill="#f4f2ed"/>
-      </svg>
+      <picture><source srcset="icon-dark.png" media="(prefers-color-scheme: dark)"><img src="icon.png" width="30" height="30" alt=""></picture>
       <span class="name">see.computer</span>
     </a>
     <nav class="nav" aria-label="Primary">
