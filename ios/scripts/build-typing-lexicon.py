@@ -9,11 +9,15 @@ import struct
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from build_typing_sources import corpora, wordlist
+from build_typing_sources import corpora, everyday, wordlist
 
 ROOT = Path(__file__).resolve().parents[1]
 ALPHABET = "abcdefghijklmnopqrstuvwxyzåäö'"
 WORDS = re.compile(r"[^\W\d_]+(?:'[^\W\d_]+)*")
+# A three-word sequence is kept once it has this much weight in the corpora.
+TRIPLE_MIN = 3
+# Swedish has 57,000 everyday sentences against two million in English, so each counts for more.
+EVERYDAY_WEIGHT = {"en": 1, "sv": 3}
 
 
 def normalized(sentence):
@@ -26,10 +30,16 @@ def collect(language, cache):
         for p in (ROOT / "tests/typing-eval").glob("*.txt")
         for s in p.read_text().splitlines()
     }
-    uni, mid, capitals, pairs = (Counter() for _ in range(4))
+    uni, mid, capitals, pairs, triples = (Counter() for _ in range(5))
     held = []
     alphabet = set(ALPHABET if language == "sv" else ALPHABET[:26] + "'")
-    for cv, sentence in corpora(language, cache):
+    def sources():
+        for cv, sentence in corpora(language, cache):
+            yield cv, 3 if cv else 1, sentence
+        for sentence in everyday(language, cache, capitals, sum(uni.values())):
+            yield False, EVERYDAY_WEIGHT[language], sentence
+
+    for cv, weight, sentence in sources():
         key = normalized(sentence)
         if key in excluded:
             continue
@@ -38,16 +48,15 @@ def collect(language, cache):
             and int.from_bytes(hashlib.sha1(key.encode()).digest()[:4], "little") % 20
             == 0
         )
-        previous, end = "", 0
-        weight = 3 if cv else 1
+        previous, before, end = "", None, 0
         for m in WORDS.finditer(sentence.replace("’", "'")):
             gap = sentence[end : m.start()]
             if gap.strip():
-                previous = None
+                previous = before = None
             word = m[0].lower()
             end = m.end()
             if len(word) > 24 or not alphabet.issuperset(word):
-                previous = None
+                previous = before = None
                 continue
             if held_out:
                 held.append((previous, word))
@@ -59,7 +68,9 @@ def collect(language, cache):
                         capitals[word] += weight
                 if previous is not None:
                     pairs[previous, word] += weight
-            previous = word
+                    if before is not None:
+                        triples[before, previous, word] += weight
+            before, previous = previous, word
     entries = {}
     with gzip.open(wordlist(language, cache), "rt") as source:
         for line in source:
@@ -101,6 +112,12 @@ def collect(language, cache):
             totals[p] += c
             if c >= 2 or p == "":
                 rows[p][w] = c
+    contexts, context_totals = defaultdict(dict), Counter()
+    for (a, b, w), c in triples.items():
+        if (a == "" or a in vocab_set) and b in vocab_set and w in vocab_set:
+            context_totals[a, b] += c
+            if c >= TRIPLE_MIN:
+                contexts[a, b][w] = c
     n, k, z = sum(uni.values()), sum(left.values()), sum(prior.values())
     probs = {
         w: (0.5 * left[w] / k + 0.5 * uni[w] / n + 0.03 * prior[w] / z) / 1.03
@@ -118,11 +135,11 @@ def collect(language, cache):
         )
         or (language == "en" and (w == "i" or w.startswith("i'")))
     }
-    return probs, proper, rows, totals, held, entries
+    return probs, proper, rows, totals, held, entries, contexts, context_totals
 
 
 def pack_model(language, model):
-    probs, proper, rows, totals, held, entries = model
+    probs, proper, rows, totals, held, entries, seen_after, seen_totals = model
     vocab = sorted(probs, key=lambda w: (-probs[w], w))
     ids = {w: i for i, w in enumerate(vocab)}
     chars, contexts = Counter(), Counter()
@@ -193,6 +210,25 @@ def pack_model(language, model):
     def ints(values):
         return struct.pack(f"<{len(values)}I", *values)
 
+    # Lexicon.swift finds the words seen after two words by the nearer word, then the farther.
+    start = len(vocab)
+    by_previous = defaultdict(list)
+    for a, b in seen_after:
+        by_previous[b].append(ids.get(a, start))
+    triple_rows, context_words, context_starts, triples = [], [], [], bytearray()
+    for b in vocab:
+        triple_rows.append(len(context_words))
+        for a in sorted(by_previous.get(b, ())):
+            key = ("" if a == start else vocab[a]), b
+            row, total = seen_after[key], seen_totals[key]
+            bow = 1 - sum(c - 0.75 for c in row.values()) / total
+            context_words.append(a | quant(bow, 10, 255) << 20)
+            context_starts.append(len(triples) // 4)
+            for idx, c in sorted((ids[w], c) for w, c in row.items()):
+                triples.extend(struct.pack("<I", idx | quant((c - 0.75) / total, 128, 4095) << 20))
+    triple_rows.append(len(context_words))
+    context_starts.append(len(triples) // 4)
+
     char_data = bytes(
         quant((chars[a + b + c] + 0.05) / (contexts[a + b] + 0.05 * 31), 10, 255)
         for a in ALPHABET + "^"
@@ -207,6 +243,10 @@ def pack_model(language, model):
         backoff,
         pairs,
         char_data,
+        ints(triple_rows),
+        ints(context_words),
+        ints(context_starts),
+        triples,
     ]
     starts = []
     data = bytearray(64)
@@ -214,7 +254,7 @@ def pack_model(language, model):
         starts.append(len(data))
         data.extend(section)
     struct.pack_into(
-        "<4s11I", data, 0, b"SCLX", 1, len(nodes), len(vocab), len(pairs) // 4, *starts
+        "<4s15I", data, 0, b"SCLX", 2, len(nodes), len(vocab), len(pairs) // 4, *starts
     )
     (ROOT / f"Keyboard/words-{language}.bin").write_bytes(data)
     (ROOT / f"Keyboard/frequency-{language}.bin").write_bytes(bytes(entries.get(w, (0,))[0] for w in vocab))
@@ -233,6 +273,8 @@ def pack_model(language, model):
         "words,",
         len(pairs) // 4,
         "pairs,",
+        len(triples) // 4,
+        "triples,",
         len(data),
         "bytes, held-out in-vocabulary perplexity",
         round(math.exp(loss / count), 2),

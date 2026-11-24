@@ -1,8 +1,12 @@
 """Sources shared by the keyboard lexicon and eval builders."""
 
 import base64
+import bz2
+import csv
 import os
+import re
 import tarfile
+from collections import Counter
 from itertools import islice
 from pathlib import Path
 from shutil import copyfileobj
@@ -17,6 +21,9 @@ LEIPZIG = {
     "sv": ("swe_news_2023_1M", "swe_news_2022_1M"),
 }
 AOSP = {"en": "en_US_wordlist.combined.gz", "sv": "sv_wordlist.combined.gz"}
+TATOEBA = "https://downloads.tatoeba.org/exports/per_language/{0}/{0}_sentences.tsv.bz2"
+TATOEBA_CODES = {"en": "eng", "sv": "swe"}
+WORD = re.compile(r"[^\W\d_]+")
 
 
 def cached(cache, name, url, encoded=False):
@@ -64,6 +71,31 @@ def corpora(language, cache):
     with path.open() as lines:
         for line in lines:
             yield True, line.strip()
+
+
+def everyday(language, cache, capitals, size):
+    """Tatoeba's short everyday sentences, the closest of the sources to typed messages.
+
+    Its contributors return to a few names and places, Tom, Rima and Algeria among them, far
+    more than other writers do. A sentence is left out when it holds a capitalized word used
+    ten times as often here as in the other corpora, where `capitals` counts each such word
+    among `size` words.
+    """
+    code = TATOEBA_CODES[language]
+    path = cached(cache, f"tatoeba-{code}.tsv.bz2", TATOEBA.format(code))
+    rows = bz2.decompress(path.read_bytes()).decode().splitlines()
+    texts = [row[2].strip() for row in csv.reader(rows, delimiter="\t", quoting=csv.QUOTE_NONE)]
+    names = [[w.lower() for w in WORD.findall(text) if w.istitle()] for text in texts]
+    used = Counter(name for found in names for name in found[1:])
+    total = sum(len(WORD.findall(text)) for text in texts)
+    favored = {
+        name
+        for name, count in used.items()
+        if count >= 20 and count / total > 10 * (capitals[name] + 1) / size
+    }
+    for text, found in zip(texts, names):
+        if favored.isdisjoint(found):
+            yield text
 
 
 def training_sentences(language):

@@ -220,6 +220,15 @@ final class TapDecoder {
         return top
     }
 
+    /// What each word beginning the taps could spell costs, by the node it ends on.
+    func prefixCosts() -> [Int: Double] {
+        var costs: [Int: Double] = [:]
+        for state in layers.last! where state.first == nil && !state.compound && state.node != 0 {
+            costs[state.node] = min(costs[state.node] ?? .infinity, state.cost)
+        }
+        return costs
+    }
+
     func addPrior(to prior: inout [Double], weight: Double) {
         for state in layers.last! {
             let p = exp(weight - state.cost)
