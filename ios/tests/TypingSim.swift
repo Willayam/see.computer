@@ -145,6 +145,43 @@ private final class Pipeline {
     var traceOutput: FileHandle?
 
     /// What the suggestion row offers after the latest keystroke.
+    /// Types each sentence without mistakes and taps the intended word as soon as the strip offers it.
+    /// The spelling typed so far does not count as an offer.
+    func scoreSuggestions(_ sentences: [String]) -> String {
+        var keys = 0, typedOut = 0, words = 0, nextThree = 0, nextFirst = 0
+        func folded(_ text: String) -> String { text.lowercased().replacingOccurrences(of: "’", with: "'") }
+        for sentence in sentences {
+            var before = ""
+            for token in sentence.split(separator: " ") {
+                let lead = token.prefix { !$0.isLetter }
+                let word = String(token.dropFirst(lead.count).prefix(while: WordInput.wordCharacter))
+                guard !word.isEmpty else { before += token + " "; continue }
+                before += lead
+                words += 1
+                typedOut += word.count + 1
+                var cost = word.count + 1
+                for count in 0..<word.count {
+                    let typed = String(word.prefix(count))
+                    field.text = before + typed
+                    guard let input = WordInput(field) else { continue }
+                    let offered = vocabulary.suggestions(for: input).titles.filter { count == 0 || folded($0) != folded(typed) }
+                    guard let slot = offered.firstIndex(where: { folded($0) == folded(word) }) else { continue }
+                    if count == 0 {
+                        nextThree += 1
+                        if slot == 0 { nextFirst += 1 }
+                    }
+                    cost = count + 1
+                    break
+                }
+                keys += cost
+                before += token.dropFirst(lead.count) + " "
+            }
+        }
+        func share(_ part: Int, _ whole: Int) -> Double { Double(part) / Double(max(whole, 1)) * 100 }
+        return String(format: "words=%d keystrokes_saved=%.1f%% next_word_top3=%.1f%% next_word_top1=%.1f%%",
+                      words, share(typedOut - keys, typedOut), share(nextThree, words), share(nextFirst, words))
+    }
+
     func suggestions() -> [String] {
         guard let input = WordInput(field) else { return [] }
         if let choices = typist.swipeChoices(in: field) { return choices }
@@ -575,7 +612,7 @@ enum TypingSim {
             arguments.firstIndex(of: name).flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
         }
         guard let corpus = option("--corpus") else {
-            print("usage: TypingSim --corpus <dir> [--set dev|test] [--languages bilingual|english] [--out <tsv>]")
+            print("usage: TypingSim --corpus <dir> [--set dev|test] [--languages bilingual|english|swedish] [--out <tsv>]")
             exit(2)
         }
         if let path = option("--typing-log") { try await replayPhone(path); return }
@@ -585,8 +622,8 @@ enum TypingSim {
         let straight = gesture == "straight"
         let set = option("--set") ?? "dev"
         let mode = option("--languages") ?? "bilingual"
-        let languages: TypingLanguages = mode == "english" ? .english : .bilingual
-        let files = mode == "english" ? ["en"] : ["en", "sv"]
+        let languages: TypingLanguages = mode == "english" ? .english : mode == "swedish" ? .swedish : .bilingual
+        let files = mode == "english" ? ["en"] : mode == "swedish" ? ["sv"] : ["en", "sv"]
         let size = CGSize(width: 1184.0 / 3, height: 216)
         if let path = option("--replay"), let out = option("--out") {
             try await replay(path, out: out, languages: languages, size: size, observedSpaces: arguments.contains("--observed-spaces"))
@@ -617,6 +654,17 @@ enum TypingSim {
             pipeline.configureSwipe(endpoints: false)
             do { try replay(input, layout: layout, output: out, pipeline: pipeline, encoderOnly: option("--mode") != "real-swipe", geometryOnly: option("--mode") == "swipe-geometry") }
             catch { print(error); exit(1) }
+            return
+        }
+        if option("--mode") == "suggest" {
+            for language in files {
+                let path = option("--input") ?? "\(corpus)/\(set)-\(language).txt"
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+                    print("missing \(path)")
+                    exit(1)
+                }
+                print("suggest language=\(language) " + pipeline.scoreSuggestions(text.split(separator: "\n").map(String.init)))
+            }
             return
         }
         if swipe {
