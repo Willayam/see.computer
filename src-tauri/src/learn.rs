@@ -760,6 +760,9 @@ pub fn learnable(swap: &Swap, words: &Words) -> bool {
     {
         return false;
     }
+    if adds_marks(swap) {
+        return true;
+    }
     swap.wrote
         .split_whitespace()
         .enumerate()
@@ -767,6 +770,28 @@ pub fn learnable(swap: &Swap, words: &Words) -> bool {
             shaped_like_a_name(word, index == 0 && swap.opens_sentence)
                 || (could_be_spelled(word) && !words.knows(word))
         })
+}
+
+/// The fix only puts marks on letters the model wrote bare, as "applet" to
+/// "äpplet". The model spells a Swedish word as its English look-alike, and the
+/// audio scores the look-alike higher, so only a boost brings the marks back.
+/// The spelling checker knows both forms, and no slip of the keys adds a mark.
+///
+/// Boosting "är" and "för" added 24 errors to the 209-clip corpus on
+/// 2026-11-24, most of them "är" written into other words. Six boosted words
+/// of four to six letters changed none, so shorter words keep the old rules.
+fn adds_marks(swap: &Swap) -> bool {
+    let bare = |c: char| match c {
+        'å' | 'ä' => 'a',
+        'ö' => 'o',
+        'é' => 'e',
+        c => c,
+    };
+    let (heard, wrote) = (swap.heard.to_lowercase(), swap.wrote.to_lowercase());
+    heard != wrote
+        && wrote.chars().filter(|c| c.is_alphabetic()).count() >= 4
+        && heard.chars().count() == wrote.chars().count()
+        && heard.chars().zip(wrote.chars()).all(|(h, w)| h == bare(w))
 }
 
 /// What a word's form says on its own: the model could not have written it
@@ -1183,8 +1208,8 @@ fn candidates(events: &[Event], words: &Words) -> Vec<(String, Vec<Sighting>)> {
                     id: id.clone(),
                     heard: swap.heard.to_lowercase(),
                     source,
-                    needs_another_fix: may_be_a_typo(&swap, words)
-                        || capitalizes_a_word(&swap, words),
+                    needs_another_fix: !adds_marks(&swap)
+                        && (may_be_a_typo(&swap, words) || capitalizes_a_word(&swap, words)),
                 });
             }
         }
@@ -1646,7 +1671,19 @@ mod tests {
     #[test]
     fn marks_put_back_on_a_word_land_as_a_boost_on_the_first_fix() {
         let words = Words::from_list(&[
-            "intressant", "om", "kanske", "applet", "äpplet", "for", "för", "the", "kids",
+            "intressant",
+            "om",
+            "kanske",
+            "applet",
+            "äpplet",
+            "for",
+            "för",
+            "the",
+            "kids",
+            "det",
+            "ar",
+            "är",
+            "bra",
         ]);
         let promoted: Vec<_> = promotions(
             &fix(
@@ -1665,6 +1702,12 @@ mod tests {
 
         let stripped = fix("1", "för the kids", "for the kids", Source::ReadBack);
         assert!(promotions(&stripped, &[], &words).is_empty());
+
+        let short = fix("1", "det ar bra", "det är bra", Source::ReadBack);
+        assert!(
+            promotions(&short, &[], &words).is_empty(),
+            "a short word boosted lands in other words"
+        );
     }
 
     #[test]
