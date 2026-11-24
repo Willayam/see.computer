@@ -1,7 +1,9 @@
 name: Release
 
-# Push a tag like v0.1.0 to build signed and notarized Apple Silicon bundles.
-# The job attaches them to a draft GitHub release. Publish the draft by hand.
+# A merge to main that changes the Mac app builds, signs, notarizes and publishes a release.
+# The release takes the version in src-tauri/tauri.conf.json, or the last release plus one patch
+# when that version is already out. Run the workflow by hand for an unsigned installer preview,
+# or tick "release" to publish main without an app change.
 #
 # Secrets the job needs (Settings > Secrets and variables > Actions):
 #   APPLE_CERTIFICATE            base64 of the Developer ID Application .p12
@@ -14,16 +16,22 @@ name: Release
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 
 on:
-  workflow_dispatch:
   push:
-    tags: ["v*"]
+    branches: [main]
+    paths: ["src-tauri/**", "ui/**"]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Sign, notarize and publish. Leave off for an unsigned installer preview.
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
   preview:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && !inputs.release
     runs-on: macos-26
     permissions:
       contents: read
@@ -48,21 +56,39 @@ jobs:
           if-no-files-found: error
 
   build:
-    if: github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.release)
     runs-on: macos-26
+    # A second merge waits here, so it numbers itself after the release in front of it.
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
-      - name: Check the tag matches the app version
-        run: |
-          version=$(jq -r .version src-tauri/tauri.conf.json)
-          test "$GITHUB_REF_NAME" = "v$version"
-          test "$(cargo metadata --manifest-path src-tauri/Cargo.toml --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "see-computer") | .version')" = "$version"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - name: Pick the version and write it into the build
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          committed=$(jq -r .version src-tauri/tauri.conf.json)
+          released=$(gh release view --json tagName --jq .tagName)
+          IFS=. read -r major minor patch <<< "${released#v}"
+          version=$(printf '%s\n' "$committed" "$major.$minor.$((patch + 1))" | sort -V | tail -n 1)
+          jq --arg version "$version" '.version = $version' src-tauri/tauri.conf.json > "$RUNNER_TEMP/tauri.conf.json"
+          mv "$RUNNER_TEMP/tauri.conf.json" src-tauri/tauri.conf.json
+          VERSION=$version perl -0pi -e 's/(name = "see-computer"\nversion = ")[^"]+/$1$ENV{VERSION}/' src-tauri/Cargo.toml src-tauri/Cargo.lock
+          test "$(cargo metadata --manifest-path src-tauri/Cargo.toml --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "see-computer") | .version')" = "$version"
+          # A run that failed before publishing leaves a draft behind. Start again from nothing.
+          if [[ "$(gh release view "v$version" --json isDraft --jq .isDraft 2>/dev/null)" == true ]]; then
+            gh release delete "v$version" --yes
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
       - name: Require signing secrets
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -92,6 +118,8 @@ jobs:
             printf 'Missing required GitHub Actions secrets: %s\n' "${missing[*]}" >&2
             exit 1
           fi
+      - name: Test what is about to ship
+        run: cargo test --manifest-path src-tauri/Cargo.toml
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -105,8 +133,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: src-tauri
-          tagName: ${{ github.ref_name }}
-          releaseName: "see.computer ${{ github.ref_name }}"
+          tagName: ${{ steps.version.outputs.tag }}
+          releaseName: "see.computer ${{ steps.version.outputs.tag }}"
           releaseBody: "Download the DMG, drag see.computer to Applications, and open it. The 670 MB speech model downloads on first launch."
           releaseDraft: true
           prerelease: false
@@ -119,10 +147,11 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          version: ${{ steps.version.outputs.version }}
+          tag: ${{ steps.version.outputs.tag }}
         run: |
-          version=${GITHUB_REF_NAME#v}
           installer="$RUNNER_TEMP/see.computer.dmg"
-          gh release download "$GITHUB_REF_NAME" --pattern "see.computer_${version}_aarch64.dmg" --output "$installer"
+          gh release download "$tag" --pattern "see.computer_${version}_aarch64.dmg" --output "$installer"
           credentials=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
           xcrun notarytool submit "$installer" "${credentials[@]}" --wait --output-format json > "$RUNNER_TEMP/notarization.json"
           jq -e '.status == "Accepted"' "$RUNNER_TEMP/notarization.json"
@@ -138,4 +167,32 @@ jobs:
           spctl --assess --type execute "$app"
           versioned="$RUNNER_TEMP/see.computer_${version}_aarch64.dmg"
           cp "$installer" "$versioned"
-          gh release upload "$GITHUB_REF_NAME" "$installer" "$versioned" --clobber
+          gh release upload "$tag" "$installer" "$versioned" --clobber
+      - name: Check the update manifest and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          version: ${{ steps.version.outputs.version }}
+          tag: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release view "$tag" --json assets > "$RUNNER_TEMP/release.json"
+          archive="see.computer_${version}_aarch64.app.tar.gz"
+          for name in see.computer.dmg "see.computer_${version}_aarch64.dmg" "$archive" "$archive.sig" latest.json; do
+            jq -e --arg name "$name" 'any(.assets[]; .name == $name)' "$RUNNER_TEMP/release.json" > /dev/null
+          done
+          archive_url=$(jq -r --arg name "$archive" '.assets[] | select(.name == $name) | .apiUrl' "$RUNNER_TEMP/release.json")
+          gh release download "$tag" --pattern latest.json --dir "$RUNNER_TEMP"
+          jq -e --arg version "$version" --arg url "$archive_url" \
+            '.version == $version and (.platforms["darwin-aarch64"] | .url == $url and (.signature | length > 0))' \
+            "$RUNNER_TEMP/latest.json"
+          gh release edit "$tag" --draft=false --latest --target "$GITHUB_SHA"
+      - name: Check that installed apps can see the update
+        env:
+          version: ${{ steps.version.outputs.version }}
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            served=$(curl -fsSL https://github.com/Willayam/see.computer/releases/latest/download/latest.json | jq -r .version || true)
+            [[ "$served" == "$version" ]] && exit 0
+            sleep 10
+          done
+          echo "The update endpoint serves '$served', not $version." >&2
+          exit 1

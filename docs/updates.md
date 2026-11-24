@@ -43,10 +43,16 @@ The release workflow requires these GitHub Actions secrets:
 
 The workflow stops before the build if any required secret is missing. The installed updater key has no password and is protected by local file permissions and GitHub secret storage. It does not print secret values.
 
-## Release review
+## Releases
 
-Push a version tag only after the Cargo package version and Tauri configuration version match the tag. The workflow builds Apple Silicon `.app` and `.dmg` bundles. Tauri also creates the `.app.tar.gz` updater archive and its `.sig` file. `tauri-action` writes `latest.json` with a `darwin-aarch64` entry, the archive URL, and the literal signature text.
+A merge to `main` that changes `src-tauri/` or `ui/` starts the Release workflow. The workflow tests, builds, signs, notarizes and publishes without a manual step. Changes to the website, the iPhone app or the docs do not start it.
 
-The workflow creates a draft release and never publishes it. The workflow submits the signed DMG to Apple and staples the accepted notarization ticket to the disk image. Gatekeeper assesses both the disk image and the app inside it. The workflow also checks the Applications link and app version. It uploads the same DMG as `see.computer.dmg` for the website. Before publishing, confirm that the draft contains the DMG, updater archive, signature, and `latest.json`. Check that the manifest version matches the tag and that its updater URL names the uploaded `.app.tar.gz` file.
+The workflow chooses the version. It takes the version in `src-tauri/tauri.conf.json`, or the last published release plus one patch when that version is already out. It writes the chosen version into the build, so a pull request does not need to bump it. To move to a new minor or major version, change the version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `src-tauri/Cargo.lock` in a pull request.
 
-The configured endpoint uses GitHub's `/releases/latest/download/latest.json` route. Drafts and prereleases do not appear at that route. The endpoint starts serving the manifest only after someone publishes the draft as a regular release.
+The workflow builds Apple Silicon `.app` and `.dmg` bundles in a draft release. Tauri also creates the `.app.tar.gz` updater archive and its `.sig` file. `tauri-action` writes `latest.json` with a `darwin-aarch64` entry, the archive URL, and the literal signature text. The workflow submits the signed DMG to Apple and staples the accepted notarization ticket to the disk image. Gatekeeper assesses both the disk image and the app inside it. The workflow also checks the Applications link and app version. It uploads the same DMG as `see.computer.dmg` for the website.
+
+Before publishing, the workflow checks that the draft contains the DMG, updater archive, signature, and `latest.json`. It checks that the manifest version matches the release and that its updater URL points at the uploaded `.app.tar.gz` file. It then publishes the draft, tags the commit it built, and confirms that the update endpoint serves the new version. A failed run publishes nothing. Run it again from the Actions tab once the cause is fixed.
+
+To release `main` without an app change, run the Release workflow by hand and tick `release`. Without the tick, it builds an unsigned installer preview and publishes nothing.
+
+The configured endpoint uses GitHub's `/releases/latest/download/latest.json` route. Drafts and prereleases do not appear at that route. The endpoint starts serving the manifest only after the workflow publishes the draft as a regular release.
