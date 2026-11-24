@@ -1,0 +1,557 @@
+/* The look shared with williamlarsten.com and see.computer: warm paper, Fraunces
+   headings, Gabarito text, pressable keys, plates and tiles. Keep this file the
+   same on every site in the family and put what is particular to one product in
+   its own stylesheet. */
+
+@font-face { font-family: "Fraunces"; font-style: normal; font-weight: 100 900; font-display: swap; src: url(fonts/fraunces-latin-ext.woff2) format("woff2"); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Fraunces"; font-style: normal; font-weight: 100 900; font-display: swap; src: url(fonts/fraunces-latin-rest.woff2) format("woff2"); unicode-range: U+00A1-00A8, U+00AA-00AC, U+00AE-00B6, U+00B8-00C3, U+00C6-00C8, U+00CA-00D5, U+00D8-00E3, U+00E6-00E8, U+00EA-00F5, U+00F7-00FF, U+0131, U+0152-0153, U+02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+201A, U+201E, U+2022, U+2032-2033, U+2039-203A, U+2044, U+2122, U+2212, U+2215; }
+@font-face { font-family: "Fraunces"; font-style: normal; font-weight: 100 900; font-display: swap; src: url(fonts/fraunces-latin.woff2) format("woff2"); unicode-range: U+0020-007E, U+00A0, U+00A9, U+00AD, U+00B7, U+00C4-00C5, U+00C9, U+00D6-00D7, U+00E4-00E5, U+00E9, U+00F6, U+2013-2014, U+2018-2019, U+201C-201D, U+2026, U+20AC; }
+@font-face { font-family: "Fraunces"; font-style: italic; font-weight: 500; font-display: swap; src: url(fonts/fraunces-italic-latin.woff2) format("woff2"); unicode-range: U+0020-007E, U+00A0, U+00C4-00C5, U+00C9, U+00D6, U+00E4-00E5, U+00E9, U+00F6, U+2013-2014, U+2018-2019, U+201C-201D, U+2026; }
+@font-face { font-family: "Gabarito"; font-style: normal; font-weight: 400 900; font-display: swap; src: url(fonts/gabarito-latin-ext.woff2) format("woff2"); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Gabarito"; font-style: normal; font-weight: 400 900; font-display: swap; src: url(fonts/gabarito-latin-rest.woff2) format("woff2"); unicode-range: U+00A1-00A8, U+00AA-00AC, U+00AE-00B6, U+00B8-00C3, U+00C6-00C8, U+00CA-00D5, U+00D8-00E3, U+00E6-00E8, U+00EA-00F5, U+00F7-00FF, U+0131, U+0152-0153, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+201A, U+201E, U+2022, U+2039-203A, U+2044, U+2122, U+2191, U+2193, U+2212; }
+@font-face { font-family: "Gabarito"; font-style: normal; font-weight: 400 900; font-display: swap; src: url(fonts/gabarito-latin.woff2) format("woff2"); unicode-range: U+0020-007E, U+00A0, U+00A9, U+00B7, U+00C4-00C5, U+00C9, U+00D6-00D7, U+00E4-00E5, U+00E9, U+00F6, U+2002, U+2009, U+200B, U+2013-2014, U+2018-2019, U+201C-201D, U+2026, U+20AC; }
+/* System fonts resized to the webfonts' metrics, so text does not jump when they arrive. */
+@font-face { font-family: "Fraunces Fallback"; font-style: normal; font-weight: 100 500; src: local("Times New Roman"), local("Times"); size-adjust: 95.2%; ascent-override: 103%; descent-override: 27.3%; line-gap-override: 0%; }
+@font-face { font-family: "Fraunces Fallback"; font-style: normal; font-weight: 600 900; src: local("Times New Roman Bold"), local("TimesNewRomanPS-BoldMT"), local("Times Bold"), local("Times-Bold"); size-adjust: 93.6%; ascent-override: 104.7%; descent-override: 27.8%; line-gap-override: 0%; }
+@font-face { font-family: "Fraunces 48 Fallback"; font-style: normal; font-weight: 100 500; src: local("Times New Roman"), local("Times"); size-adjust: 111.6%; ascent-override: 87.8%; descent-override: 23.3%; line-gap-override: 0%; }
+@font-face { font-family: "Fraunces 48 Fallback"; font-style: normal; font-weight: 600 900; src: local("Times New Roman Bold"), local("TimesNewRomanPS-BoldMT"), local("Times Bold"), local("Times-Bold"); size-adjust: 108.2%; ascent-override: 90.6%; descent-override: 24%; line-gap-override: 0%; }
+@font-face { font-family: "Gabarito Fallback"; font-style: normal; font-weight: 100 500; src: local("Helvetica Neue"), local("HelveticaNeue"), local("Helvetica"), local("Arial"); size-adjust: 97.4%; ascent-override: 96.5%; descent-override: 26.7%; line-gap-override: 0%; }
+@font-face { font-family: "Gabarito Fallback"; font-style: normal; font-weight: 600 900; src: local("Helvetica Neue Bold"), local("HelveticaNeue-Bold"), local("Helvetica Bold"), local("Helvetica-Bold"), local("Arial Bold"), local("Arial-BoldMT"); size-adjust: 92.9%; ascent-override: 101.2%; descent-override: 28%; line-gap-override: 0%; }
+
+:root {
+  color-scheme: light dark;
+  --bg: #f8f1e4;
+  --ink: #2c1d1a;
+  --muted: #6a5d4e;
+  --card: #efe6d3;
+  --card-2: #e8ddc6;
+  --sh: 44, 29, 26;
+  --line: rgba(44, 29, 26, 0.14);
+  --tomato: #d03d27;
+  --ember: #ff8f57;
+  --on: #fff;
+  --deep: #2c1d1a;
+  --on-deep: #f8f1e4;
+  --on-deep-muted: rgba(248, 241, 228, 0.82);
+  --deep-line: rgba(248, 241, 228, 0.16);
+  --deep-card: #3b2924;
+  --deep-word: rgba(248, 241, 228, 0.13);
+  --plate: linear-gradient(#efe5cf, #e9ddc3);
+  --lip: #d0c0a0;
+  --plate-light: rgba(255, 255, 255, 0.55);
+  --plate-shadow: 0 18px 30px -18px rgba(var(--sh), 0.3);
+  --tile-light: rgba(255, 255, 255, 0.5);
+  --tile-lip: rgba(var(--sh), 0.1);
+  --lift: 0 22px 34px -22px rgba(var(--sh), 0.38);
+  --cap: #faf4e9;
+  --cap-edge: rgba(44, 29, 26, 0.1);
+  --key-ink: var(--ink);
+  --key-top: #faf4e8;
+  --key-bot: #f2e9d8;
+  --key-light: #fff;
+  --key-lip: var(--lip);
+  --key-sh: rgba(var(--sh), 0.3);
+  --key-lip-deep: #c9b998;
+  --key-sh-deep: rgba(0, 0, 0, 0.5);
+  --cta-top: #d94531;
+  --cta-mid: var(--tomato);
+  --cta-bot: #c8381f;
+  --cta-light: rgba(255, 255, 255, 0.2);
+  --cta-lip: #9a2a18;
+  --cta-sh: rgba(154, 42, 24, 0.45);
+  --select: #f5c94e;
+  --on-select: #2c1d1a;
+  --butter: #f5c94e;
+  --dusk-1: #fbe7bf;
+  --dusk-2: #f8cf9d;
+  --ridge-1: #e39a6d;
+  --ridge-2: #a8563b;
+  --ridge-edge: rgba(255, 244, 222, 0.5);
+  --grain: 0.04;
+
+  --text: "Gabarito", "Gabarito Fallback", sans-serif;
+  --serif: "Fraunces", "Fraunces Fallback", serif;
+  --serif-48: "Fraunces", "Fraunces 48 Fallback", serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  --spring: cubic-bezier(0.2, 1.6, 0.4, 1);
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --pad: 24px;
+  --wrap: 720px;
+}
+@media (min-width: 768px) {
+  :root { --pad: 40px; --wrap: 1040px; }
+}
+@media (min-width: 1280px) {
+  :root { --wrap: 1200px; }
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sh: 0, 0, 0;
+    --bg: #0c1427;
+    --ink: #f1ede4;
+    --muted: #a6b0c6;
+    --card: #172240;
+    --card-2: #223052;
+    --line: rgba(241, 237, 228, 0.14);
+    --deep: #06091a;
+    --on-deep: #f1ede4;
+    --on-deep-muted: rgba(241, 237, 228, 0.78);
+    --deep-line: rgba(241, 237, 228, 0.14);
+    --deep-card: #172240;
+    --deep-word: rgba(241, 237, 228, 0.11);
+    --plate: linear-gradient(#25375e, #1e2d4f);
+    --lip: #05081a;
+    --plate-light: rgba(214, 226, 255, 0.16);
+    --plate-shadow: 0 24px 40px -20px rgba(0, 0, 0, 0.75);
+    --tile-light: rgba(214, 226, 255, 0.08);
+    --tile-lip: rgba(0, 0, 0, 0.45);
+    --lift: 0 26px 36px -22px rgba(0, 0, 0, 0.85);
+    --cap: #141e3a;
+    --cap-edge: rgba(241, 237, 228, 0.12);
+    --key-ink: #f1ede4;
+    --key-top: #334a78;
+    --key-bot: #293f68;
+    --key-light: rgba(214, 226, 255, 0.16);
+    --key-lip: #070b1a;
+    --key-sh: rgba(0, 0, 0, 0.7);
+    --key-lip-deep: #000;
+    --key-sh-deep: rgba(0, 0, 0, 0.8);
+    --cta-top: #d64028;
+    --cta-mid: #d03d27;
+    --cta-bot: #c2361e;
+    --cta-light: rgba(255, 255, 255, 0.22);
+    --cta-lip: #6e1c10;
+    --cta-sh: rgba(0, 0, 0, 0.7);
+    --select: #f1e9d3;
+    --on-select: #0c1427;
+    --butter: #f1e9d3;
+    --dusk-1: #111c39;
+    --dusk-2: #2f4686;
+    --ridge-1: #24366a;
+    --ridge-2: #172350;
+    --ridge-edge: rgba(190, 210, 255, 0.3);
+  }
+}
+
+* { box-sizing: border-box; }
+html {
+  background: var(--bg);
+  color: var(--ink);
+  -webkit-text-size-adjust: 100%;
+  overflow-x: clip;
+  scroll-behavior: smooth;
+  scroll-padding-top: 84px;
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+body {
+  position: relative;
+  margin: 0;
+  font: 400 17px/1.5 var(--text);
+  overflow-x: clip;
+  -webkit-font-smoothing: antialiased;
+  font-synthesis: none;
+}
+/* Paper grain over the whole page. It scrolls with the page on purpose: a fixed
+   layer makes iOS Safari stop painting the status bar strip. */
+body::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 90;
+  background: url(grain.png) 0 0 / 128px 128px;
+  opacity: var(--grain);
+  pointer-events: none;
+}
+@media (min-resolution: 1.5dppx) {
+  body::after { background-size: 64px 64px; opacity: calc(var(--grain) * 1.5); }
+}
+::selection { background: var(--select); color: var(--on-select); }
+:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 4px; }
+[hidden] { display: none !important; }
+a { color: inherit; text-decoration: none; }
+img, svg { display: block; max-width: 100%; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+p, figure { margin: 0; }
+p, dd, li { text-wrap: pretty; }
+h1, h2, h3 { margin: 0; }
+.serif, h1, h2 {
+  font-family: var(--serif);
+  font-weight: 600;
+  font-variation-settings: "opsz" 144, "SOFT" 100, "WONK" 0;
+  letter-spacing: -0.015em;
+}
+h1 {
+  font-size: 60px;
+  line-height: 0.96;
+  text-wrap: balance;
+  font-variation-settings: "opsz" 144, "SOFT" 100, "WONK" 1;
+}
+h2 { font-size: 38px; line-height: 1.02; letter-spacing: -0.02em; text-wrap: balance; }
+/* The one italic in the system: the last words of a heading. */
+h1 em, h2 em, .word em { font-style: italic; font-weight: 500; }
+h3, .serif-48 {
+  text-wrap: balance;
+  font-family: var(--serif-48);
+  font-weight: 600;
+  font-variation-settings: "opsz" 48, "SOFT" 100, "WONK" 0;
+  font-size: 24px;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+}
+.wrap { width: 100%; max-width: var(--wrap); margin: 0 auto; padding: 0 var(--pad); }
+section { padding: 56px 0; }
+.lede { font-size: 17px; line-height: 1.5; max-width: 34em; }
+h2 + .lede { margin-top: 12px; }
+.muted { color: var(--muted); }
+.sq { border-radius: var(--r, 18px); }
+@supports (corner-shape: squircle) {
+  .sq, .top::before { corner-shape: squircle; }
+}
+.link {
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--tomato);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+  transition: text-underline-offset 0.3s var(--ease);
+}
+@media (hover: hover) and (pointer: fine) {
+  .link:hover { text-underline-offset: 7px; }
+}
+.arrow { width: 14px; height: 14px; flex: none; transition: transform 0.45s var(--spring); }
+.skip {
+  position: fixed;
+  left: 12px;
+  top: 12px;
+  z-index: 100;
+  padding: 13px 18px;
+  border-radius: 14px;
+  background: var(--ink);
+  color: var(--bg);
+  font-weight: 600;
+}
+.skip:not(:focus) { width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Scroll reveals. family.js tags elements with data-rv while they wait below
+   the fold and adds .in when they arrive. Without the script nothing is hidden. */
+[data-rv] { opacity: 0; transform: translateY(22px); }
+[data-rv].in {
+  opacity: 1;
+  transform: none;
+  transition: opacity 0.7s var(--ease), transform 1s var(--ease);
+  transition-delay: calc(var(--rv-i, 0) * 80ms);
+}
+
+/* A key: the pressable cap every button on the site is made of. */
+.key {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 54px;
+  padding: 0 24px;
+  font-weight: 600;
+  font-size: 17px;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--key-ink);
+  --r: 18px;
+  --lipH: 2px;
+  background: linear-gradient(var(--key-top), var(--key-bot));
+  box-shadow:
+    inset 0 1px 0 var(--key-light),
+    0 var(--lipH) 0 var(--key-lip),
+    0 calc(var(--lipH) + 6px) 12px -8px var(--key-sh);
+  transition: transform 0.5s var(--spring), box-shadow 0.5s var(--spring);
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.key.cta {
+  color: var(--on);
+  background: linear-gradient(var(--cta-top), var(--cta-mid) 60%, var(--cta-bot));
+  box-shadow:
+    inset 0 1px 0 var(--cta-light),
+    0 var(--lipH) 0 var(--cta-lip),
+    0 calc(var(--lipH) + 6px) 12px -8px var(--cta-sh);
+}
+.key.small { min-height: 40px; padding: 0 16px; font-size: 15px; --r: 14px; }
+@media (hover: hover) and (pointer: fine) {
+  .key:where(:hover:not(:disabled, [aria-pressed="true"])) { --lipH: 4px; transform: translateY(-2px); }
+  .key:hover .arrow { transform: translate(2px, -2px); }
+}
+.key:focus-visible { outline: none; }
+.key:focus-visible::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border: 2px solid currentColor;
+  border-radius: calc(var(--r) - 4px);
+  pointer-events: none;
+}
+.key:active, .key.down {
+  transform: translateY(2px);
+  box-shadow:
+    inset 0 1px 0 var(--key-light),
+    0 0 0 var(--key-lip),
+    0 3px 6px -5px var(--key-sh);
+  transition-duration: 0.08s;
+}
+.key.cta:active, .key.cta.down {
+  box-shadow:
+    inset 0 1px 0 var(--cta-light),
+    0 0 0 var(--cta-lip),
+    0 3px 6px -5px var(--cta-sh);
+}
+/* A key that stays down is the chosen one of a set. It sinks and takes the
+   ember dot, so the tomato key stays the only call to action in view. */
+.key[aria-pressed] { color: var(--muted); }
+.key[aria-pressed="true"] {
+  color: var(--key-ink);
+  background: var(--key-bot);
+  transform: translateY(2px);
+  box-shadow: inset 0 1px 0 var(--key-light), 0 0 0 1px var(--cap-edge);
+}
+.key[aria-pressed]::before {
+  content: "";
+  position: absolute;
+  left: calc(50% - 2.5px);
+  bottom: 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ember);
+  transform: scale(0);
+  transition: transform 0.5s var(--spring);
+}
+.key[aria-pressed="true"]::before { transform: scale(1); }
+@media (prefers-color-scheme: dark) {
+  /* The muted blue falls under 4.5:1 on a dark key face. */
+  .key[aria-pressed="false"] { color: #c5cede; }
+}
+.deep .key:not(.cta) {
+  box-shadow:
+    inset 0 1px 0 var(--key-light),
+    0 var(--lipH) 0 var(--key-lip-deep),
+    0 calc(var(--lipH) + 6px) 12px -8px var(--key-sh-deep);
+}
+.deep .key:not(.cta):active, .deep .key:not(.cta).down {
+  box-shadow:
+    inset 0 1px 0 var(--key-light),
+    0 0 0 var(--key-lip-deep),
+    0 3px 6px -5px var(--key-sh-deep);
+}
+/* A keyboard key named in running text. */
+kbd {
+  display: inline-block;
+  min-width: 1.7em;
+  padding: 0.12em 0.42em 0.14em;
+  border-radius: 7px;
+  font: 600 0.88em/1.3 var(--text);
+  text-align: center;
+  white-space: nowrap;
+  color: var(--key-ink);
+  background: linear-gradient(var(--key-top), var(--key-bot));
+  box-shadow:
+    inset 0 1px 0 var(--key-light),
+    0 0 0 1px var(--cap-edge),
+    0 2px 0 var(--key-lip);
+}
+
+/* The header floats over the page and gains a paper cap once it scrolls. */
+.top { position: sticky; top: 0; z-index: 10; }
+.top::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: max(8px, calc((100% - var(--wrap)) / 2 + var(--pad) - 18px));
+  right: max(8px, calc((100% - var(--wrap)) / 2 + var(--pad) - 18px));
+  z-index: -1;
+  border-radius: 20px;
+  background: var(--cap);
+  box-shadow:
+    inset 0 1px 0 var(--plate-light),
+    0 0 0 1px var(--cap-edge),
+    0 14px 26px -18px rgba(var(--sh), 0.45);
+  opacity: 0;
+  transform: scale(0.985);
+  transition: opacity 0.3s ease-out, transform 0.5s var(--ease);
+}
+html.scrolled .top::before { opacity: 1; transform: none; }
+.top .wrap { display: flex; align-items: center; gap: 12px; height: 64px; }
+.brand { display: flex; align-items: center; gap: 10px; }
+picture { display: contents; }
+.brand img { width: 30px; height: 30px; border-radius: 22.4%; box-shadow: 0 0 0 1px var(--cap-edge); }
+.brand .name {
+  font-family: var(--serif-48);
+  font-weight: 600;
+  font-variation-settings: "opsz" 48, "SOFT" 100, "WONK" 0;
+  font-size: 19px;
+  letter-spacing: -0.01em;
+}
+/* A small ember sits under the nav link for the section on screen. */
+.nav { position: relative; display: none; gap: 24px; margin-left: 28px; font-size: 15px; color: var(--muted); }
+.nav a { transition: color 0.2s ease-out; }
+.nav a.on { color: var(--ink); }
+.nav::after {
+  content: "";
+  position: absolute;
+  left: -3px;
+  bottom: -9px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ember);
+  transform: translateX(var(--x, 0)) scale(0);
+  transition: transform 0.5s var(--spring);
+}
+.nav[data-on]::after { transform: translateX(var(--x, 0)) scale(1); }
+@media (hover: hover) and (pointer: fine) {
+  .nav a:hover { color: var(--ink); }
+}
+.top .aside { margin-left: auto; font-size: 15px; }
+@media (max-width: 767px) {
+  .top { transition: background-color 0.25s ease-out, box-shadow 0.25s ease-out; }
+  html.scrolled .top {
+    background-color: var(--cap);
+    box-shadow: 0 1px 0 var(--cap-edge), 0 12px 22px -18px rgba(var(--sh), 0.45);
+  }
+  .top::before { display: none; }
+  .top .aside, footer nav a { display: inline-flex; align-items: center; min-height: 44px; }
+  footer nav { margin: 0 -8px; }
+  footer .copy { padding: 12px 0; }
+  footer nav a { padding: 0 8px; }
+}
+
+/* A hero heading rises out of its line, word by word, once the fonts are in. */
+.rise .w { display: inline-block; clip-path: inset(-0.12em -0.14em -0.24em -0.2em); }
+.rise .w > span {
+  display: inline-block;
+  transition: transform 1s var(--ease);
+  transition-delay: calc(var(--i, 0) * 90ms + 60ms);
+}
+html.js .hero:not(.in) .rise .w > span { transform: translateY(1.25em); transition: none; }
+.hero .after { transition: opacity 0.6s ease-out 0.2s, transform 0.9s var(--ease) 0.2s; }
+html.js .hero:not(.in) .after { opacity: 0; transform: translateY(12px); transition: none; }
+
+/* A plate: the raised slab that carries a page's main statement and its action. */
+.plate {
+  position: relative;
+  background: var(--plate);
+  --r: 36px;
+  box-shadow:
+    inset 0 1px 0 var(--plate-light),
+    0 2px 0 var(--lip),
+    var(--plate-shadow);
+}
+/* A tile: a quieter card for one item of a set. */
+.tiles { list-style: none; margin: 20px 0 0; padding: 0; display: grid; gap: 12px; }
+.tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 18px 18px 16px;
+  background: var(--card);
+  --r: 30px;
+  box-shadow: inset 0 1px 0 var(--tile-light), 0 1px 0 var(--tile-lip);
+}
+.tile p { font-size: 15px; line-height: 1.45; color: var(--muted); }
+/* The page ends on a dark hill. */
+.deep {
+  position: relative;
+  z-index: 1;
+  margin: 0;
+  padding: 92px 0 64px;
+  background: var(--deep);
+  color: var(--on-deep);
+  border-radius: 50% 50% 0 0 / 56px 56px 0 0;
+}
+.deep .lede { color: var(--on-deep); }
+/* Two paper ridges rise ahead of the hill that ends the page. Each ridge is
+   drawn twice in its svg: the filled shape, then its top edge alone as a thin
+   line of light. */
+/* The ridges stand on a strip of the near ridge's colour. That strip lifts
+   their lowest dip clear of the hill's crest and fills in behind its corners. */
+.ridges { position: relative; --lift: 20px; height: calc(120px + var(--lift)); overflow: hidden; }
+.ridges::after { content: ""; position: absolute; inset: auto 0 0; height: calc(var(--lift) + 1px); background: var(--ridge-2); }
+.ridge { position: absolute; left: 0; bottom: var(--lift); width: 100%; max-width: none; overflow: visible; }
+.ridge path:last-child { fill: none; stroke: var(--ridge-edge); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.ridge.far { height: 110px; fill: var(--ridge-1); }
+.ridge.near { height: 78px; fill: var(--ridge-2); }
+.ridges + .deep { margin-top: -56px; }
+@media (prefers-color-scheme: dark) {
+  .ridges + .deep { box-shadow: inset 0 1px 0 rgba(241, 237, 228, 0.09); }
+}
+@media (min-width: 768px) {
+  .ridges { --lift: 28px; height: calc(200px + var(--lift)); }
+  .ridge.far { height: 180px; }
+  .ridge.near { height: 128px; }
+  .deep:not(footer) { padding: 150px 0 72px; border-radius: 50% 50% 0 0 / 96px 96px 0 0; }
+  .ridges + .deep { margin-top: -96px; }
+}
+footer { padding: 24px 0 56px; font-size: 14px; color: var(--muted); }
+footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 10px 24px; }
+footer .wrap::before { content: ""; flex: 0 0 100%; height: 1px; margin-bottom: 14px; background: var(--line); }
+footer .copy { font-weight: 500; color: var(--ink); }
+footer nav { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+footer nav a { transition: color 0.2s ease-out; }
+@media (hover: hover) and (pointer: fine) {
+  footer nav a:hover { color: var(--ink); }
+  footer.deep nav a:hover { color: var(--on-deep); }
+}
+footer.deep {
+  padding: 0 0 56px;
+  border-radius: 0;
+  color: var(--on-deep-muted);
+}
+footer.deep .wrap::before { background: var(--deep-line); }
+footer.deep .copy { color: var(--on-deep); }
+/* A closing line set as wide as the page and sinking into its bottom edge. */
+footer.deep:has(.word) { padding-bottom: 0; overflow: hidden; }
+footer .word {
+  display: block;
+  margin: 36px 0 -0.08em;
+  padding-bottom: 0.26em;
+  font-family: var(--serif);
+  font-weight: 600;
+  font-variation-settings: "opsz" 144, "SOFT" 100, "WONK" 1;
+  font-size: var(--word-size, 20.3vw);
+  line-height: 0.86;
+  letter-spacing: -0.035em;
+  text-align: center;
+  white-space: nowrap;
+  color: var(--deep-word);
+  user-select: none;
+  -webkit-user-select: none;
+}
+@supports ((background-clip: text) or (-webkit-background-clip: text)) {
+  footer .word {
+    background: linear-gradient(to bottom, var(--deep-word) 20%, transparent 150%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}
+
+@media (min-width: 768px) {
+  html { scroll-padding-top: 92px; }
+  .nav { display: flex; }
+  .top .wrap { height: 72px; }
+  h1 { font-size: 120px; }
+  h2 { font-size: 52px; }
+  section { padding: 72px 0; }
+  .lede { font-size: 19px; }
+  .tile { padding: 24px 24px 22px; }
+}
+@media (min-width: 1280px) {
+  h2 { font-size: 58px; }
+  .tiles { gap: 24px; }
+}

@@ -1,0 +1,310 @@
+/* What is particular to see.computer. The shared look lives in family.css. */
+
+:root {
+  --window: #fdf9f1;
+  --window-side: #f3ebdb;
+  --bar: #d6c6a4;
+  --mark: var(--tomato);
+  --screen: var(--deep);
+  --dim: rgba(248, 241, 228, 0.6);
+  --hi: #f5c94e;
+  --word-size: 16.57vw;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --window: #2a3a64;
+    --window-side: #212f55;
+    --bar: #4a629a;
+    --mark: var(--ember);
+    --screen: var(--deep);
+    --dim: rgba(241, 237, 228, 0.56);
+  }
+}
+
+.sprite { position: absolute; }
+.glyph { width: 1em; height: 1em; flex: none; }
+code { font-family: var(--mono); font-size: 0.88em; overflow-wrap: anywhere; }
+.nb { white-space: nowrap; }
+br.wide { display: none; }
+
+main :is(p, li) a:not(.key, .link) {
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 30%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  transition: text-decoration-color 0.2s var(--ease);
+}
+main :is(p, li) a:not(.key, .link):is(:hover, :focus-visible) { text-decoration-color: var(--tomato); }
+
+.hero { padding: 16px 0 0; }
+.hero-grid { display: grid; grid-template-columns: minmax(0, 1fr); }
+.hero-inner { container-type: inline-size; }
+.hero-grid > * { grid-column: 1; position: relative; z-index: 1; }
+.hero .plate { grid-row: 1 / 4; z-index: 0; align-self: stretch; margin: 0 calc(12px - var(--pad)); --r: 44px; }
+.hero h1 { grid-row: 1; padding: 18px 12px 0; font-size: min(50px, 12.6vw); line-height: 0.98; }
+.hero .say { grid-row: 2; margin-top: 14px; padding: 0 12px; }
+.hero .lede { font-size: 18px; }
+.hero .note { margin-top: 10px; font-size: 14px; color: var(--muted); }
+.hero .cta-row { grid-row: 3; display: flex; margin-top: 20px; padding: 0 12px 28px; }
+.preview { grid-row: 4; margin-top: 28px; }
+.preview .screen { --r: 28px; }
+.preview figcaption { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 16px 0 0; font-size: 15px; color: var(--muted); }
+.preview kbd {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 40px;
+  padding: 0 16px;
+  --r: 14px;
+  font-size: 15px;
+  line-height: 1;
+  box-shadow: inset 0 1px 0 var(--key-light), 0 2px 0 var(--key-lip), 0 8px 12px -8px var(--key-sh);
+}
+.preview .plus { font-weight: 600; }
+
+/* A screen: the panel that holds what lands in a terminal or on disk. */
+.screen {
+  min-width: 0;
+  margin: 0;
+  padding: 16px 20px 18px;
+  background: var(--screen);
+  color: var(--on-deep);
+  --r: 22px;
+  box-shadow: inset 0 0 0 1px var(--cap-edge);
+  font: 13px/1.6 var(--mono);
+}
+.screen .label { display: block; margin-bottom: 8px; font: 500 13px/1.4 var(--text); color: var(--dim); }
+.screen pre { margin: 0; font: inherit; white-space: pre; overflow-x: auto; }
+.screen pre.prewrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+.screen .tree, .screen .dim { color: var(--dim); }
+.screen .tree b { font-weight: inherit; color: var(--on-deep); }
+.screen .c { font-family: var(--text); }
+.screen .prompt { color: var(--ember); }
+.screen .hi { color: var(--hi); }
+.screen-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; font: 500 12px/1 var(--text); color: var(--dim); }
+.dots { width: 7px; height: 7px; margin-right: 22px; border-radius: 50%; background: currentColor; box-shadow: 11px 0 currentColor, 22px 0 currentColor; opacity: 0.55; }
+.panes { display: grid; gap: 16px; }
+.panes > div + div { padding-top: 16px; box-shadow: 0 -1px 0 var(--deep-line); }
+.caret { display: inline-block; width: 0.55em; height: 1.15em; margin-left: 2px; vertical-align: text-bottom; background: var(--ember); }
+
+.tiles { margin-top: 28px; }
+.reasons .tiles { margin-top: 0; }
+.tile :is(h2, h3) { margin-top: 6px; }
+.tile p + p { margin-top: 2px; }
+.art { display: flex; align-items: center; justify-content: center; gap: 12px; height: 132px; }
+.tile > .art { order: -1; }
+.cap {
+  display: grid;
+  place-items: center;
+  width: 72px;
+  height: 72px;
+  --r: 20px;
+  font: 600 30px/1 var(--text);
+  color: var(--key-ink);
+  background: linear-gradient(var(--key-top), var(--key-bot));
+  box-shadow: inset 0 1px 0 var(--key-light), 0 3px 0 var(--key-lip), 0 10px 12px -8px var(--key-sh);
+}
+.cap.hit {
+  color: var(--mark);
+  background: var(--key-bot);
+  box-shadow: inset 0 1px 0 var(--key-light), 0 0 0 1px var(--cap-edge);
+  transform: translateY(3px);
+}
+.cap .glyph { width: 30px; height: 30px; }
+.art-keys .cap { position: relative; }
+.art-keys .plus { font: 600 22px/1 var(--text); color: var(--muted); }
+.twice {
+  position: absolute;
+  top: -9px;
+  right: -9px;
+  display: grid;
+  place-items: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  border-radius: 13px;
+  background: var(--ink);
+  color: var(--bg);
+  font: 700 12px/1 var(--text);
+}
+
+.art-stat { justify-content: flex-start; }
+.art-stat .big {
+  font-family: var(--serif);
+  font-weight: 600;
+  font-variation-settings: "opsz" 144, "SOFT" 100, "WONK" 0;
+  font-size: min(60px, 12.6vw);
+  line-height: 1;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+  color: var(--ink);
+}
+.art-stat small { display: block; margin-top: 8px; font: 400 14px/1.3 var(--text); letter-spacing: 0; color: var(--muted); }
+/* Three frames of one clip. The sidebar creeps over the table, and the agent
+   is sent to the frame the narration points at. */
+.art-frames { gap: 14px; padding-top: 22px; }
+.frame { position: relative; width: calc((100% - 32px) / 3); max-width: var(--frame, 84px); aspect-ratio: 4 / 3; border-radius: 9px; background: var(--window); box-shadow: 0 0 0 1px var(--cap-edge), 0 8px 12px -8px rgba(var(--sh), 0.4); }
+.frame i { position: absolute; inset: 0; overflow: hidden; border-radius: inherit; }
+.frame i::after { content: ""; position: absolute; inset: 24% 10% 20% 36%; background: repeating-linear-gradient(var(--bar) 0 3px, transparent 3px 9px); }
+.frame i::before { content: ""; position: absolute; z-index: 1; inset: 0 auto 0 0; width: var(--side, 26%); background: var(--window-side); box-shadow: 1px 0 0 var(--cap-edge); }
+.frame.picked { --side: 46%; outline: 2.5px solid var(--mark); outline-offset: 3px; }
+.frame.picked + .frame { --side: 62%; }
+.frame b { position: absolute; left: 50%; bottom: calc(100% + 11px); transform: translateX(-50%); white-space: nowrap; font: 600 13px/1 var(--text); color: var(--mark); }
+
+.facts b { font-weight: 600; color: var(--ink); }
+
+.split { display: grid; gap: 28px; }
+:is(h2, .lede) + .split { margin-top: 28px; }
+
+
+/* The iPhone keyboard, drawn at a fifth of its size: suggestions and the Dictate button over the letters. */
+.kb { display: grid; gap: 5px; width: 100%; max-width: 208px; }
+.kb-top { display: flex; align-items: center; gap: 12px; height: 26px; margin-bottom: 3px; padding-left: 8px; }
+.kb .sug { width: 26px; height: 5px; border-radius: 3px; background: var(--line); }
+.kb .dictate {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  margin-left: auto;
+  padding: 0 11px;
+  --r: 13px;
+  font: 600 12px/1 var(--text);
+  color: var(--mark);
+  background: linear-gradient(var(--key-top), var(--key-bot));
+  box-shadow: inset 0 1px 0 var(--key-light), 0 0 0 1px var(--cap-edge), 0 2px 0 var(--key-lip);
+}
+.kb .dictate svg { width: 9px; height: 12px; }
+.kb-row { display: flex; justify-content: center; gap: 3px; }
+.kb-row i { flex: 0 0 calc((100% - 27px) / 10); height: 18px; border-radius: 4px; background: linear-gradient(var(--key-top), var(--key-bot)); box-shadow: inset 0 1px 0 var(--key-light), 0 0 0 1px var(--line), 0 2px 0 var(--key-lip); }
+.kb-row .mod { flex: 1; background: var(--key-bot); }
+.kb-row .space { flex-basis: calc((100% - 27px) / 2 + 12px); }
+
+.rows { margin: 0; }
+.rows > div { padding: 18px 0; box-shadow: 0 1px 0 var(--line); }
+.rows > div:first-child { padding-top: 0; }
+.perm > div { display: grid; gap: 4px 24px; }
+.perm dt { font-family: var(--serif-48); font-weight: 600; font-variation-settings: "opsz" 48, "SOFT" 100, "WONK" 0; font-size: 22px; line-height: 1.15; letter-spacing: -0.01em; }
+.perm dd { margin: 0; font-size: 15px; line-height: 1.45; color: var(--muted); }
+
+.facts { list-style: none; max-width: 40em; margin: 0; padding: 0; display: grid; gap: 16px; }
+.facts li { position: relative; padding-left: 22px; font-size: 15px; line-height: 1.45; color: var(--muted); }
+.facts li::before { content: ""; position: absolute; left: 1px; top: 7px; width: 8px; height: 8px; border-radius: 50%; background: var(--mark); }
+#permissions { padding-bottom: 40px; }
+
+.install-grid { display: grid; gap: 24px; justify-items: start; }
+.acts { display: flex; flex-wrap: wrap; gap: 10px; }
+footer nav b { font-weight: 600; color: var(--on-deep); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .caret { animation: blink 1.1s steps(1) infinite; }
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+@media (max-width: 599px) {
+  .hero .note .first { display: block; }
+  .hero .note .dot { display: none; }
+  .gestures > .tile > .art { justify-content: flex-start; height: auto; margin: 0 0 4px; }
+  .gestures .cap { width: 56px; height: 56px; --r: 16px; font-size: 24px; }
+  .gestures .cap .glyph { width: 24px; height: 24px; }
+  .tile :is(h2, h3) { margin-top: 0; }
+  h2 { font-size: min(38px, 10vw); }
+  /* On a phone the keyboard is drawn nearly as wide as its tile, like the frames above it. */
+  .kb { max-width: 320px; }
+  .kb-row i { height: 26px; border-radius: 5px; }
+  .screen { font-size: clamp(11.5px, 3.3vw, 13px); }
+}
+@media (max-width: 767px) {
+  /* The three tiles stack with the picture first, as the gesture tiles under them do. */
+  .trio { --frame: none; }
+  .trio > .tile > .art { justify-content: flex-start; height: auto; margin-bottom: 14px; }
+  .trio > .tile > h2 { margin-top: 0; }
+  .trio > .tile > p { max-width: 36em; }
+  .brand { min-height: 44px; }
+  .preview kbd { min-height: 44px; padding: 0 18px; }
+  /* Room for a thumb around the two smallest footer links, without moving them. */
+  footer .copy .link { display: inline-block; margin: -13px 0; padding: 13px 0; }
+  footer .copy { font-size: min(14px, 3.6vw); white-space: nowrap; }
+  /* Three rows at one pitch: the nav gives back the gap the wrap puts under the first. */
+  footer nav { row-gap: 0; margin-top: -10px; }
+  footer nav a { min-width: 44px; }
+  footer nav a:first-child { flex: 0 0 100%; }
+}
+@media (max-width: 1039px) {
+  /* Stacked or side by side, both keys take the wider one's width. */
+  .acts { display: inline-grid; }
+}
+@media (min-width: 600px) {
+  /* The italic words of a heading stay on one line. */
+  h2 em { white-space: nowrap; }
+  .panes { grid-template-columns: minmax(0, 1fr) auto; gap: 0 22px; }
+  .panes > div + div { padding: 0 0 0 22px; box-shadow: -1px 0 0 var(--deep-line); }
+  .tiles > .full { grid-column: 1 / -1; }
+  .perm > div { grid-template-columns: 184px minmax(0, 1fr); align-items: baseline; }
+  /* A tile on its side: picture left, words right. */
+  .gestures > .tile { display: grid; grid-template-columns: var(--art, 200px) minmax(0, 1fr); gap: 0 24px; align-content: center; }
+  .gestures > .tile > .art { grid-column: 1; grid-row: 1 / span 4; align-self: center; justify-content: flex-start; height: auto; }
+  .gestures > .tile > :where(:not(.art)) { grid-column: 2; max-width: 36em; }
+  .gestures > .tile > h3 { margin-top: 0; }
+  .gestures > .tile > p { margin-top: 8px; }
+}
+@media (min-width: 600px) and (max-width: 1039px) {
+  .tile br.soft { display: none; }
+  .acts { grid-auto-flow: column; grid-auto-columns: 1fr; }
+}
+@media (min-width: 600px) and (max-width: 1279px) {
+  /* The headline runs as two lines sized to the plate. 11.2 is the longer line's width in ems. */
+  .hero h1 { font-size: min(76px, (100cqw - var(--inset, 24px)) / 11.2); }
+  .hero h1 br.soft { display: none; }
+}
+@media (min-width: 768px) {
+  .split { gap: 40px; align-items: start; }
+  /* The reasons turn on their side here and not at 600 px, because three frames need a 296 px column.
+     All three tiles take that column, so their titles share a left edge. */
+  .trio { --art: 296px; }
+  /* The spare rows above and below centre the words on the picture. */
+  .trio > .tile { display: grid; grid-template-columns: var(--art) minmax(0, 1fr); grid-template-rows: 1fr repeat(3, auto) 1fr; gap: 0 24px; }
+  .trio > .tile > .art { grid-column: 1; grid-row: 1 / -1; align-self: center; justify-content: flex-start; height: auto; }
+  .trio > .tile > :where(:not(.art)) { grid-column: 2; max-width: 36em; }
+  .trio > .tile > h2 { grid-row: 2; margin-top: 0; }
+  .trio > .tile > p { grid-row: 3; margin-top: 8px; }
+  .trio > .tile > p + p { grid-row: 4; margin-top: 10px; }
+}
+@media (min-width: 768px) and (max-width: 1279px) {
+  .hero .plate { margin: 0; --r: 36px; }
+  .hero h1, .hero .say, .hero .cta-row { padding-inline: 36px; }
+  .hero h1 { --inset: 72px; padding-top: 28px; }
+}
+@media (min-width: 1040px) {
+  br.wide { display: inline; }
+  .split.wide { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: start; }
+  .split { column-gap: 72px; }
+  /* The closing section reads like the hero plate: the words on the left, the keys on the right. */
+  .install-grid { grid-template-columns: minmax(0, 1fr) auto; align-items: end; column-gap: 72px; }
+  /* A gesture reads across like a row of a shortcut list: keys, name, what happens. */
+  #gestures { --art: 200px; --name: 280px; --col: 32px; }
+  .gestures > .tile { grid-template-columns: var(--art) var(--name) minmax(0, 1fr); grid-template-rows: 1fr auto auto 1fr; column-gap: var(--col); align-content: stretch; align-items: baseline; }
+  .gestures > .tile > .art { grid-row: 1 / -1; }
+  .gestures > .tile > h3 { grid-area: 2 / 2 / span 2; }
+  .gestures > .tile > p { grid-area: 2 / 3; margin-top: 0; }
+}
+@media (min-width: 1280px) {
+  .hero { padding: 24px 0 0; }
+  .hero-grid { grid-template-columns: minmax(0, 1fr) 520px; column-gap: 40px; align-items: end; }
+  .hero h1 { grid-column: 1; grid-row: 1; padding: 0 0 12px 36px; font-size: 86px; line-height: 0.96; letter-spacing: -0.025em; }
+  .preview { grid-column: 2; grid-row: 1; margin: 0; }
+  .hero .plate { grid-column: 1 / 3; grid-row: 2; align-self: stretch; margin: 20px 0 0; --r: 36px; }
+  .hero .say { grid-column: 1 / 3; grid-row: 2; align-self: center; margin: 20px 0 0; padding: 26px 0 28px 36px; }
+  .hero .lede { font-size: 19px; max-width: min(38em, 100cqw - 340px); }
+  .hero .cta-row { grid-column: 2; grid-row: 2; justify-content: flex-end; align-self: center; margin: 20px 0 0; padding: 0 36px 0 0; }
+  /* The take runs across the top: its frames on the left half, its words on the right. Two tiles share the row under it. */
+  .trio { grid-template-columns: repeat(2, minmax(0, 1fr)); --art: 184px; }
+  /* The two half tiles stand upright, picture over words, so their titles share a line. */
+  .trio > .tile:not(.full) { display: flex; gap: 8px; }
+  .trio > .tile:not(.full) > .art { align-self: stretch; height: 132px; }
+  .trio > .tile:not(.full) > h2 { margin-top: 6px; }
+  .trio > .tile:not(.full) > p { margin-top: 0; }
+  .trio > .tile:not(.full) > p + p { margin-top: 2px; }
+  .trio > .full { --art: calc(50% + 12px); --frame: 156px; }
+  .trio > .full > .art { gap: 16px; padding-right: 48px; }
+}
