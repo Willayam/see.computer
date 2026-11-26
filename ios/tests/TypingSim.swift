@@ -481,7 +481,7 @@ private func replay(_ input: String, layout: String, output: String, pipeline: P
     inputLayout.centers = normalizedCenters
     inputLayout.reach = CGRect(x: 0, y: 0, width: 1, height: 1)
     inputLayout.pitch = normalizedCenters[Lexicon.codes["å"]!] == nil ? 0.1 : 1.0 / 11
-    let geometryLexicons = geometryOnly ? ["en", "sv"].compactMap(Lexicon.init) : []
+    let geometryLexicons = geometryOnly ? ["en", "sv"].compactMap { Lexicon(language: $0) } : []
     if encoderOnly {
         pipeline.vocabulary.configure(inputLayout.pitch == 0.1 ? .english : .bilingual, dictionaries: [])
         guard geometryOnly || NeuralSwipe.encoder != nil else { throw CocoaError(.fileReadCorruptFile) }
@@ -566,7 +566,7 @@ private struct ReplaySentence: Decodable {
 private func replay(_ path: String, out: String, languages: TypingLanguages, size: CGSize, observedSpaces: Bool) async throws {
     let data = try Data(contentsOf: URL(fileURLWithPath: path))
     let sentences = try JSONDecoder().decode([ReplaySentence].self, from: data)
-    let lexicons = (languages == .english ? ["en"] : ["en", "sv"]).compactMap(Lexicon.init(language:))
+    let lexicons = (languages == .english ? ["en"] : ["en", "sv"]).compactMap { Lexicon(language: $0) }
     var rows = [[String: Any]]()
     var person: String?
     var pipeline: Pipeline!

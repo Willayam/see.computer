@@ -186,7 +186,7 @@ enum TypingVocabularyChecks {
         ]
         let rough = points.map { SwipeSample(point: CGPoint(x: $0.0, y: $0.1), time: $0.2) }
         let words = vocabulary.swipe(rough, layout: layout, before: "").words
-        let lexicons = ["en", "sv"].compactMap(Lexicon.init)
+        let lexicons = ["en", "sv"].compactMap { Lexicon(language: $0) }
         assert(!words.isEmpty && words.allSatisfy { choice in
             lexicons.contains { $0.node(choice.word.lowercased()).flatMap($0.terminal) != nil }
         }, "Even the fallback only returns dictionary words")
