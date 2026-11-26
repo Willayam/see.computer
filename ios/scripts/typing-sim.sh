@@ -39,15 +39,13 @@ done
 root="$(cd "$(dirname "$0")/.." && pwd)"
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
-cp "$root"/Keyboard/words-*.bin "$scratch/"
-"$root/scripts/typing-swiftc.sh" "$scratch" -O \
-    -import-objc-header "$root/Keyboard/DocumentIdentifier.h" \
-    "$root/Shared/Lexicon.swift" "$root/Keyboard/TapDecoder.swift" "$root/Keyboard/SwipeDecoder.swift" "$root/Shared/Bridge.swift" "$root/Shared/TypingLanguages.swift" \
-    "$root"/Keyboard/TypingVocabulary.swift "$root/Keyboard/Typist.swift" \
-    "$root/Keyboard/TypingKeys.swift" "$root/Keyboard/KeyboardControls.swift" \
-    "$root/tests/TypingSim.swift" "$root/tests/TypingLogReplay.swift" -o "$scratch/sim"
+sim=${TYPING_SIM_BIN:-}
+if [ -z "$sim" ]; then
+    "$root/scripts/build-typing-sim.sh" "$scratch"
+    sim="$scratch/sim"
+fi
 if [ "$mode" = real-swipe ] || [ "$mode" = neural-swipe ] || [ "$mode" = swipe-geometry ]; then
-    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --mode "$mode" --languages english $native_only \
+    xcrun simctl spawn "$device" "$sim" --corpus "$root/tests/typing-eval" --mode "$mode" --languages english $native_only \
         --input "${input:?Pass --input sample.jsonl}" --layout "${layout:?Pass --layout qwerty.json}" --out "${out:?Pass --out results.tsv}"
     exit
 fi
@@ -55,26 +53,27 @@ if [ "$mode" = suggest ]; then
     set --
     if [ -n "$input" ]; then set -- --input "$input"; fi
     # shellcheck disable=SC2086
-    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" "$@" $pass
+    xcrun simctl spawn "$device" "$sim" --corpus "$root/tests/typing-eval" "$@" $pass
     exit
 fi
 if [ -n "$typing_log" ]; then
-    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --typing-log "$typing_log"
+    xcrun simctl spawn "$device" "$sim" --corpus "$root/tests/typing-eval" --typing-log "$typing_log"
     exit
 fi
 if [ -n "$layout" ]; then
-    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --languages "$language" --layout "$layout"
+    xcrun simctl spawn "$device" "$sim" --corpus "$root/tests/typing-eval" --languages "$language" --layout "$layout"
     exit
 fi
 if [ -n "$replay" ]; then
-    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --languages "$language" --replay "$replay" --out "${out:?Pass --out with --replay}" $spaces
+    xcrun simctl spawn "$device" "$sim" --corpus "$root/tests/typing-eval" --languages "$language" --replay "$replay" --out "${out:?Pass --out with --replay}" $spaces
     exit
 fi
 for level in clean steady hurried; do
     set --
     if [ -n "${export_sv:-}" ]; then set -- --export-sv "$export_sv.$level.jsonl"; fi
+    if [ -n "$input" ]; then set -- "$@" --input "$input"; fi
     # shellcheck disable=SC2086
-    xcrun simctl spawn "$device" "$scratch/sim" --corpus "$root/tests/typing-eval" --level "$level" \
+    xcrun simctl spawn "$device" "$sim" --corpus "$root/tests/typing-eval" --level "$level" \
         --out "$scratch/$level.tsv" "$@" $pass > "$scratch/$level.txt" 2>&1 &
 done
 wait

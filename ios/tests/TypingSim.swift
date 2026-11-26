@@ -686,7 +686,7 @@ enum TypingSim {
                     }
                     pipeline.traceOutput = output
                 } else { pipeline.traceOutput = nil }
-                let path = "\(corpus)/\(set)-\(language).txt"
+                let path = option("--input") ?? "\(corpus)/\(set)-\(language).txt"
                 guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
                     print("missing \(path)")
                     exit(1)
