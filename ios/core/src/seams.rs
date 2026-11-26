@@ -81,7 +81,7 @@ pub mod learn {
         pub fn knows(&self, word: &str) -> bool {
             #[cfg(test)]
             if let Some(list) = &self.list {
-                return list.contains(&word.to_lowercase());
+                return list.contains(word) || list.contains(&word.to_lowercase());
             }
             match (KNOWS.get(), CString::new(word)) {
                 (Some(knows), Ok(word)) => knows(word.as_ptr()),

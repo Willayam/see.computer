@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use crate::engine::{Event, Loader, Models, Phase, Worker};
+use crate::learn::{Knows, Words};
 use crate::mic::Audio16k;
 
 const PROGRESS_DOWNLOADING: i32 = 0;
@@ -41,7 +42,7 @@ fn owned_path(raw: *const c_char) -> PathBuf {
 }
 
 /// # Safety
-/// Both paths are NUL-terminated. `context` stays valid for the process's life.
+/// Both paths are NUL-terminated. `context` and callbacks stay valid for the process's life.
 #[no_mangle]
 pub unsafe extern "C" fn see_engine_start(
     models: *const c_char,
@@ -49,7 +50,9 @@ pub unsafe extern "C" fn see_engine_start(
     previews: bool,
     context: *mut c_void,
     callback: Callback,
+    knows: Option<Knows>,
 ) -> *mut SeeEngine {
+    Words::set_knows(knows);
     crate::paths::set(owned_path(models), owned_path(dictionary));
     std::env::set_var("SEE_COMPUTER_PREVIEW", if previews { "1" } else { "0" });
     let (reply, events) = mpsc::channel::<Event>();
@@ -85,11 +88,22 @@ fn forward(sink: Sink, event: Event) {
 }
 
 /// # Safety
-/// `engine` came from `see_engine_start`.
+/// `engine` came from `see_engine_start`. `nearby` is null or NUL-terminated.
 #[no_mangle]
-pub unsafe extern "C" fn see_engine_begin(engine: *mut SeeEngine) -> u64 {
+pub unsafe extern "C" fn see_engine_begin(engine: *mut SeeEngine, nearby: *const c_char) -> u64 {
+    let nearby = if nearby.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(nearby).to_string_lossy().into_owned()
+    };
     let (terms, receiver) = mpsc::channel();
-    let _ = terms.send(Vec::new());
+    if nearby.is_empty() {
+        let _ = terms.send(Vec::new());
+    } else {
+        crate::qos::spawn("see-field-context", crate::qos::Class::Upkeep, move || {
+            let _ = terms.send(crate::terms::from_screen(&nearby, &[]));
+        });
+    }
     (*engine).worker.begin_context(receiver)
 }
 

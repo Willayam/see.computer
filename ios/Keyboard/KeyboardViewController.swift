@@ -462,13 +462,13 @@ final class KeyboardViewController: UIInputViewController {
                 Bridge.read(Handoff.self, "handoff.json")?.start?.id == start.id,
                 start.target.matches(self.currentTarget) else { return }
             Bridge.remove("handoff.json")
-            self.startTake(start)
+            self.startTake(start, nearby: handoff.nearby ?? "")
         }
     }
 
-    private func startTake(_ start: DictationStart) {
+    private func startTake(_ start: DictationStart, nearby: String) {
         forgetTypingPosition()
-        Bridge.write(start, "start.json")
+        Bridge.write(StartRequest(start: start, nearby: nearby), "start.json")
         Signals.post(.start)
     }
 
@@ -504,23 +504,30 @@ final class KeyboardViewController: UIInputViewController {
         }
         guard let target = currentTarget else { return }
         let start = DictationStart(id: UUID(), asked: Date(), target: target)
+        let proxy = textDocumentProxy
+        let nearby = if proxy.isSecureTextEntry == true {
+            ""
+        } else {
+            String((proxy.documentContextBeforeInput ?? "").suffix(2000)) + "\n" +
+                String((proxy.documentContextAfterInput ?? "").prefix(500))
+        }
         // Asking first would only delay the app opening when the mic is known to be off.
         guard state.phase != .off else {
             Diagnostics.log("tap_app_off")
-            openApp(start)
+            openApp(start, nearby: nearby)
             return
         }
         whenAlive { [weak self] alive in
             guard let self, self.isActive, start.target.matches(self.currentTarget) else { return }
             guard alive else {
                 Diagnostics.log("tap_app_dead", ["phase": self.state.phase.rawValue])
-                self.openApp(start)
+                self.openApp(start, nearby: nearby)
                 return
             }
             if self.state.phase == .armed {
                 Diagnostics.log("start_sent", ["by": "tap"])
                 self.pressStartedTake = true
-                self.startTake(start)
+                self.startTake(start, nearby: nearby)
             } else if self.state.phase != .recording {
                 Diagnostics.log("tap_not_armed", ["phase": self.state.phase.rawValue])
             }
@@ -542,9 +549,9 @@ final class KeyboardViewController: UIInputViewController {
         Signals.post(.cancel)
     }
 
-    private func openApp(_ start: DictationStart) {
+    private func openApp(_ start: DictationStart, nearby: String) {
         #if !STORE
-        Bridge.write(Handoff(asked: start.asked, host: HostCapture.host, start: start), "handoff.json")
+        Bridge.write(Handoff(asked: start.asked, host: HostCapture.host, start: start, nearby: nearby), "handoff.json")
         Diagnostics.log("open_app", ["host": HostCapture.host != nil])
         // A keyboard has no public way to open a URL. The app's object sits on its
         // responder chain and accepts the call.
