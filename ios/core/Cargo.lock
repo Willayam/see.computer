@@ -983,6 +983,7 @@ dependencies = [
  "ort",
  "parakeet-rs",
  "serde",
+ "strsim",
  "thiserror",
  "ureq",
 ]

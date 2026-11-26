@@ -31,9 +31,9 @@ pub struct Parakeet {
     pieces: Option<Pieces>,
     lexicon: Lexicon,
     boost: Option<Boost>,
-    context: Vec<crate::context::Term>,
+    context: Vec<crate::terms::Term>,
     names: Vec<super::rescore::Name>,
-    rewrite_terms: Vec<crate::context::Term>,
+    rewrite_terms: Vec<crate::terms::Term>,
 }
 
 impl Parakeet {
@@ -79,7 +79,7 @@ impl Parakeet {
             .iter()
             .map(|term| term.text.as_str())
             .collect();
-        crate::context::near_misses(
+        crate::terms::near_misses(
             &self.lexicon.rewrite(&tidy(raw)),
             &self.rewrite_terms,
             &saved,
@@ -174,7 +174,7 @@ fn tidy(raw: &str) -> String {
 }
 
 impl Engine for Parakeet {
-    fn set_context(&mut self, terms: &[crate::context::Term]) {
+    fn set_context(&mut self, terms: &[crate::terms::Term]) {
         // Names already in the vocabulary can still be misheard by the decoder.
         self.rewrite_terms = terms.to_vec();
         let saved = self.lexicon.terms();
@@ -199,7 +199,7 @@ impl Engine for Parakeet {
         self.rebuild_boost();
     }
 
-    fn context_terms(&self) -> Vec<crate::context::Term> {
+    fn context_terms(&self) -> Vec<crate::terms::Term> {
         self.context.clone()
     }
 

@@ -43,37 +43,57 @@ pub mod mic {
     }
 }
 
-/// The phone reads no on-screen words yet, so there is nothing to correct against.
-pub mod context {
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub struct Term {
-        pub text: String,
-        pub source: &'static str,
-    }
-
-    impl Term {
-        pub fn boosted(&self) -> bool {
-            self.source != "candidate"
-        }
-    }
-
-    pub fn near_misses(
-        text: &str,
-        _terms: &[Term],
-        _saved: &[&str],
-        _words: &crate::learn::Words,
-    ) -> String {
-        text.to_owned()
-    }
-}
-
 pub mod learn {
-    pub struct Words;
+    use std::ffi::{c_char, CString};
+    use std::sync::OnceLock;
+
+    pub type Knows = extern "C" fn(*const c_char) -> bool;
+
+    static KNOWS: OnceLock<Knows> = OnceLock::new();
+
+    pub struct Words {
+        #[cfg(test)]
+        list: Option<std::collections::HashSet<String>>,
+    }
 
     impl Words {
-        pub fn shared() -> &'static Words {
-            &Words
+        pub fn set_knows(knows: Option<Knows>) {
+            if let Some(knows) = knows {
+                let _ = KNOWS.set(knows);
+            }
         }
+
+        pub fn shared() -> &'static Words {
+            static WORDS: Words = Words {
+                #[cfg(test)]
+                list: None,
+            };
+            &WORDS
+        }
+
+        #[cfg(test)]
+        pub fn from_list(words: &[&str]) -> Self {
+            Self {
+                list: Some(words.iter().map(|word| (*word).to_owned()).collect()),
+            }
+        }
+
+        pub fn knows(&self, word: &str) -> bool {
+            #[cfg(test)]
+            if let Some(list) = &self.list {
+                return list.contains(&word.to_lowercase());
+            }
+            match (KNOWS.get(), CString::new(word)) {
+                (Some(knows), Ok(word)) => knows(word.as_ptr()),
+                _ => true,
+            }
+        }
+
+        pub fn knows_quickly(&self, word: &str) -> bool {
+            self.knows(word)
+        }
+
+        pub fn warm_quickly(&self, _words: &[String]) {}
     }
 }
 

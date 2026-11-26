@@ -364,9 +364,9 @@ fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
             .and_then(|path| std::fs::read_to_string(path).ok())
             .unwrap_or_default()
     };
-    let context = crate::context::from_screen(
+    let context = crate::terms::from_screen(
         &read("SEE_COMPUTER_EVAL_SCREEN_TEXT"),
-        &crate::learn::context_terms(
+        &crate::terms::context_terms(
             &read("SEE_COMPUTER_EVAL_DAYBOOK_TEXT"),
             crate::learn::Words::shared(),
         ),
@@ -381,7 +381,7 @@ fn eval(path: PathBuf, terms: Option<PathBuf>) -> i32 {
             if let Some(screen) = &clip.screen {
                 let text = std::fs::read_to_string(screen).unwrap_or_default();
                 let started = Instant::now();
-                let gathered = crate::context::from_screen(&text, &[]);
+                let gathered = crate::terms::from_screen(&text, &[]);
                 let extracted = started.elapsed();
                 engine.set_context(&gathered);
                 if std::env::var_os("SEE_COMPUTER_EVAL_PRINT_TERMS").is_some() {

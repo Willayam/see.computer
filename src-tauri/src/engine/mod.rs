@@ -14,8 +14,8 @@ pub use models::{ModelFiles, Models};
 
 pub trait Engine: Send {
     fn transcribe(&mut self, audio: &Audio16k) -> Result<Transcription, EngineError>;
-    fn set_context(&mut self, _terms: &[crate::context::Term]) {}
-    fn context_terms(&self) -> Vec<crate::context::Term> {
+    fn set_context(&mut self, _terms: &[crate::terms::Term]) {}
+    fn context_terms(&self) -> Vec<crate::terms::Term> {
         Vec::new()
     }
 }
@@ -271,7 +271,7 @@ enum Job {
     /// reclaims the mmapped weights while the app sits idle, and paying the
     /// page-in during the recording hides it from the release-to-paste path.
     Warm,
-    Context(u64, std::sync::mpsc::Receiver<Vec<crate::context::Term>>),
+    Context(u64, std::sync::mpsc::Receiver<Vec<crate::terms::Term>>),
     Feed(Audio16k),
     Discard,
     Transcribe(JobId, Audio16k),
@@ -281,7 +281,7 @@ pub struct Worker {
     jobs: Sender<Job>,
     next: u64,
     utterance: u64,
-    context_used: std::sync::Arc<std::sync::Mutex<Vec<crate::context::Term>>>,
+    context_used: std::sync::Arc<std::sync::Mutex<Vec<crate::terms::Term>>>,
 }
 
 impl Worker {
@@ -329,7 +329,7 @@ impl Worker {
                 }
             };
             let mut utterance = Utterance::default();
-            let mut context: Option<std::sync::mpsc::Receiver<Vec<crate::context::Term>>> = None;
+            let mut context: Option<std::sync::mpsc::Receiver<Vec<crate::terms::Term>>> = None;
             let previews = previews_enabled();
             let mut current = 0;
             let mut queued = None;
@@ -421,14 +421,14 @@ impl Worker {
     /// Starts an utterance and returns the number its previews carry.
     pub fn begin_context(
         &mut self,
-        context: std::sync::mpsc::Receiver<Vec<crate::context::Term>>,
+        context: std::sync::mpsc::Receiver<Vec<crate::terms::Term>>,
     ) -> u64 {
         self.utterance = self.utterance.wrapping_add(1);
         let _ = self.jobs.send(Job::Context(self.utterance, context));
         self.utterance
     }
 
-    pub fn context_used(&self) -> Vec<crate::context::Term> {
+    pub fn context_used(&self) -> Vec<crate::terms::Term> {
         self.context_used
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
