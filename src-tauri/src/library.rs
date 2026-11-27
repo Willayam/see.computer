@@ -409,15 +409,10 @@ pub async fn library_fix(
                         .to_owned(),
                 );
             }
-            let at = Local
-                .timestamp_millis_opt(start_ms)
-                .single()
-                .ok_or("That dictation has no valid time.")?
-                .naive_local();
             history
                 .replace(crate::history::Fix {
                     file: file.to_owned(),
-                    at,
+                    start_ms,
                     original: original.clone(),
                     edited: edited.to_owned(),
                 })
@@ -465,7 +460,7 @@ fn local_ms(date: &str, time: &str) -> Option<i64> {
         NaiveDateTime::parse_from_str(&format!("{date} {time}"), "%Y-%m-%d %H:%M:%S").ok()?;
     Local
         .from_local_datetime(&naive)
-        .single()
+        .earliest()
         .map(|at| at.timestamp_millis())
 }
 
@@ -485,39 +480,15 @@ fn day(path: &Path) -> Option<Item> {
         ));
     }
     let content = content.text()?;
-    let mut lines = Vec::new();
-    let mut time = None;
-    let mut body = String::new();
-    for line in content.lines() {
-        if let Some(next) = line
-            .strip_prefix("## ")
-            .and_then(|value| local_ms(&date, value))
-        {
-            if let Some(at) = time.take() {
-                lines.push(Line {
-                    start_ms: at,
-                    end_ms: None,
-                    speaker: None,
-                    text: body.trim().to_owned(),
-                });
-            }
-            time = Some(next);
-            body.clear();
-        } else if time.is_some() {
-            if !body.is_empty() {
-                body.push('\n');
-            }
-            body.push_str(line);
-        }
-    }
-    if let Some(at) = time {
-        lines.push(Line {
-            start_ms: at,
+    let lines: Vec<_> = crate::history::day_entries(crate::history::day_file_date(file)?, &content)
+        .into_iter()
+        .map(|entry| Line {
+            start_ms: entry.start_ms,
             end_ms: None,
             speaker: None,
-            text: body.trim().to_owned(),
-        });
-    }
+            text: entry.text.trim().to_owned(),
+        })
+        .collect();
     let at = lines.first()?.start_ms;
     let paste = lines
         .iter()

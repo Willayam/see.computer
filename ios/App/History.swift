@@ -11,6 +11,7 @@ enum History {
 
     private static let day: DateFormatter = formatter("yyyy-MM-dd")
     private static let time: DateFormatter = formatter("HH:mm:ss")
+    private static let offsetStamp = formatter("yyyy-MM-dd HH:mm:ss XXXXX")
     private static let stamp: DateFormatter = formatter("yyyy-MM-dd HH:mm:ss")
 
     private static func formatter(_ format: String) -> DateFormatter {
@@ -49,7 +50,7 @@ enum History {
         ("\n" + content).components(separatedBy: "\n## ").dropFirst().compactMap { block in
             let parts = block.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
             guard let heading = parts.first, parts.count == 2,
-                let at = stamp.date(from: "\(date) \(heading)")
+                let at = (heading.contains(" ") ? offsetStamp : stamp).date(from: "\(date) \(heading)")
             else { return nil }
             let text = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
             return text.isEmpty ? nil : Entry(at: at, text: text)

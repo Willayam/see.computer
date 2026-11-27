@@ -261,7 +261,6 @@ pub fn backfill(
     files: &[PathBuf],
     cutoff: i64,
 ) -> io::Result<()> {
-    use chrono::TimeZone;
     use std::io::Write;
     let mut entries = Vec::new();
     for (date, path) in crate::history::day_files(root) {
@@ -269,17 +268,8 @@ pub fn backfill(
             crate::shadow::read(&path)
         {
             for entry in crate::history::parse_day(date, &text) {
-                if !entry.text.trim().is_empty() {
-                    if let Some(at) = chrono::Local.from_local_datetime(&entry.at).earliest() {
-                        if at.timestamp_millis() >= cutoff {
-                            continue;
-                        }
-                        entries.push((
-                            at.timestamp_millis(),
-                            crate::tally::words(&entry.text),
-                            None::<u64>,
-                        ));
-                    }
+                if !entry.text.trim().is_empty() && entry.start_ms < cutoff {
+                    entries.push((entry.start_ms, words(&entry.text), None::<u64>));
                 }
             }
         }

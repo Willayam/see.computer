@@ -631,13 +631,11 @@ fn item(id: &'static str, label: &str, checked: bool, symbol: Option<&'static st
 
 /// The Library route that opens the newest dictation's line ready to edit.
 fn last_dictation(history: &History) -> Option<String> {
-    use chrono::TimeZone;
     let entry = history.recent(1).into_iter().next()?;
-    let at = chrono::Local.from_local_datetime(&entry.at).earliest()?;
     Some(format!(
         "edit:dictation:{}@{}",
         entry.at.format("%Y-%m-%d"),
-        at.timestamp_millis()
+        entry.start_ms
     ))
 }
 

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -27,12 +27,13 @@ enum Request {
 /// it to.
 pub struct Fix {
     pub file: String,
-    pub at: NaiveDateTime,
+    pub start_ms: i64,
     pub original: String,
     pub edited: String,
 }
 
 pub struct Entry {
+    pub start_ms: i64,
     pub at: NaiveDateTime,
     pub text: String,
 }
@@ -358,7 +359,7 @@ fn resolve_root(preferred: &Path, fallback: &Path) -> PathBuf {
 fn append_entry(root: &Path, at: DateTime<Local>, text: &str) -> io::Result<std::fs::File> {
     let path = root.join(format!("{}.md", at.format("%Y-%m-%d")));
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    write!(file, "## {}\n\n{text}\n\n", at.format("%H:%M:%S"))?;
+    write!(file, "## {}\n\n{text}\n\n", at.format("%H:%M:%S %:z"))?;
     Ok(file)
 }
 
@@ -374,7 +375,7 @@ fn read_recent(root: &Path, limit: usize) -> Vec<Entry> {
         };
         entries.extend(parse_day(date, &content));
     }
-    entries.sort_by_key(|entry| std::cmp::Reverse(entry.at));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.start_ms));
     entries.truncate(limit);
     entries
 }
@@ -413,7 +414,7 @@ pub(crate) fn day_files(root: &Path) -> Vec<(NaiveDate, PathBuf)> {
 }
 
 fn replace_entry(root: &Path, fix: &Fix) -> Result<(), String> {
-    if day_file_date(&fix.file) != Some(fix.at.date()) {
+    if day_file_date(&fix.file).is_none() {
         return Err("That dictation has no valid day file.".to_owned());
     }
     let path = root.join(format!("{}.md", fix.file));
@@ -434,76 +435,88 @@ fn replace_entry(root: &Path, fix: &Fix) -> Result<(), String> {
 /// The day file with one entry's body swapped, or `None` when no entry at
 /// that time still reads as `original`. Every other byte is kept.
 fn replaced(content: &str, fix: &Fix) -> Option<String> {
-    let heading = format!("## {}\n\n", fix.at.format("%H:%M:%S"));
-    let mut from = 0;
-    while let Some(found) = content[from..].find(&heading) {
-        let start = from + found;
-        from = start + heading.len();
-        if start > 0 && content.as_bytes()[start - 1] != b'\n' {
-            continue;
+    let date = day_file_date(&fix.file)?;
+    for block in day_blocks(date, content) {
+        let body = &content[block.body.clone()];
+        if block.at.timestamp_millis() == fix.start_ms && body.trim() == fix.original.trim() {
+            let start = block.body.start;
+            let end = start + body.trim_end().len();
+            return Some(format!(
+                "{}{}{}",
+                &content[..start],
+                fix.edited.trim(),
+                &content[end..]
+            ));
         }
-        let body_start = start + heading.len();
-        let body_end = content[body_start..]
-            .match_indices("\n## ")
-            .map(|(index, _)| body_start + index + 1)
-            .find(|&next| {
-                let rest = &content[next + 3..];
-                rest.get(..8)
-                    .is_some_and(|time| NaiveTime::parse_from_str(time, "%H:%M:%S").is_ok())
-            })
-            .unwrap_or(content.len());
-        let body = &content[body_start..body_end];
-        if body.trim() != fix.original.trim() {
-            continue;
-        }
-        let tail = &body[body.trim_end().len()..];
-        return Some(format!(
-            "{}{}{}{}",
-            &content[..body_start],
-            fix.edited.trim(),
-            tail,
-            &content[body_end..]
-        ));
     }
     None
 }
 
-pub(crate) fn parse_day(date: NaiveDate, content: &str) -> Vec<Entry> {
-    let mut headings = Vec::new();
-    for (start, _) in content.match_indices("## ") {
-        if start > 0 && content.as_bytes().get(start - 1) != Some(&b'\n') {
-            continue;
-        }
-        let heading = &content[start + 3..];
-        let Some(line_end) = heading.find('\n') else {
-            continue;
-        };
-        let Ok(time) = NaiveTime::parse_from_str(&heading[..line_end], "%H:%M:%S") else {
-            continue;
-        };
-        let body_start = start + 3 + line_end + 1;
-        if content.as_bytes().get(body_start) != Some(&b'\n') {
-            continue;
-        }
-        headings.push((start, body_start + 1, time));
-    }
+struct Block {
+    at: DateTime<chrono::FixedOffset>,
+    body: std::ops::Range<usize>,
+}
 
-    let mut entries = headings
-        .iter()
-        .enumerate()
-        .map(|(index, (_, body_start, time))| {
-            let body_end = headings
-                .get(index + 1)
-                .map_or(content.len(), |(start, _, _)| *start);
-            let body = &content[*body_start..body_end];
-            let text = body.strip_suffix("\n\n").unwrap_or(body).to_owned();
+fn day_blocks(date: NaiveDate, content: &str) -> Vec<Block> {
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut pos = 0;
+    for line in content.split_inclusive('\n') {
+        let start = pos;
+        pos += line.len();
+        let Some(time) = line.trim_end_matches(['\n', '\r']).strip_prefix("## ") else {
+            continue;
+        };
+        let at = if time.contains(' ') {
+            DateTime::parse_from_str(&format!("{date} {time}"), "%Y-%m-%d %H:%M:%S %:z").ok()
+        } else {
+            NaiveTime::parse_from_str(time, "%H:%M:%S")
+                .ok()
+                .and_then(|t| {
+                    match Local.from_local_datetime(&date.and_time(t)) {
+                        chrono::LocalResult::Ambiguous(a, b) => {
+                            let (first, second) = (a.min(b), a.max(b));
+                            Some(if blocks.last().is_some_and(|b| b.at >= first) {
+                                second
+                            } else {
+                                first
+                            })
+                        }
+                        result => result.single(),
+                    }
+                    .map(|time| time.fixed_offset())
+                })
+        };
+        if let Some(at) = at {
+            if let Some(last) = blocks.last_mut() {
+                last.body.end = start;
+            }
+            let body_start = pos + usize::from(content[pos..].starts_with('\n'));
+            blocks.push(Block {
+                at,
+                body: body_start..content.len(),
+            });
+        }
+    }
+    blocks
+}
+
+pub(crate) fn day_entries(date: NaiveDate, content: &str) -> Vec<Entry> {
+    day_blocks(date, content)
+        .into_iter()
+        .map(|b| {
+            let body = &content[b.body];
             Entry {
-                at: date.and_time(*time),
-                text,
+                at: b.at.naive_local(),
+                start_ms: b.at.timestamp_millis(),
+                text: body.strip_suffix("\n\n").unwrap_or(body).to_owned(),
             }
         })
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|entry| std::cmp::Reverse(entry.at));
+        .collect()
+}
+
+pub(crate) fn parse_day(date: NaiveDate, content: &str) -> Vec<Entry> {
+    let mut entries = day_entries(date, content);
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.start_ms));
     entries
 }
 
@@ -688,7 +701,7 @@ mod tests {
         history
             .replace(Fix {
                 file: entry.at.date().to_string(),
-                at: entry.at,
+                start_ms: entry.start_ms,
                 original: entry.text,
                 edited: vec!["word"; 5000].join(" "),
             })
@@ -757,10 +770,7 @@ mod tests {
         assert!(day_file_date("2026-10-13 note").is_none());
         let fix = Fix {
             file: "2026-10-13 2".into(),
-            at: NaiveDate::from_ymd_opt(2026, 10, 13)
-                .unwrap()
-                .and_hms_opt(10, 0, 0)
-                .unwrap(),
+            start_ms: local("2026-10-13", "10:00:00").timestamp_millis(),
             original: "Second".into(),
             edited: "Fixed second".into(),
         };
@@ -818,13 +828,44 @@ mod tests {
     }
 
     #[test]
+    fn repeated_hour_edits_the_selected_occurrence() {
+        let date = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        let explicit = "## 02:15:00 +02:00\n\nsame\n\n## 02:15:00 +01:00\n\nsame\n\n";
+        let mut cases = vec![explicit.to_owned()];
+        // Run under TZ=Europe/Stockholm to exercise the legacy fold.
+        if matches!(
+            Local.from_local_datetime(&date.and_hms_opt(2, 15, 0).unwrap()),
+            chrono::LocalResult::Ambiguous(_, _)
+        ) {
+            cases.push(explicit.replace(" +02:00", "").replace(" +01:00", ""));
+        }
+        for text in cases {
+            let entries = day_entries(date, &text);
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[1].start_ms - entries[0].start_ms, 3_600_000);
+            let fix = Fix {
+                file: date.to_string(),
+                start_ms: entries[1].start_ms,
+                original: "same".into(),
+                edited: "second".into(),
+            };
+            let after = replaced(&text, &fix).unwrap();
+            assert_eq!(
+                day_entries(date, &after)
+                    .iter()
+                    .map(|e| e.text.as_str())
+                    .collect::<Vec<_>>(),
+                ["same", "second"]
+            );
+        }
+    }
+
+    #[test]
     fn a_fix_replaces_one_entry_and_keeps_every_other_byte() {
         let day = "## 09:00:00\n\nuse potato mode\n\n## 09:00:00\n\nsame second\n\n## 10:15:00\n\nlast one\n\n";
         let fix = |time: &str, original: &str, edited: &str| Fix {
             file: "2026-10-15".into(),
-            at: NaiveDate::from_ymd_opt(2026, 10, 15)
-                .unwrap()
-                .and_time(NaiveTime::parse_from_str(time, "%H:%M:%S").unwrap()),
+            start_ms: local("2026-10-15", time).timestamp_millis(),
             original: original.into(),
             edited: edited.into(),
         };
