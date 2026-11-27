@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::engine::{EngineError, Transcription};
 
 pub enum Cmd {
+    Usage(&'static str),
     Transcribe(PathBuf),
     TranscribeLive(PathBuf),
     TranscribePreview(PathBuf),
@@ -35,7 +36,11 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
             }),
             Some(path) => Some(Cmd::Transcribe(PathBuf::from(path))),
             None => None,
-        },
+        }
+        .filter(|_| args.next().is_none())
+        .or(Some(Cmd::Usage(
+            "transcribe [--live|--preview] <wav> or transcribe --timed <wav> [block-phase-ms]",
+        ))),
         Some("ocr") => {
             let paths: Vec<_> = args.map(PathBuf::from).collect();
             (!paths.is_empty()).then_some(Cmd::Ocr(paths))
@@ -61,8 +66,28 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
     }
 }
 
+#[test]
+fn incomplete_transcription_commands_return_usage_instead_of_starting_the_app() {
+    for args in [
+        &["transcribe"][..],
+        &["transcribe", "--timed"],
+        &["transcribe", "--live"],
+        &["transcribe", "--preview"],
+        &["transcribe", "--timed", "audio.wav", "20", "extra"],
+    ] {
+        assert!(matches!(
+            parse(args.iter().map(|arg| arg.to_string())),
+            Some(Cmd::Usage(_))
+        ));
+    }
+}
+
 pub fn run(cmd: Cmd) -> i32 {
     match cmd {
+        Cmd::Usage(usage) => {
+            eprintln!("Usage: see-computer {usage}");
+            2
+        }
         Cmd::Transcribe(path) => transcribe(path),
         Cmd::TranscribeLive(path) => transcribe_live(path),
         Cmd::TranscribePreview(path) => transcribe_preview(path),
