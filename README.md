@@ -51,6 +51,8 @@ The service runs on private R2 storage in Cocco Ventures. See [the hosting instr
 
 Transcripts are written to disk as plain text by default, with one markdown file per day in `~/Documents/see.computer/`. If macOS denies Documents access, they go to `~/Library/Application Support/see.computer/history/` instead.
 
+New timestamp headings include the UTC offset, so both occurrences of a repeated clock hour stay distinct. The Library reads older headings using their order in the file. Earlier app versions may skip offset-stamped entries after a downgrade. Their text remains readable in Markdown.
+
 Turn history off with **Save Dictation History** in the tray's **Settings**. Open **see.computer Folder** there to inspect or delete the plain files. There is no auto-pruning.
 
 For learning and accuracy checks, each dictation's audio, captured screen text, and what became of the dictation are also kept in `~/Library/Application Support/see.computer/ledger/`, outside iCloud. The ledger keeps audio and screen text for the newest 500 uncorrected dictations. Corrected dictations form the eval corpus. **Save Dictation History** turns this off too.
