@@ -78,6 +78,18 @@ struct DictationPreview: Codable {
     let words: String
 }
 
+/// A take while the engine hears it: the tap that started it and the number the engine
+/// gave it. The engine can still be working out a preview for the take before, and that
+/// preview carries the earlier number.
+struct LiveTake {
+    let start: DictationStart
+    let utterance: UInt64
+
+    func preview(_ words: String, from utterance: UInt64) -> DictationPreview? {
+        utterance == self.utterance ? DictationPreview(startID: start.id, words: words) : nil
+    }
+}
+
 /// What the keyboard leaves behind when it has to open the app. Only the
 /// keyboard writes it.
 struct Handoff: Codable {

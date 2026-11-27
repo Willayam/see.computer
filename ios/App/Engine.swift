@@ -14,7 +14,8 @@ final class Engine {
 
     var onStage: ((Stage) -> Void)?
     var onDone: ((UInt64, Result<String, EngineFailure>) -> Void)?
-    var onPreview: ((String) -> Void)?
+    /// The number `begin` gave the take, then its words so far.
+    var onPreview: ((UInt64, String) -> Void)?
 
     private var handle: OpaquePointer?
 
@@ -52,7 +53,7 @@ final class Engine {
         case Int(SeeEventFailed):
             onStage?(.failed(text))
         case Int(SeeEventPreview):
-            onPreview?(text)
+            onPreview?(a, text)
         case Int(SeeEventDone):
             onDone?(a, b == 0 ? .success(text) : .failure(EngineFailure(message: text)))
         default:
@@ -60,9 +61,12 @@ final class Engine {
         }
     }
 
-    func begin() {
-        guard let handle else { return }
-        _ = see_engine_begin(handle)
+    /// Starts a take and returns the number its previews carry. A preview still in the
+    /// engine when the next take begins keeps the old number.
+    @discardableResult
+    func begin() -> UInt64 {
+        guard let handle else { return 0 }
+        return see_engine_begin(handle)
     }
 
     func feed(_ samples: [Float]) {

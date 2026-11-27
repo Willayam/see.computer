@@ -46,7 +46,8 @@ final class Session: ObservableObject {
     private let microphone = Microphone()
     private let engine = Engine.shared
     private var micIsOn = false
-    /// Why the microphone went away during a take, shown once that take is done.
+    /// The take being recorded, as the engine numbers it.
+    private var live: LiveTake?
     private var job: UInt64 = 0
     /// The short wait for the last audio block. Cancel can still stop it.
     private var pendingFinish: DispatchWorkItem?
@@ -90,8 +91,8 @@ final class Session: ObservableObject {
         engine.onDone = { [weak self] job, result in
             MainActor.assumeIsolated { self?.finished(job: job, result) }
         }
-        engine.onPreview = { [weak self] words in
-            MainActor.assumeIsolated { self?.previewed(words) }
+        engine.onPreview = { [weak self] utterance, words in
+            MainActor.assumeIsolated { self?.previewed(words, from: utterance) }
         }
         engine.start(previews: true)
 
@@ -282,7 +283,7 @@ final class Session: ObservableObject {
         // iOS can reclaim the memory-mapped weights while the app sits idle. As on
         // the Mac, page them back in during the take rather than after it.
         engine.warm()
-        engine.begin()
+        live = LiveTake(start: start, utterance: engine.begin())
         let engine = self.engine
         let audio = CaptureStats()
         takeAudio = audio
@@ -301,10 +302,14 @@ final class Session: ObservableObject {
     }
 
     /// The take so far, for the keyboard to show. A late pass changes nothing once
-    /// the take has ended.
-    private func previewed(_ words: String) {
-        guard state.phase == .recording, let start = state.start else { return }
-        Bridge.write(DictationPreview(startID: start.id, words: words), "words.json")
+    /// the take has ended, and one the engine began for an earlier take is dropped.
+    private func previewed(_ words: String, from utterance: UInt64) {
+        guard state.phase == .recording else { return }
+        guard let preview = live?.preview(words, from: utterance) else {
+            Diagnostics.log("preview_stale", ["utterance": utterance, "current": live?.utterance ?? 0])
+            return
+        }
+        Bridge.write(preview, "words.json")
         Signals.post(.words)
     }
 
