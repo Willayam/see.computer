@@ -85,12 +85,13 @@ impl History {
             };
             set_root(&writer_root, live);
             let waiter = Arc::new(AtomicBool::new(false));
+            let mut counts = crate::tally::DayCounts::new();
             let mut load = || {
                 if !writer_enabled.load(Ordering::Relaxed) {
                     return;
                 }
                 let live = locked_root(&writer_root);
-                let mut tally = crate::tally::Tally::read(&live, &speed);
+                let mut tally = crate::tally::Tally::read_cached(&live, &speed, &mut counts);
                 if !tally.waiting.is_empty() {
                     // The backfill runs once, so it waits until every day file is
                     // local; otherwise the evicted days would never be timed.
@@ -145,7 +146,7 @@ impl History {
                     if crate::tally::backfill(&live, &speed, &ledger, &trails, cutoff).is_ok() {
                         backfill_due = false;
                     }
-                    tally = crate::tally::Tally::read(&live, &speed);
+                    tally = crate::tally::Tally::read_cached(&live, &speed, &mut counts);
                 }
                 let mut slot = writer_words
                     .lock()

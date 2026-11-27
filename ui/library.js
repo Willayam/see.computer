@@ -1,7 +1,9 @@
 (() => {
   const tauri = window.__TAURI__;
   let items = [];
-  let loadVersion = 0;
+  let versions = {};
+  let loading = null;
+  let pending = false;
   const requestedDownloads = new Set();
   const $ = (sel, root = document) => root.querySelector(sel);
   const params = new URLSearchParams(location.search);
@@ -43,6 +45,31 @@
   const WORDS = "words";
   const known = (id) => id === WORDS || items.some((item) => item.id === id);
 
+  let zone, formatters;
+  let renderedDay;
+  function updateCalendar() {
+    const currentZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const day = new Date().toDateString();
+    if (currentZone === zone && renderedDay === day) return false;
+    if (currentZone !== zone || !formatters) {
+      zone = currentZone;
+      versions = {};
+      const make = (locale, options) => new Intl.DateTimeFormat(locale, { ...options, timeZone: zone });
+      formatters = {
+        day: make("en-US", { month: "short", day: "numeric" }),
+        clock: make("en-GB", { hour: "2-digit", minute: "2-digit" }),
+        clockS: make("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        long: make("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" }),
+      };
+    }
+    renderedDay = day;
+    return true;
+  }
+  updateCalendar();
+  function format(key, ms) {
+    const d = new Date(ms);
+    return Number.isFinite(d.getTime()) ? formatters[key].format(d) : "Invalid Date";
+  }
   const fmt = {
     day(ms) {
       const d = new Date(ms), now = new Date();
@@ -50,11 +77,11 @@
       if (sameDay(d, now)) return "Today";
       const y = new Date(now); y.setDate(now.getDate() - 1);
       if (sameDay(d, y)) return "Yesterday";
-      return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      return format("day", ms);
     },
-    clock(ms) { return new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }); },
-    clockS(ms) { return new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }); },
-    long(ms) { return new Date(ms).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" }); },
+    clock(ms) { return format("clock", ms); },
+    clockS(ms) { return format("clockS", ms); },
+    long(ms) { return format("long", ms); },
     dur(ms) {
       if (ms == null) return "";
       const s = Math.round(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
@@ -124,10 +151,13 @@
   }
 
   function select(id) {
-    if (!known(id)) return;
+    if (!known(id) || id === currentId) return;
     if (id === WORDS && currentId !== WORDS) window.seeWords.open();
     currentId = id;
-    renderList();
+    const list = $("#list");
+    $(".row.is-on", list)?.classList.remove("is-on");
+    $(`.row[data-id="${CSS.escape(id)}"]`, list)?.classList.add("is-on");
+    $("#words-row", list)?.setAttribute("aria-selected", String(id === WORDS));
     renderDetail();
     $("#detail").scrollTop = 0;
   }
@@ -270,13 +300,42 @@
     return `<div class="files">${rows.map(([k, v]) => `<div><b>${k}</b> ${esc(v)}</div>`).join("")}</div>`;
   }
 
+  // Leave each surviving player connected while inserting new captures around it.
+  function updateMediaSection(current, next) {
+    const wanted = new Set([...next.querySelectorAll("audio, video")].map(player => player.src));
+    const players = new Map();
+    for (const child of [...current.children]) {
+      const src = $("audio, video", child)?.src;
+      if (!wanted.has(src)) { child.remove(); continue; }
+      if (!players.has(src)) players.set(src, []);
+      players.get(src).push(child);
+    }
+    let cursor = current.firstElementChild;
+    for (const child of [...next.children]) {
+      const src = $("audio, video", child)?.src;
+      const player = players.get(src)?.shift();
+      if (player) {
+        if (player !== cursor) current.insertBefore(player, cursor);
+        const caption = $("figcaption", child);
+        if (caption) {
+          $("figcaption", player).textContent = caption.textContent;
+          $(".line-time", player).textContent = $(".line-time", child).textContent;
+          $("video", player).poster = $("video", child).poster;
+        }
+        cursor = player.nextElementSibling;
+      } else current.insertBefore(child, cursor);
+    }
+    for (const group of players.values()) for (const unused of group) unused.remove();
+  }
+
+  let renderedId = null;
   function renderDetail() {
     if (dictionary()) return dictionary().renderDetail();
     const d = $("#detail");
     if (currentId === WORDS) return window.seeWords.renderDetail(d);
     const i = items.find((x) => x.id === currentId);
     if (!i) { d.innerHTML = `<div class="blank">${loaded ? "Pick something on the left." : "Loading your library…"}</div>`; return; }
-    d.innerHTML = `<article class="page">
+    const html = `<article class="page">
       ${kicker(i)}
       <h1 class="title">${esc(title(i))}</h1>
       <p class="when">${when(i)}</p>
@@ -286,6 +345,24 @@
       ${lines(i)}
       ${files(i)}
     </article>`;
+    const article = $(".page", d);
+    if (renderedId === i.id && article && $("audio, video", article)) {
+      const template = document.createElement("template");
+      template.innerHTML = html;
+      const next = template.content.firstElementChild;
+      const sections = [...article.children];
+      for (const section of sections) {
+        if (!section.matches(".lines, .audio") || !$(`.${section.className}`, next)) section.remove();
+      }
+      let cursor = article.firstElementChild;
+      for (const child of [...next.children]) {
+        if (cursor && child.className === cursor.className) {
+          updateMediaSection(cursor, child);
+          cursor = cursor.nextElementSibling;
+        } else article.insertBefore(child, cursor);
+      }
+    } else d.innerHTML = html;
+    renderedId = i.id;
     if (i.media.some((m) => m.cloud) && !requestedDownloads.has(i.id)) {
       requestedDownloads.add(i.id);
       const paths = i.media.flatMap((m) => [m.path, m.poster]).filter(Boolean);
@@ -326,7 +403,7 @@
   function startFix(id, idx) {
     const i = items.find((x) => x.id === id);
     if (!i || !i.lines[idx]) return;
-    editing = { id, idx, draft: i.lines[idx].text, error: null };
+    editing = { id, idx, original: i.lines[idx].text, startMs: i.lines[idx].startMs, draft: i.lines[idx].text, error: null };
     target = null;
     renderDetail();
   }
@@ -336,14 +413,17 @@
     const line = i?.lines[editing.idx];
     if (!line) { editing = null; renderDetail(); return; }
     try {
-      await tauri.core.invoke("library_fix", { id: i.id, startMs: line.startMs, original: line.text, edited: editing.draft });
+      await tauri.core.invoke("library_fix", { id: i.id, startMs: editing.startMs, original: editing.original, edited: editing.draft });
       editing = null;
       target = { id: i.id, startMs: line.startMs };
       toast("Fixed. see.computer learns from it.");
       await reload();
+      renderDetail();
     } catch (error) {
+      if (!editing) return;
       editing.error = String(error);
       await reload();
+      renderDetail();
     }
   }
 
@@ -423,26 +503,60 @@
     localStorage.setItem("see.theme", theme);
   }
   $("#theme").addEventListener("click", () => { theme = themes[(themes.indexOf(theme) + 1) % themes.length]; applyTheme(); });
-  async function reload() {
+  function reload() {
     if (dictionary()) return;
-    const version = ++loadVersion;
-    const scroll = $("#list").scrollTop;
+    pending = true;
+    if (!loading) loading = Promise.resolve().then(async () => {
+      try {
+        while (pending) {
+          pending = false;
+          await refresh();
+        }
+      } finally { loading = null; }
+    });
+    return loading;
+  }
+
+  async function refresh() {
+    const previousZone = zone;
+    const calendarChanged = updateCalendar();
     try {
-      const next = await tauri.core.invoke("library_items");
-      if (version !== loadVersion) return;
+      const next = await tauri.core.invoke("library_items", { known: versions });
+      const previous = items.find((i) => i.id === currentId);
+      const byId = new Map(items.map((i) => [i.id, i]));
+      const changed = !loaded || next.changed.length > 0 || Object.keys(next.versions).length !== items.length;
+      for (const item of next.changed) byId.set(item.id, item);
+      if (changed) {
+        items = Object.keys(next.versions).map((id) => byId.get(id)).sort((a, b) => b.at - a.at);
+        for (const id of requestedDownloads) {
+          if (versions[id] !== next.versions[id]) requestedDownloads.delete(id);
+        }
+      }
+      versions = next.versions;
+      if (loaded && !changed && !calendarChanged) return;
       loaded = true;
-      items = next.sort((a, b) => b.at - a.at);
       if (!currentId || !known(currentId)) currentId = items[0]?.id ?? null;
       if (dictionary()) return;
+      const scroll = $("#list").scrollTop;
       renderList();
       // A fix being typed survives a reload unless its line is gone.
       const fix = $(".fix");
-      const kept = editing && items.find((i) => i.id === editing.id)?.lines[editing.idx];
+      if (editing) {
+        const lines = items.find((i) => i.id === editing.id)?.lines;
+        if (lines?.[editing.idx]?.startMs !== editing.startMs)
+          editing.idx = lines?.findIndex(l => l.startMs === editing.startMs && l.text === editing.original) ?? -1;
+      }
+      const kept = editing && editing.idx >= 0 && items.find((i) => i.id === editing.id)?.lines[editing.idx];
       if (editing && !kept) editing = null;
       const detail = $("#detail");
       const atBottom = detail.scrollHeight - detail.scrollTop - detail.clientHeight < 40;
       const stickToBottom = atBottom && items.find((i) => i.id === currentId)?.state === "recording";
-      if (!(fix && kept && !editing.error && document.activeElement === fix)) renderDetail();
+      const current = items.find((i) => i.id === currentId);
+      if (previous !== current || zone !== previousZone || !previous && currentId !== WORDS) {
+        const caret = fix && kept && document.activeElement === fix ? [fix.selectionStart, fix.selectionEnd] : null;
+        renderDetail();
+        if (caret) $(".fix")?.setSelectionRange(...caret);
+      }
       if (stickToBottom) detail.scrollTop = detail.scrollHeight;
       $("#list").scrollTop = scroll;
     } catch (error) { toast(`Library could not load: ${error}`); }
@@ -473,27 +587,44 @@
     const idx = at == null ? -1 : i.lines.findIndex((l) => l.startMs === +at);
     editing = null;
     target = idx >= 0 ? { id, startMs: i.lines[idx].startMs } : null;
-    if (edit && idx >= 0 && fixable(i)) editing = { id, idx, draft: i.lines[idx].text, error: null };
+    if (edit && idx >= 0 && fixable(i)) editing = { id, idx, original: i.lines[idx].text, startMs: i.lines[idx].startMs, draft: i.lines[idx].text, error: null };
     renderList();
     renderDetail();
     $(`.row[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" });
   }
 
   // Marks the day header that is pinned over scrolled rows, for its fade.
+  let headers = [], stuck = null, scrollFrame = 0;
   function markStuck() {
+    scrollFrame = 0;
     const list = $("#list");
-    const top = list.getBoundingClientRect().top;
-    list.querySelectorAll(".day").forEach((h) => {
-      h.classList.toggle("is-stuck", list.scrollTop > 0 && h.getBoundingClientRect().top - top < 1);
-    });
+    const top = list.getBoundingClientRect().top + 1;
+    let left = 0, right = headers.length;
+    while (left < right) {
+      const mid = Math.floor((left + right) / 2);
+      if (headers[mid].getBoundingClientRect().top < top) left = mid + 1;
+      else right = mid;
+    }
+    const next = list.scrollTop > 0 ? headers[left - 1] : null;
+    if (stuck !== next) {
+      stuck?.classList.remove("is-stuck");
+      next?.classList.add("is-stuck");
+      stuck = next;
+    }
   }
-  $("#list").addEventListener("scroll", markStuck, { passive: true });
-  new MutationObserver(markStuck).observe($("#list"), { childList: true });
+  function scheduleScroll() {
+    if (!scrollFrame) scrollFrame = requestAnimationFrame(markStuck);
+  }
+  $("#list").addEventListener("scroll", scheduleScroll, { passive: true });
+  new MutationObserver(() => {
+    headers = $("#list").querySelectorAll(".day");
+    scheduleScroll();
+  }).observe($("#list"), { childList: true });
 
   window.seeLibrary = {
     $, esc, fmt, toast, ICON, GLYPH,
     query: () => query,
-    current: () => currentId,
+    current: () => dictionary() ? null : currentId,
     count: (text) => { $("#count").textContent = text; },
     open: (id, startMs) => route(startMs == null ? id : `${id}@${startMs}`),
   };
@@ -507,6 +638,10 @@
     tauri.event.listen("library-changed", reload);
     tauri.event.listen("library-select", ({ payload }) => route(payload));
     window.addEventListener("focus", reload);
+    setInterval(() => {
+      if (!document.hidden && (renderedDay !== new Date().toDateString() ||
+          zone !== new Intl.DateTimeFormat().resolvedOptions().timeZone)) reload();
+    }, 60_000);
     // The Dictionary and Words load on their own, so they open without waiting
     // for every dictation, take and meeting to be read.
     const early = start === "dictionary" || !!start?.startsWith("dictionary:") || start === WORDS;

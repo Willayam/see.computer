@@ -1,4 +1,6 @@
 use crate::shadow::{self, evicted, Text};
+use std::collections::BTreeMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -10,7 +12,7 @@ use crate::history::History;
 use crate::ledger::Ledger;
 use crate::meeting::folder;
 
-#[derive(Serialize)]
+#[derive(Serialize, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
     id: String,
@@ -28,7 +30,7 @@ pub struct Item {
     share: Option<Share>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Hash)]
 #[serde(rename_all = "camelCase")]
 struct Line {
     start_ms: i64,
@@ -37,7 +39,7 @@ struct Line {
     text: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Hash)]
 #[serde(rename_all = "camelCase")]
 struct Media {
     kind: &'static str,
@@ -49,13 +51,13 @@ struct Media {
     cloud: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Hash)]
 struct Files {
     folder: String,
     markdown: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Hash)]
 struct Share {
     url: String,
 }
@@ -168,12 +170,27 @@ fn set_active(app: &AppHandle, active: bool) {
     });
 }
 
+#[derive(Serialize)]
+pub struct Changes {
+    versions: BTreeMap<String, String>,
+    changed: Vec<Item>,
+}
+
+fn version(value: impl Hash) -> String {
+    let mut hash = DefaultHasher::new();
+    value.hash(&mut hash);
+    format!("{:x}", hash.finish())
+}
+
 /// Async so the file reads run off the main thread, which also draws the panel.
 #[tauri::command]
-pub async fn library_items(history: State<'_, History>) -> Result<Vec<Item>, String> {
+pub async fn library_items(
+    history: State<'_, History>,
+    known: BTreeMap<String, String>,
+) -> Result<Changes, String> {
     let root = history.root();
     request(&read_by_items(&root, &crate::paths::documents()));
-    let result = items(&root);
+    let result = changes(&root, &crate::paths::documents(), &known);
     shadow::prune();
     Ok(result)
 }
@@ -855,23 +872,19 @@ fn bare_movie(path: &Path) -> Option<Item> {
     })
 }
 
-fn items(history_root: &Path) -> Vec<Item> {
-    items_in(history_root, &crate::paths::documents())
-}
-
-fn items_in(history_root: &Path, documents: &Path) -> Vec<Item> {
-    let mut result = Vec::new();
-    for path in std::fs::read_dir(history_root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-    {
-        if path.extension().is_some_and(|extension| extension == "md") {
-            if let Some(item) = day(&path) {
-                result.push(item);
-            }
+fn changes(history_root: &Path, documents: &Path, known: &BTreeMap<String, String>) -> Changes {
+    let mut result = Changes {
+        versions: BTreeMap::new(),
+        changed: Vec::new(),
+    };
+    for (_, path) in crate::history::day_files(history_root) {
+        let id = format!("dictation:{}", path.file_stem().unwrap().to_string_lossy());
+        let stamp = version((&path, shadow::stamp(&path)));
+        if known.get(&id) != Some(&stamp) {
+            let Some(item) = day(&path) else { continue };
+            result.changed.push(item);
         }
+        result.versions.insert(id, stamp);
     }
     for path in std::fs::read_dir(documents)
         .into_iter()
@@ -879,19 +892,26 @@ fn items_in(history_root: &Path, documents: &Path) -> Vec<Item> {
         .flatten()
         .map(|entry| entry.path())
     {
-        if path.is_dir() {
-            if let Some(item) = meeting(&path).or_else(|| take(&path)) {
-                result.push(item);
-            }
+        let item = if path.is_dir() {
+            meeting(&path).or_else(|| take(&path))
         } else if path.extension().is_some_and(|extension| extension == "mov")
             && !path.with_extension("").is_dir()
         {
-            if let Some(item) = bare_movie(&path) {
-                result.push(item);
+            bare_movie(&path)
+        } else {
+            None
+        };
+        if let Some(item) = item {
+            let stamp = version(&item);
+            result.versions.insert(item.id.clone(), stamp.clone());
+            if known.get(&item.id) != Some(&stamp) {
+                result.changed.push(item);
             }
         }
     }
-    result.sort_by_key(|item| std::cmp::Reverse(item.at));
+    result
+        .changed
+        .sort_by_key(|item| std::cmp::Reverse(item.at));
     result
 }
 
@@ -943,6 +963,24 @@ mod tests {
     }
 
     #[test]
+    fn refresh_transfers_only_changed_days_and_drops_deleted_ids() {
+        let root = temp_dir();
+        let doc = root.join("documents");
+        let day = root.join("2026-10-25.md");
+        std::fs::write(&day, "## 02:15:00 +02:00\n\nfirst\n\n").unwrap();
+        let first = changes(&root, &doc, &BTreeMap::new());
+        assert_eq!(first.changed[0].paste, "first");
+        assert!(changes(&root, &doc, &first.versions).changed.is_empty());
+        std::fs::write(&day, "## 02:15:00 +01:00\n\nsecond\n\n").unwrap();
+        let next = changes(&root, &doc, &first.versions);
+        assert_eq!(next.changed[0].paste, "second");
+        std::fs::remove_file(&day).unwrap();
+        let removed = changes(&root, &doc, &next.versions);
+        assert!(removed.versions.is_empty() && removed.changed.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn meeting_lines_parse_minutes_and_hours() {
         let lines = meeting_lines("[01:23] You: Hello.\n[1:02:03] Them: Hi.\n");
         assert_eq!(lines.len(), 2);
@@ -979,7 +1017,7 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join("take.md"), "# Screen take").unwrap();
         std::fs::write(path.join("transcript.json"), r#"{"type":"see-computer.session","version":1,"durationMs":25000,"fullText":"Look at the button","segments":[{"startMs":1000,"endMs":2000,"text":"Look at the button"}],"captures":[{"type":"shot","atMs":3000,"file":"shots/001.png"},{"type":"clip","startMs":4000,"durationMs":5000,"video":"clips/001/clip.mov","frames":[{"atMs":4500,"file":"clips/001/frames/0004500.jpg"}]}]}"#).unwrap();
-        let found = items_in(&history, &documents);
+        let found = changes(&history, &documents, &BTreeMap::new()).changed;
         assert_eq!(
             found
                 .iter()

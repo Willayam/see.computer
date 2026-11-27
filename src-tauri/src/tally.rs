@@ -57,25 +57,40 @@ pub fn words(text: &str) -> u64 {
         .count() as u64
 }
 
+pub type DayCounts = BTreeMap<PathBuf, (crate::shadow::Stamp, Count)>;
+
 impl Tally {
     pub fn read(root: &Path, speed_log: &Path) -> Tally {
+        Self::read_cached(root, speed_log, &mut BTreeMap::new())
+    }
+
+    pub fn read_cached(root: &Path, speed_log: &Path, cache: &mut DayCounts) -> Tally {
         let mut tally = Self::default();
+        let mut previous = std::mem::take(cache);
         for (date, path) in crate::history::day_files(root) {
-            match crate::shadow::read(&path) {
-                crate::shadow::Text::Current(text) | crate::shadow::Text::Stale(text) => {
-                    for entry in crate::history::parse_day(date, &text) {
+            let stamp = crate::shadow::stamp(&path);
+            let count = previous
+                .remove(&path)
+                .filter(|(old, _)| old == &stamp)
+                .map(|(_, c)| c)
+                .or_else(|| {
+                    let text = crate::shadow::read(&path).text()?;
+                    let mut count = Count::default();
+                    for entry in crate::history::day_entries(date, &text) {
                         if !entry.text.trim().is_empty() {
-                            let count = tally.days.entry(entry.at.date()).or_default();
-                            *count += Count {
-                                words: words(&entry.text),
-                                dictations: 1,
-                                ..Count::default()
-                            };
+                            count.dictations += 1;
+                            count.words += words(&entry.text);
                         }
                     }
+                    Some(count)
+                });
+            if let Some(count) = count {
+                if count.dictations > 0 {
+                    *tally.days.entry(date).or_default() += count;
                 }
-                crate::shadow::Text::Waiting => tally.waiting.push(path),
-                crate::shadow::Text::Missing => tally.waiting.push(path),
+                cache.insert(path, (stamp, count));
+            } else {
+                tally.waiting.push(path);
             }
         }
         if let Ok(text) = std::fs::read_to_string(speed_log) {
