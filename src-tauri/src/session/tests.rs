@@ -197,6 +197,7 @@ fn nothing_focused_shows_the_words_instead_of_losing_them() {
     assert_eq!(held.text, "hello world");
     assert_eq!(held.note, None);
     assert_eq!(held.clipboard, "hello world");
+    assert_eq!(held.recovery, crate::pill::Recovery::AwaitingCopy);
 }
 
 #[test]
@@ -222,8 +223,8 @@ fn failed_or_timed_out_paste_keeps_the_words_available_to_copy() {
         assert!(matches!(controller.session, Session::Idle));
         assert!(pill
             .try_iter()
-            .any(|event| matches!(event, PillEvent::Held(held)
-            if held.id == turn.0 && held.clipboard == "another take" && held.recovery.is_some())));
+            .any(|event| matches!(event, PillEvent::Recovered(held)
+            if held.id == turn.0 && held.clipboard == "another take" && held.recovery == crate::pill::Recovery::AwaitingCopy)));
     }
 }
 
@@ -593,7 +594,7 @@ fn stale_stream_with_empty_audio_reports_mic_unavailable() {
 fn held_texts(pill: &Receiver<PillEvent>) -> Vec<String> {
     pill.try_iter()
         .filter_map(|event| match event {
-            PillEvent::Held(held) => Some(held.text),
+            PillEvent::Held(held) | PillEvent::Recovered(held) => Some(held.text),
             _ => None,
         })
         .collect()

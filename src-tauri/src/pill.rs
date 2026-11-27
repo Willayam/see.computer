@@ -21,6 +21,8 @@ pub enum PillEvent {
     /// Nothing could take the words, so the chip stretches into a card that
     /// shows them with a Copy button and a dismiss.
     Held(Held),
+    /// A late result or a failed paste waits until the current activity ends.
+    Recovered(Held),
     /// Read-back recorded a fix to a word the learner can use. Waits for the
     /// pill to be idle, so it never covers a dictation.
     Fixed(Fix),
@@ -62,6 +64,12 @@ fn queue_fixed(pending: &mut std::collections::VecDeque<Card>, next: Fix) {
     pending.push_back(Card::Fixed(next));
 }
 
+fn keep_interrupted_card(pending: &mut std::collections::VecDeque<Card>, card: Card) {
+    if matches!(&card, Card::Held(held) if held.recovery != Recovery::Acknowledged) {
+        pending.push_front(card);
+    }
+}
+
 /// What the stretched pill shows. `note` mirrors the tray's glyph column: a
 /// dictation has none and gets `waveform`, a capture has one and gets
 /// `video.fill` (`DICTATION` and `CLIP` in `tray.rs`).
@@ -75,17 +83,22 @@ pub struct Held {
     #[serde(skip)]
     pub clipboard: String,
     #[serde(skip)]
-    pub recovery: Option<Recovery>,
+    pub recovery: Recovery,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Recovery {
-    pub audio: Option<std::path::PathBuf>,
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Recovery {
+    #[default]
+    AwaitingCopy,
+    SavedAudio(std::path::PathBuf),
+    Acknowledged,
 }
 
 impl Held {
     fn acknowledge(&mut self) {
-        if let Some(Recovery { audio: Some(path) }) = self.recovery.take() {
+        if let Recovery::SavedAudio(path) =
+            std::mem::replace(&mut self.recovery, Recovery::Acknowledged)
+        {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -279,21 +292,19 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                 pending.push_back(Card::LevelUp(next));
                 continue;
             }
-            if let PillEvent::Held(ref held) = event {
-                if let Some(recovery) = &held.recovery {
+            if let PillEvent::Recovered(held) = event {
+                if matches!(held.recovery, Recovery::SavedAudio(_)) {
                     // A manual retry can finish while the first result still awaits Copy.
-                    let same_audio = |card: &Card| {
-                        matches!(card, Card::Held(other)
-                        if recovery.audio.is_some() && other.recovery.as_ref() == Some(recovery))
-                    };
+                    let same_audio = |card: &Card| matches!(card, Card::Held(other) if other.recovery == held.recovery);
                     let showing = card
                         .lock()
                         .is_ok_and(|slot| slot.as_ref().is_some_and(same_audio));
-                    if !showing && !pending.iter().any(same_audio) {
-                        pending.push_back(Card::Held(held.clone()));
+                    if showing || pending.iter().any(same_audio) {
+                        continue;
                     }
-                    continue;
                 }
+                pending.push_back(Card::Held(held));
+                continue;
             }
             if let PillEvent::Preview(text) = event {
                 // One that lost the race with the end of its take has
@@ -310,6 +321,7 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                 PillEvent::Finish(_) | PillEvent::Hide | PillEvent::Held(_) => current = None,
                 PillEvent::Shot
                 | PillEvent::Flash(_)
+                | PillEvent::Recovered(_)
                 | PillEvent::LevelUp(_)
                 | PillEvent::Fixed(_)
                 | PillEvent::Preview(_) => {}
@@ -329,16 +341,17 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                 },
                 PillEvent::Held(held) => {
                     if let Ok(mut slot) = card.lock() {
-                        if let Some(Card::Held(old)) = slot.replace(Card::Held(held.clone())) {
-                            if old.recovery.is_some() {
-                                pending.push_front(Card::Held(old));
-                            }
+                        if let Some(old) = slot.replace(Card::Held(held.clone())) {
+                            keep_interrupted_card(&mut pending, old);
                         }
                     }
                     Wire::Held(held)
                 }
                 PillEvent::Hide => Wire::Hide,
-                PillEvent::Fixed(_) | PillEvent::LevelUp(_) | PillEvent::Preview(_) => continue,
+                PillEvent::Fixed(_)
+                | PillEvent::LevelUp(_)
+                | PillEvent::Preview(_)
+                | PillEvent::Recovered(_) => continue,
             };
             if starts_activity {
                 let dispatcher = app.clone();
@@ -350,9 +363,7 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
             if !matches!(wire, Wire::Held(_)) {
                 if let Ok(mut slot) = card.lock() {
                     if let Some(old) = slot.take() {
-                        if matches!(&old, Card::Held(held) if held.recovery.is_some()) {
-                            pending.push_front(old);
-                        }
+                        keep_interrupted_card(&mut pending, old);
                         let dispatcher = app.clone();
                         let window = window.clone();
                         let _ = dispatcher.run_on_main_thread(move || {
@@ -741,6 +752,31 @@ fn place(window: &WebviewWindow, logical: (f64, f64)) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_new_take_preserves_each_unclaimed_copy_even_when_the_words_repeat() {
+        let mut pending = std::collections::VecDeque::new();
+        for id in [1, 2] {
+            keep_interrupted_card(
+                &mut pending,
+                Card::Held(Held {
+                    id,
+                    text: "again".to_owned(),
+                    clipboard: "again".to_owned(),
+                    ..Default::default()
+                }),
+            );
+        }
+        for id in [2, 1] {
+            let Some(Card::Held(mut held)) = pending.pop_front() else {
+                panic!("missing copy card {id}");
+            };
+            assert_eq!((held.id, held.clipboard.as_str()), (id, "again"));
+            held.acknowledge();
+            keep_interrupted_card(&mut pending, Card::Held(held));
+        }
+        assert!(pending.is_empty());
+    }
+
     #[test]
     fn fixed_coalesces_without_dropping_level() {
         use super::*;

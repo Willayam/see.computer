@@ -1092,11 +1092,9 @@ impl Controller {
         self.trail.record(from, "Timeout", "Idle");
     }
 
-    fn hold_failed_paste(&self, mut held: crate::pill::Held, notice: Notice) {
+    fn hold_failed_paste(&self, held: crate::pill::Held, notice: Notice) {
         self.finish(notice);
-        held.recovery
-            .get_or_insert(crate::pill::Recovery { audio: None });
-        let _ = self.pill.send(PillEvent::Held(held));
+        let _ = self.pill.send(PillEvent::Recovered(held));
     }
 
     /// The whole utterance as the engine received it: what was fed during the
@@ -1172,11 +1170,12 @@ impl Controller {
                     text: text.as_str().to_owned(),
                     note: None,
                     clipboard: text.as_str().to_owned(),
-                    recovery: Some(crate::pill::Recovery {
-                        audio: path.clone(),
-                    }),
+                    recovery: path.clone().map_or(
+                        crate::pill::Recovery::AwaitingCopy,
+                        crate::pill::Recovery::SavedAudio,
+                    ),
                 };
-                if self.pill.send(PillEvent::Held(held)).is_ok() {
+                if self.pill.send(PillEvent::Recovered(held)).is_ok() {
                     if let Some(path) = path {
                         self.recovered.insert(path);
                     }
