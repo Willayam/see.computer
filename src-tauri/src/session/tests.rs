@@ -200,6 +200,34 @@ fn nothing_focused_shows_the_words_instead_of_losing_them() {
 }
 
 #[test]
+fn failed_or_timed_out_paste_keeps_the_words_available_to_copy() {
+    for error in [Some(paste::Error::Clipboard("unavailable".into())), None] {
+        let (mut controller, pill, _dir) = test_controller();
+        let turn = Turn(7);
+        controller.session = Session::Pasting {
+            since: Instant::now() - PASTE_TIMEOUT,
+            turn,
+            held: crate::pill::Held {
+                id: turn.0,
+                text: "another take".into(),
+                clipboard: "another take".into(),
+                ..Default::default()
+            },
+        };
+        if let Some(error) = error {
+            controller.step(Msg::Paste(turn, paste::Outcome(Err(error))));
+        } else {
+            controller.expire();
+        }
+        assert!(matches!(controller.session, Session::Idle));
+        assert!(pill
+            .try_iter()
+            .any(|event| matches!(event, PillEvent::Held(held)
+            if held.id == turn.0 && held.clipboard == "another take" && held.recovery.is_some())));
+    }
+}
+
+#[test]
 fn shots_accumulate_without_interrupting_dictation() {
     let (mut controller, pill, _) = test_controller();
     controller.step(Msg::MainPressed);

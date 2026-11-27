@@ -897,7 +897,7 @@ impl Controller {
                         Session::Idle
                     }
                     Err(error) => {
-                        self.finish(Notice::PasteFailed(error.to_string()));
+                        self.hold_failed_paste(held, Notice::PasteFailed(error.to_string()));
                         Session::Idle
                     }
                 }
@@ -1069,15 +1069,25 @@ impl Controller {
             self.trail.record(from, "Timeout", to);
             return;
         }
-        let what = match self.session {
-            Session::PackagingTake { .. } => "Saving",
-            Session::Pasting { .. } => "Paste",
-            _ => return,
-        };
         let from = session_label(&self.session);
-        self.session = Session::Idle;
-        self.finish(Notice::TimedOut(what));
+        match std::mem::replace(&mut self.session, Session::Idle) {
+            Session::PackagingTake { .. } => self.finish(Notice::TimedOut("Saving")),
+            Session::Pasting { held, .. } => {
+                self.hold_failed_paste(held, Notice::TimedOut("Paste"))
+            }
+            state => {
+                self.session = state;
+                return;
+            }
+        }
         self.trail.record(from, "Timeout", "Idle");
+    }
+
+    fn hold_failed_paste(&self, mut held: crate::pill::Held, notice: Notice) {
+        self.finish(notice);
+        held.recovery
+            .get_or_insert(crate::pill::Recovery { audio: None });
+        let _ = self.pill.send(PillEvent::Held(held));
     }
 
     /// The whole utterance as the engine received it: what was fed during the

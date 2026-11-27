@@ -36,19 +36,6 @@ void *see_pasteboard_snapshot(void *handle, intptr_t expected) {
     }
 }
 
-// -1 means another process owns the pasteboard. -2 means the write failed.
-intptr_t see_pasteboard_write(void *handle, intptr_t expected, const uint8_t *bytes, size_t length) {
-    @autoreleasepool {
-        NSPasteboard *board = (__bridge NSPasteboard *)handle;
-        NSString *text = [[NSString alloc] initWithBytes:bytes length:length encoding:NSUTF8StringEncoding];
-        if (!text) return -2;
-        if (board.changeCount != expected) return -1;
-        NSInteger owned = [board clearContents];
-        if (![board setString:text forType:NSPasteboardTypeString]) return -2;
-        return board.changeCount == owned ? owned : -1;
-    }
-}
-
 bool see_pasteboard_restore(void *handle, intptr_t expected, void *snapshot) {
     @autoreleasepool {
         NSPasteboard *board = (__bridge NSPasteboard *)handle;
@@ -56,5 +43,21 @@ bool see_pasteboard_restore(void *handle, intptr_t expected, void *snapshot) {
         if (board.changeCount != expected) return false;
         [board clearContents];
         return items.count == 0 || [board writeObjects:items];
+    }
+}
+
+// -1 means another process owns the pasteboard. -2 means the write failed.
+intptr_t see_pasteboard_write(void *handle, intptr_t expected, const uint8_t *bytes, size_t length, void *prior) {
+    @autoreleasepool {
+        NSPasteboard *board = (__bridge NSPasteboard *)handle;
+        NSString *text = [[NSString alloc] initWithBytes:bytes length:length encoding:NSUTF8StringEncoding];
+        if (!text) return -2;
+        if (board.changeCount != expected) return -1;
+        NSInteger owned = [board clearContents];
+        if (![board setString:text forType:NSPasteboardTypeString]) {
+            if (prior) see_pasteboard_restore(handle, owned, prior);
+            return -2;
+        }
+        return board.changeCount == owned ? owned : -1;
     }
 }

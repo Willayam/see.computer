@@ -18,6 +18,7 @@ unsafe extern "C" {
         expected: isize,
         bytes: *const u8,
         length: usize,
+        prior: *mut c_void,
     ) -> isize;
     fn see_pasteboard_restore(board: *mut c_void, expected: isize, snapshot: *mut c_void) -> bool;
 }
@@ -192,7 +193,11 @@ fn paste_loop(
             continue;
         }
         let text = job.text.as_str().as_bytes();
-        let owned = unsafe { see_pasteboard_write(handle, expected, text.as_ptr(), text.len()) };
+        let snapshot = prior
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |p| p.0.as_ptr());
+        let owned =
+            unsafe { see_pasteboard_write(handle, expected, text.as_ptr(), text.len(), snapshot) };
         if owned == -1 {
             (job.done)(Outcome(Ok(Landing::Held)));
             continue;
@@ -240,7 +245,12 @@ fn paste_loop(
                     at: Instant::now() + Duration::from_millis(1_200),
                 });
             }
-            Err(error) => (job.done)(Outcome(Err(error))),
+            Err(error) => {
+                if let Some(prior) = prior {
+                    unsafe { see_pasteboard_restore(handle, owned, prior.0.as_ptr()) };
+                }
+                (job.done)(Outcome(Err(error)));
+            }
         }
     }
 }
@@ -248,8 +258,7 @@ fn paste_loop(
 pub struct Outcome(pub Result<Landing, Error>);
 
 /// Where a job's text ended up. `Held` means no synthetic Cmd+V was posted
-/// because nothing could receive it, and the clipboard was deliberately not
-/// given back, so the words are still there for the user to place.
+/// because the focus or clipboard changed. The user can copy the words from the pill.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Landing {
     Pasted,
