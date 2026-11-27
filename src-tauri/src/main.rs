@@ -37,6 +37,7 @@ mod sound;
 mod sounds_like;
 mod tally;
 mod target;
+mod terms;
 mod text;
 mod tray;
 mod trigger;

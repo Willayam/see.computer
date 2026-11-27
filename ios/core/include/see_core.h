@@ -22,14 +22,19 @@ enum {
 
 typedef void (*SeeCallback)(void *context, int32_t kind, uint64_t a, uint64_t b, const char *text);
 
+/* Checks a NUL-terminated word on the context or engine thread. */
+typedef bool (*SeeKnows)(const char *word);
+
 /* Downloads the model if it is missing, loads it, and warms it, on its own
- * thread. Events arrive on another thread. Call once per process. */
+ * thread. Events arrive on another thread. Call once per process. `knows` may
+ * be NULL, which treats every queried word as known. */
 SeeEngine *see_engine_start(const char *models, const char *dictionary, bool previews,
-                            void *context, SeeCallback callback);
+                            void *context, SeeCallback callback, SeeKnows knows);
 
 /* One take: begin, any number of feeds, then finish or discard. Samples are
- * 16 kHz mono floats and are copied before the call returns. */
-uint64_t see_engine_begin(SeeEngine *engine);
+ * 16 kHz mono floats. Samples and the NUL-terminated `nearby` field text
+ * are copied before the call returns. Pass NULL or an empty string for no context. */
+uint64_t see_engine_begin(SeeEngine *engine, const char *nearby);
 void see_engine_feed(SeeEngine *engine, const float *samples, size_t count);
 uint64_t see_engine_finish(SeeEngine *engine, const float *samples, size_t count);
 void see_engine_discard(SeeEngine *engine);

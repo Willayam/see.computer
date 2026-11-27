@@ -66,7 +66,7 @@ fn protected_prefix(text: &str, name: &str) -> Option<usize> {
 
 pub fn rewrite(
     text: &str,
-    terms: &[crate::context::Term],
+    terms: &[crate::terms::Term],
     saved: &[&str],
     words: &crate::learn::Words,
 ) -> String {
@@ -174,7 +174,7 @@ mod tests {
     use super::*;
     #[test]
     fn joins_a_split_name_but_respects_punctuation() {
-        let term = crate::context::Term {
+        let term = crate::terms::Term {
             text: "Kavilo".into(),
             source: "screen",
         };
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn candidates_must_look_like_names_and_short_words_stay() {
-        let term = |text: &str| crate::context::Term {
+        let term = |text: &str| crate::terms::Term {
             text: text.into(),
             source: "candidate",
         };
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn sentence_openers_stay_names_mid_sentence_change_and_swedish_saved_words_hold() {
-        let screen = |text: &str| crate::context::Term {
+        let screen = |text: &str| crate::terms::Term {
             text: text.into(),
             source: "screen",
         };
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn keeps_ambiguous_names_and_saved_phrases() {
-        let terms = ["Kavilo", "Cavillo"].map(|text| crate::context::Term {
+        let terms = ["Kavilo", "Cavillo"].map(|text| crate::terms::Term {
             text: text.into(),
             source: "screen",
         });

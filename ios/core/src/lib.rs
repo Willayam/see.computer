@@ -3,13 +3,13 @@
 //! Every `#[path]` module below is the Mac source itself, so a change to the
 //! engine, the dictionary rules or the text passes reaches both apps. `seams`
 //! stands in for the few Mac modules those files reach into: paths, the
-//! microphone's sample type, on-screen context and the iCloud shadow copy.
+//! microphone's sample type, word lookup and the iCloud shadow copy.
 
 // The shared files also hold what only the Mac calls.
 #![allow(dead_code)]
 
 mod seams;
-use seams::{context, learn, library, mic, paths, shadow};
+use seams::{learn, library, mic, paths, shadow};
 
 #[path = "../../../src-tauri/src/align.rs"]
 mod align;
@@ -25,6 +25,10 @@ mod numbers;
 mod qos;
 #[path = "../../../src-tauri/src/sound.rs"]
 mod sound;
+#[path = "../../../src-tauri/src/sounds_like.rs"]
+mod sounds_like;
+#[path = "../../../src-tauri/src/terms.rs"]
+mod terms;
 #[path = "../../../src-tauri/src/text.rs"]
 mod text;
 #[path = "../../../src-tauri/src/vocabulary.rs"]

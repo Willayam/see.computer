@@ -73,6 +73,11 @@ struct DictationStart: Codable, Equatable {
     let target: DictationTarget
 }
 
+struct StartRequest: Codable {
+    let start: DictationStart
+    let nearby: String
+}
+
 struct DictationPreview: Codable {
     let startID: UUID
     let words: String
@@ -84,6 +89,7 @@ struct Handoff: Codable {
     var asked: Date
     var host: String?
     var start: DictationStart?
+    var nearby: String?
 }
 
 /// The take so far, as it stands in the text field. Saved because the keyboard can

@@ -365,7 +365,7 @@ impl Ledger {
         }
     }
 
-    pub fn context(&self, id: &Id, terms: &[crate::context::Term], text: &str) {
+    pub fn context(&self, id: &Id, terms: &[crate::terms::Term], text: &str) {
         if self.enabled.load(Ordering::Relaxed) && !terms.is_empty() {
             let terms = terms
                 .iter()
@@ -936,7 +936,7 @@ mod tests {
         let id = ledger.mint();
         ledger.context(
             &id,
-            &[crate::context::Term {
+            &[crate::terms::Term {
                 text: "Zorvia".into(),
                 source: "screen",
             }],

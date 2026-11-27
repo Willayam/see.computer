@@ -12,6 +12,18 @@ final class Engine {
 
     static let shared = Engine()
 
+    private static let lexicons: [Lexicon] = {
+        guard let url = Bundle.main.builtInPlugInsURL?.appendingPathComponent("Keyboard.appex"),
+            let bundle = Bundle(url: url) else { return [] }
+        return ["en", "sv"].compactMap { Lexicon(language: $0, bundle: bundle) }
+    }()
+
+    private static let knows: @convention(c) (UnsafePointer<CChar>?) -> Bool = { word in
+        guard let word, !lexicons.isEmpty else { return true }
+        let lower = String(cString: word).lowercased()
+        return lexicons.contains { lex in lex.node(lower).flatMap(lex.terminal) != nil }
+    }
+
     var onStage: ((Stage) -> Void)?
     var onDone: ((UInt64, Result<String, EngineFailure>) -> Void)?
     var onPreview: ((String) -> Void)?
@@ -27,12 +39,14 @@ final class Engine {
         guard handle == nil else { return }
         let context = Unmanaged.passUnretained(self).toOpaque()
         handle = see_engine_start(
-            Paths.models.path, Paths.dictionary.path, previews, context
-        ) { context, kind, a, b, text in
-            let engine = Unmanaged<Engine>.fromOpaque(context!).takeUnretainedValue()
-            let text = text.map { String(cString: $0) } ?? ""
-            DispatchQueue.main.async { engine.receive(Int(kind), a, b, text) }
-        }
+            Paths.models.path, Paths.dictionary.path, previews, context,
+            { context, kind, a, b, text in
+                let engine = Unmanaged<Engine>.fromOpaque(context!).takeUnretainedValue()
+                let text = text.map { String(cString: $0) } ?? ""
+                DispatchQueue.main.async { engine.receive(Int(kind), a, b, text) }
+            },
+            Self.knows
+        )
     }
 
     /// After a failure the old worker has exited, so a new one takes its place.
@@ -60,9 +74,9 @@ final class Engine {
         }
     }
 
-    func begin() {
+    func begin(nearby: String) {
         guard let handle else { return }
-        _ = see_engine_begin(handle)
+        _ = see_engine_begin(handle, nearby)
     }
 
     func feed(_ samples: [Float]) {

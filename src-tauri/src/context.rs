@@ -1,76 +1,10 @@
 //! Short-lived words visible to the paste target or recently described by Daybook.
 
-use std::collections::HashSet;
+use crate::terms::{self, Term};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Term {
-    pub text: String,
-    pub source: &'static str,
-}
-
-/// At most this many terms from the focused window, the most frequent first.
-const SCREEN_TERMS: usize = 32;
-/// Daybook describes the last two hours, so it gets fewer and ranks last.
-const DAYBOOK_TERMS: usize = 8;
-/// Every other unusual word or pair on screen, for matching after decoding
-/// only. Boosting this many terms would pull ordinary speech toward them.
-const CANDIDATES: usize = 400;
-
-/// The terms one dictation gets from what is on screen and from Daybook.
-/// Live capture and the eval both come through here.
-pub fn from_screen(text: &str, daybook: &[String]) -> Vec<Term> {
-    let words = crate::learn::Words::shared();
-    crate::learn::warm_screen_words(text, words);
-    gather(
-        &crate::learn::context_terms(text, words),
-        &crate::learn::screen_candidates(text, words),
-        daybook,
-    )
-}
-
-/// Screen terms, then Daybook ones, each ranked and capped, then the
-/// candidates that only post-decode matching reads. No spelling twice.
-pub fn gather(screen: &[String], candidates: &[String], daybook: &[String]) -> Vec<Term> {
-    let mut seen = HashSet::new();
-    screen
-        .iter()
-        .take(SCREEN_TERMS)
-        .map(|text| (text, "screen"))
-        .chain(
-            daybook
-                .iter()
-                .take(DAYBOOK_TERMS)
-                .map(|text| (text, "daybook")),
-        )
-        .chain(candidates.iter().map(|text| (text, "candidate")))
-        .filter(|(text, _)| seen.insert(text.to_lowercase()))
-        .take(SCREEN_TERMS + DAYBOOK_TERMS + CANDIDATES)
-        .map(|(text, source)| Term {
-            text: text.clone(),
-            source,
-        })
-        .collect()
-}
-
-impl Term {
-    /// Whether the decoder is pushed toward this term while it decodes.
-    pub fn boosted(&self) -> bool {
-        self.source != "candidate"
-    }
-}
-
-pub fn near_misses(
-    text: &str,
-    terms: &[Term],
-    saved: &[&str],
-    words: &crate::learn::Words,
-) -> String {
-    crate::sounds_like::rewrite(text, terms, saved, words)
-}
 
 fn enabled(name: &str) -> bool {
     std::env::var(name).ok().as_deref() != Some("0")
@@ -85,7 +19,7 @@ fn daybook_cache() -> Arc<Mutex<Vec<String>>> {
             let update = cache.clone();
             crate::qos::spawn("see-daybook", crate::qos::Class::Upkeep, move || loop {
                 let terms = daybook_text()
-                    .map(|text| crate::learn::context_terms(&text, crate::learn::Words::shared()))
+                    .map(|text| terms::context_terms(&text, crate::learn::Words::shared()))
                     .unwrap_or_default();
                 *update
                     .lock()
@@ -116,7 +50,10 @@ pub fn begin(
                     .clone()
             })
             .unwrap_or_default();
-        let _ = tx.send(from_screen(text.as_deref().unwrap_or_default(), &daybook));
+        let _ = tx.send(terms::from_screen(
+            text.as_deref().unwrap_or_default(),
+            &daybook,
+        ));
         if let Some(text) = text {
             // The ledger gets the audio first and can reject an already-pruned take.
             if let Ok(id) = take.recv() {
@@ -245,181 +182,6 @@ mod tests {
     #[test]
     fn missing_daybook_is_empty() {
         assert!(read_daybook(Path::new("/nonexistent/daybook.db")).is_none());
-    }
-
-    #[test]
-    fn context_keeps_names_and_drops_labels_and_prose() {
-        let words = crate::learn::Words::from_list(&[
-            "and",
-            "pro",
-            "comparing",
-            "settings",
-            "the",
-            "file",
-            "to",
-            "sent",
-            "i",
-            "follow",
-            "up",
-            "right",
-            "new",
-            "on",
-            "prices",
-            "a",
-            "with",
-            "yesterday",
-            "convex",
-            "we",
-            "store",
-            "rows",
-            "now",
-            "chat",
-            "agent",
-            "yeah",
-            "it",
-            "came",
-            "out",
-            "as",
-            "from",
-            "quiet",
-            "audio",
-        ]);
-        let screen = "Settings\nKlarna\nI sent the file to Larsten yesterday. And then Larsten replied.\n\
-                      Comparing prices on Prisjakt.nu with a MacBook Pro, a dropdown and a follow-up.\n\
-                      RIGHT 3D T3 n8n API, Sep 3 PM. I'll ask Larsten's team.\n\
-                      We store the rows in Convex now.\nNew Chat With The Agent\n\
-                      It came out as \u{201c}Yeah.\u{201d} and \u{201c}Okay.\u{201d} from quiet audio.";
-        assert_eq!(
-            crate::learn::context_terms(screen, &words),
-            ["Larsten", "Klarna", "Prisjakt.nu", "MacBook", "n8n", "API"]
-        );
-        let daybook = ["Larsten".to_owned(), "Klarna".to_owned()];
-        let screen: Vec<String> = (0..40).map(|n| format!("Term{n}")).collect();
-        let terms = gather(&screen, &[], &daybook);
-        assert_eq!(terms.len(), SCREEN_TERMS + 2);
-        assert!(terms[..SCREEN_TERMS].iter().all(|t| t.source == "screen"));
-        assert_eq!(terms[SCREEN_TERMS].text, "Larsten");
-        let terms = gather(&["Larsten".to_owned()], &[], &daybook);
-        assert_eq!(
-            terms,
-            [
-                Term {
-                    text: "Larsten".into(),
-                    source: "screen"
-                },
-                Term {
-                    text: "Klarna".into(),
-                    source: "daybook"
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn candidates_keep_lowercase_products_pairs_and_capitals_mid_sentence() {
-        let words = crate::learn::Words::from_list(&[
-            "open", "the", "board", "in", "and", "ask", "about", "it", "bot", "finance", "kindle",
-            "settings", "we", "use", "click", "new", "didn't",
-        ]);
-        let screen = "Settings\nOpen the zorboard in Quillo Bot and ask Kindle about it.\n\
-                      We use Pellmark Finance. Click New Board, we didn't open it.\nnew board";
-        let candidates = crate::learn::screen_candidates(screen, &words);
-        for expected in [
-            "zorboard",
-            "Quillo",
-            "Quillo Bot",
-            "Kindle",
-            "Pellmark Finance",
-        ] {
-            assert!(
-                candidates.contains(&expected.to_owned()),
-                "{expected} in {candidates:?}"
-            );
-        }
-        for ordinary in [
-            "Settings",
-            "Open",
-            "We",
-            "board",
-            "Bot and",
-            "Kindle about",
-            "New",
-            "didn",
-            "Finance Click",
-        ] {
-            assert!(
-                !candidates.contains(&ordinary.to_owned()),
-                "{ordinary} in {candidates:?}"
-            );
-        }
-        let terms = gather(&["Quillo".to_owned()], &candidates, &[]);
-        assert_eq!(terms.iter().filter(|term| term.text == "Quillo").count(), 1);
-        assert!(terms[0].boosted());
-        assert!(terms[1..].iter().all(|term| !term.boosted()));
-    }
-
-    #[test]
-    fn a_near_miss_of_an_on_screen_name_is_written_as_the_name() {
-        let words =
-            crate::learn::Words::from_list(&["i", "sent", "the", "file", "to", "larson", "frida"]);
-        let screen = |names: &[&str]| -> Vec<Term> {
-            names
-                .iter()
-                .map(|text| Term {
-                    text: (*text).into(),
-                    source: "screen",
-                })
-                .collect()
-        };
-        let fix = |text: &str, terms: &[Term]| near_misses(text, terms, &[], &words);
-        let terms = screen(&["Larsten", "Frida"]);
-        assert_eq!(
-            fix("I sent the file to Larston yesterday.", &terms),
-            "I sent the file to Larsten yesterday."
-        );
-        assert_eq!(fix("Ask Lasrten.", &terms), "Ask Larsten.");
-        // A known word, a letter added or dropped, and lowercase stay as heard.
-        assert_eq!(
-            fix("Larson and Fridag and larston", &terms),
-            "Larson and Fridag and larston"
-        );
-        // Two names it could be is no answer, and Daybook is not the screen.
-        assert_eq!(fix("Larston", &screen(&["Larsten", "Larstan"])), "Larston");
-        // A saved vocabulary word is what the user meant.
-        let kvittu = screen(&["Kvittu"]);
-        assert_eq!(fix("Kvitto", &kvittu), "Kvittu");
-        assert_eq!(
-            near_misses("Kvitto", &kvittu, &["kvitto"], &words),
-            "Kvitto"
-        );
-        let daybook = [Term {
-            text: "Larsten".into(),
-            source: "daybook",
-        }];
-        assert_eq!(fix("Larston", &daybook), "Larston");
-    }
-
-    #[test]
-    fn screen_term_can_land_only_in_the_boosted_hunk() {
-        let words = crate::learn::Words::from_list(&["use", "the", "project"]);
-        let extracted = crate::learn::context_terms("use the Zorvia project", &words);
-        assert_eq!(extracted, ["Zorvia"]);
-        let terms = extracted
-            .into_iter()
-            .map(|text| crate::boost::Term { text, weight: 0.5 })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            crate::boost::merge("Use the Zorvia project", "Use the Zorvia project", &terms),
-            "Use the Zorvia project"
-        );
-        assert_eq!(
-            crate::boost::merge("Use the Sylvia project", "Use the Zorvia project", &terms),
-            "Use the Zorvia project"
-        );
-        assert_eq!(
-            crate::boost::merge("Use the Sylvia project", "Use the Zorvia project", &[]),
-            "Use the Sylvia project"
-        );
     }
 
     #[test]

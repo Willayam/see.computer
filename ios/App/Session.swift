@@ -101,9 +101,9 @@ final class Session: ObservableObject {
         }
         Signals.observe(.start) { [weak self] in
             MainActor.assumeIsolated {
-                guard let start = Bridge.read(DictationStart.self, "start.json") else { return }
+                guard let request = Bridge.read(StartRequest.self, "start.json") else { return }
                 Bridge.remove("start.json")
-                self?.startTake(start)
+                self?.startTake(request.start, nearby: request.nearby)
             }
         }
         Signals.observe(.stop) { [weak self] in MainActor.assumeIsolated { self?.stopTake() } }
@@ -234,10 +234,10 @@ final class Session: ObservableObject {
                 return
             }
             let handoff = Bridge.read(Handoff.self, "handoff.json")
-            if wasInFront, let start = handoff?.start {
+            if wasInFront, let handoff, let start = handoff.start {
                 Diagnostics.log("handoff_in_front")
                 Bridge.remove("handoff.json")
-                startTake(start)
+                startTake(start, nearby: handoff.nearby ?? "")
                 return
             }
             let host = handoff?.host
@@ -263,7 +263,7 @@ final class Session: ObservableObject {
 
     // MARK: Takes
 
-    private func startTake(_ start: DictationStart) {
+    private func startTake(_ start: DictationStart, nearby: String) {
         guard state.phase == .armed else {
             Diagnostics.log("start_ignored", ["phase": state.phase.rawValue])
             return
@@ -282,7 +282,7 @@ final class Session: ObservableObject {
         // iOS can reclaim the memory-mapped weights while the app sits idle. As on
         // the Mac, page them back in during the take rather than after it.
         engine.warm()
-        engine.begin()
+        engine.begin(nearby: nearby)
         let engine = self.engine
         let audio = CaptureStats()
         takeAudio = audio

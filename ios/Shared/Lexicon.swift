@@ -9,8 +9,8 @@ struct Lexicon {
     private let tripleRows, contexts, contextStarts, triples: Int
     let sentenceStart: Int
 
-    init?(language: String) {
-        guard let url = Bundle.main.url(forResource: "words-\(language)", withExtension: "bin"),
+    init?(language: String, bundle: Bundle = .main) {
+        guard let url = bundle.url(forResource: "words-\(language)", withExtension: "bin"),
             let mapped = try? Data(contentsOf: url, options: .alwaysMapped), mapped.count >= 64,
             mapped.starts(with: "SCLX".utf8)
         else { return nil }
@@ -23,7 +23,7 @@ struct Lexicon {
         guard field(1) == 2, sections[0] >= 64, zip(sections, sections.dropFirst()).allSatisfy({ $0 <= $1 }),
               field(11) + 31 * 31 * 31 == field(12), field(14) + 4 <= field(15), field(15) <= mapped.count,
               field(15) + 4 * uint(at: field(15) - 4) == mapped.count else { return nil }
-        let frequencies = Bundle.main.url(forResource: "frequency-\(language)", withExtension: "bin")
+        let frequencies = bundle.url(forResource: "frequency-\(language)", withExtension: "bin")
             .flatMap { try? Data(contentsOf: $0, options: .alwaysMapped) }
         frequency = frequencies?.count == field(3) ? frequencies : nil
         data = mapped

@@ -61,7 +61,7 @@
 
         private func run() {
             startedAt = Date()
-            Engine.shared.begin()
+            Engine.shared.begin(nearby: "")
             Engine.shared.feed(samples)
             _ = Engine.shared.finish()
         }
