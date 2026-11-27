@@ -233,6 +233,10 @@ fn tidy(raw: &str) -> String {
 }
 
 impl Engine for Parakeet {
+    fn set_preview_options(&mut self, options: Option<std::sync::Arc<ort::session::RunOptions>>) {
+        self.model.set_run_options(options);
+    }
+
     fn set_context(&mut self, terms: &[crate::context::Term]) {
         // Names already in the vocabulary can still be misheard by the decoder.
         self.rewrite_terms = terms.to_vec();

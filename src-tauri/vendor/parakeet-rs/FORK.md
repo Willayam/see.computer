@@ -18,6 +18,7 @@ So this is upstream 0.3.7 verbatim with the following changes:
 - `src/model_tdt.rs` and `src/parakeet_tdt.rs` also score candidate token sequences against a plain span using its encoder frames and prediction history.
 - `src/decoder_tdt.rs` provides crate-local access to the original sentence pieces for span selection.
 - `src/lib.rs` re-exports `TokenBias` and `SpanCandidate`.
+- `set_run_options` lets the caller interrupt an ongoing TDT preview at an ONNX operator boundary. Final transcription uses a separate run.
 
 Everything else is untouched, examples and dev-dependencies aside. Keep it that way:
 the delta is meant to go upstream as a pull request, after which this directory and

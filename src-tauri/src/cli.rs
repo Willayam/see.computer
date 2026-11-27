@@ -426,6 +426,7 @@ fn transcribe_timed(path: PathBuf, phase: &str) -> Result<String, Box<dyn std::e
                     "{}",
                     serde_json::json!({
                         "ready_ms": ready_ms, "first_preview_ms": first_preview, "previews": timing.preview_count,
+                        "interrupted_previews": timing.preview_interrupts,
                         "preview_ms": timing.preview_total.as_millis(), "preview_overlap_ms": timing.preview_overlap.as_millis(),
                         "queue_ms": timing.queued.as_millis(), "final_ms": timing.inference.as_millis(),
                         "release_to_result_ms": elapsed.as_millis(), "take_cpu_ms": cpu_ms, "samples": samples.len()

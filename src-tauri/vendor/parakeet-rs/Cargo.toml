@@ -1,7 +1,4 @@
-# Vendored copy of parakeet-rs 0.3.7 (MIT OR Apache-2.0, https://github.com/altunenes/parakeet-rs)
-# carrying one local addition: a token-bias hook in the TDT greedy decoder.
-# See FORK.md. Examples and dev-dependencies are dropped; everything else is
-# upstream verbatim so the delta stays reviewable and upstreamable.
+# FORK.md lists the TDT changes to this copy of parakeet-rs 0.3.7.
 [package]
 name = "parakeet-rs"
 version = "0.3.7"

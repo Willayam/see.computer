@@ -337,9 +337,9 @@ impl Controller {
         if let Msg::Engine(engine::Event::Timing(job, timing)) = msg {
             let state = session_label(&self.session);
             self.trail.note(state, "EngineTiming", &format!(
-                "job={} queue_ms={} inference_ms={} preview_overlap_ms={} previews={} preview_ms={}",
+                "job={} queue_ms={} inference_ms={} preview_overlap_ms={} previews={} interrupted_previews={} preview_ms={}",
                 job.0, timing.queued.as_millis(), timing.inference.as_millis(),
-                timing.preview_overlap.as_millis(), timing.preview_count, timing.preview_total.as_millis()
+                timing.preview_overlap.as_millis(), timing.preview_count, timing.preview_interrupts, timing.preview_total.as_millis()
             ));
             return;
         }
