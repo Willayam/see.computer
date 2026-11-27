@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// The Rust engine behind `see_core.h`. Started once. Events arrive on the main thread.
 final class Engine {
@@ -17,7 +18,9 @@ final class Engine {
     /// The number `begin` gave the take, then its words so far.
     var onPreview: ((UInt64, String) -> Void)?
 
-    private var handle: OpaquePointer?
+    /// The audio thread feeds the worker while the main thread begins and finishes
+    /// takes. Its calls must not overlap, so every one of them goes through this lock.
+    private let handle = OSAllocatedUnfairLock<OpaquePointer?>(uncheckedState: nil)
 
     static var isModelPrepared: Bool {
         let prepared = Paths.models.deletingLastPathComponent().appendingPathComponent("int8-prepared/ready")
@@ -25,21 +28,28 @@ final class Engine {
     }
 
     func start(previews: Bool) {
-        guard handle == nil else { return }
         let context = Unmanaged.passUnretained(self).toOpaque()
-        handle = see_engine_start(
-            Paths.models.path, Paths.dictionary.path, previews, context
-        ) { context, kind, a, b, text in
-            let engine = Unmanaged<Engine>.fromOpaque(context!).takeUnretainedValue()
-            let text = text.map { String(cString: $0) } ?? ""
-            DispatchQueue.main.async { engine.receive(Int(kind), a, b, text) }
+        handle.withLockUnchecked { handle in
+            guard handle == nil else { return }
+            handle = see_engine_start(
+                Paths.models.path, Paths.dictionary.path, previews, context
+            ) { context, kind, a, b, text in
+                let engine = Unmanaged<Engine>.fromOpaque(context!).takeUnretainedValue()
+                let text = text.map { String(cString: $0) } ?? ""
+                DispatchQueue.main.async { engine.receive(Int(kind), a, b, text) }
+            }
         }
     }
 
     /// After a failure the old worker has exited, so a new one takes its place.
     func restart(previews: Bool) {
-        handle = nil
+        handle.withLockUnchecked { $0 = nil }
         start(previews: previews)
+    }
+
+    @discardableResult
+    private func call<Answer>(_ worker: (OpaquePointer) -> Answer) -> Answer? {
+        handle.withLockUnchecked { $0.map(worker) }
     }
 
     private func receive(_ kind: Int, _ a: UInt64, _ b: UInt64, _ text: String) {
@@ -65,28 +75,23 @@ final class Engine {
     /// engine when the next take begins keeps the old number.
     @discardableResult
     func begin() -> UInt64 {
-        guard let handle else { return 0 }
-        return see_engine_begin(handle)
+        call { see_engine_begin($0) } ?? 0
     }
 
     func feed(_ samples: [Float]) {
-        guard let handle else { return }
-        samples.withUnsafeBufferPointer { see_engine_feed(handle, $0.baseAddress, $0.count) }
+        call { handle in samples.withUnsafeBufferPointer { see_engine_feed(handle, $0.baseAddress, $0.count) } }
     }
 
     func finish() -> UInt64 {
-        guard let handle else { return 0 }
-        return see_engine_finish(handle, nil, 0)
+        call { see_engine_finish($0, nil, 0) } ?? 0
     }
 
     func discard() {
-        guard let handle else { return }
-        see_engine_discard(handle)
+        call { see_engine_discard($0) }
     }
 
     func warm() {
-        guard let handle else { return }
-        see_engine_warm(handle)
+        call { see_engine_warm($0) }
     }
 }
 
