@@ -770,7 +770,7 @@ final class KeyboardViewController: UIInputViewController {
 
     private func layout() {
         guard let root = view else { return }
-        // iOS pins a custom keyboard's bottom above its own globe row and always draws 17 pt of
+        // iOS pins a custom keyboard's bottom above its own globe row and usually draws 17 pt of
         // keyboard above the view. 757 px starts the view at the top of Apple's suggestion strip on
         // an iPhone 17 Pro. The extra inset is the touch margin under the bottom row's caps.
         let height = root.heightAnchor.constraint(equalToConstant: 757.0 / 3 + Key.capInset)
@@ -837,7 +837,9 @@ final class KeyboardViewController: UIInputViewController {
         }
         NSLayoutConstraint.activate([
             // The rows take their full height from the bottom, and the strip and Dictate bar get the rest.
-            controls.topAnchor.constraint(equalTo: root.topAnchor),
+            // iOS sometimes leaves out the 17 pt above the view, for example after the emoji keyboard,
+            // and the extension cannot tell. The gap keeps the Dictate bar off the edge then.
+            controls.topAnchor.constraint(equalTo: root.topAnchor, constant: 4),
             controls.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
 
             bar.widthAnchor.constraint(equalToConstant: 108),
