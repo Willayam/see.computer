@@ -115,7 +115,7 @@ Environment variables provide deterministic seams for local checks.
 
 `scripts/launch-for-verification.sh [wav] [trail]` launches the built bundle with both set. `scripts/press-mod.swift` posts the modifier gestures as real keyboard events so a script can drive the app, and `scripts/click-tray.swift` opens the menu panel the same way. `see-computer transcribe <wav>` (the binary inside the bundle) transcribes a file and prints the text without starting the GUI.
 
-`scripts/bench-footprint.sh` is the memory and latency ruler. `scripts/bench-under-load.sh [runs] [hogs] [qos]` runs the same transcription while `scripts/busy.swift` keeps the machine busy, which is where the thread scheduling classes earn their keep. `scripts/bench-cold-recording.sh` evicts the memory-mapped model weights and measures the first recording afterwards, which is where the press-time engine warm earns its keep.
+`scripts/bench-footprint.sh` measures memory and latency. `scripts/bench-under-load.sh [runs] [hogs] [wav]` reports median inference time for a spoken WAV while `scripts/busy.swift` keeps the machine busy. It fails if any trial returns no words or timing. `scripts/bench-cold-recording.sh` evicts the memory-mapped model weights and measures the first recording afterwards.
 
 ```sh
 cd src-tauri && cargo test
