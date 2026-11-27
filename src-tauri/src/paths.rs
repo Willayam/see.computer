@@ -31,7 +31,9 @@ pub fn instance_lock() -> PathBuf {
 }
 
 pub fn models() -> PathBuf {
-    app_support().join("models/parakeet-tdt-0.6b-v3-onnx/int8")
+    std::env::var_os("SEE_COMPUTER_MODELS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| app_support().join("models/parakeet-tdt-0.6b-v3-onnx/int8"))
 }
 
 pub fn ledger() -> PathBuf {

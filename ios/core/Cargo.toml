@@ -13,6 +13,7 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+libc = "0.2"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 parakeet-rs = { path = "../../src-tauri/vendor/parakeet-rs", default-features = false, features = ["cpu", "api-28"] }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native", "coreml"] }
