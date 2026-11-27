@@ -45,6 +45,7 @@ jobs:
           .audit/native-media-test/test-pasteboard
           swiftc -O scripts/test-pill.swift -o .audit/native-media-test/test-pill
           .audit/native-media-test/test-pill "$PWD/ui/pill.html"
+          scripts/tests/library/run.sh
 
   ios-core:
     name: iPhone engine builds from the shared sources
