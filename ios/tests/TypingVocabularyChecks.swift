@@ -286,6 +286,17 @@ enum TypingVocabularyChecks {
             field.documentContextBeforeInput = text
             return WordInput(field).map(vocabulary.suggestions) ?? WordSuggestions()
         }
+        let layout = KeyLayout.standard(swedish: true)
+        for (prefix, word, expected) in [("I think we ", "sho", Character("u")), ("Det är ", "sv", Character("e"))] {
+            field.documentContextBeforeInput = prefix + word
+            let taps = word.map { letter in
+                var point = layout.centers[Lexicon.codes[letter]!]!
+                point.x += layout.pitch * 0.31
+                return Tap(typed: letter, shifted: false, point: point)
+            }
+            let prior = vocabulary.keyPrior(for: WordInput(field)!, trail: TapTrail(taps: taps, end: Caret(field)), layout: layout)!
+            precondition(prior.indices.max(by: { prior[$0] < prior[$1] }) == Lexicon.codes[expected])
+        }
         for (input, expected) in [("Teh", "The"), ("We need helpp", "help"), ("Jag skriver itne", "inte"),
                                   ("Det är mycekt", "mycket"), ("Det är braa", "bra")] {
             precondition(suggestions(input).automatic == expected, "Correction for \(input)")

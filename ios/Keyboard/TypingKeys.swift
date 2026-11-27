@@ -27,6 +27,7 @@ final class TypingKeys: UIStackView {
 
     var keyPrior: ((KeyLayout) -> (probabilities: [Double], spread: Double, offsets: [Double])?)?
     var allowsSwipe: () -> Bool = { true }
+    var prepareSwipe: (() -> Void)?
     var onSwipe: (([SwipeSample], Bool, Bool, String?) -> Bool)?
 
     private weak var activeSwipe: Key?
@@ -35,6 +36,7 @@ final class TypingKeys: UIStackView {
     func beginSwipe(from key: Key) -> Bool {
         guard activeSwipe == nil else { return false }
         activeSwipe = key
+        prepareSwipe?()
         return true
     }
 

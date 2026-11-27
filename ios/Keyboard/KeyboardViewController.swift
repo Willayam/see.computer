@@ -795,6 +795,7 @@ final class KeyboardViewController: UIInputViewController {
             self?.updateTypingContext()
         }
         completions.accept = { [weak self] input, candidate in self?.chooseSuggestion(input, candidate) }
+        keys.prepareSwipe = { [weak self] in self?.completions.vocabulary.prepareSwipe() }
         keys.allowsSwipe = { [weak self] in
             guard let self else { return false }
             return WordInput.allowsCorrection(in: self.textDocumentProxy)
