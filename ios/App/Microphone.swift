@@ -140,6 +140,7 @@ final class Microphone {
         #endif
     }()
     private var testTimer: DispatchSourceTimer?
+    private let testSilence = AVAudioPlayerNode()
 
     private func startTestInput() -> Bool {
         guard let input = Microphone.testInput else { return false }
@@ -149,12 +150,35 @@ final class Microphone {
         timer.setEventHandler { [weak self] in self?.deliver(input.next(count: 1600)) }
         timer.resume()
         testTimer = timer
+        playTestSilence()
         return true
     }
 
     private func stopTestInput() {
         testTimer?.cancel()
         testTimer = nil
+        guard Microphone.testInput != nil, engine.isRunning else { return }
+        engine.stop()
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    /// The real microphone keeps the app running behind the host app. A file cannot, so
+    /// silence plays instead, or iOS suspends the app a few seconds into a take.
+    private func playTestSilence() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, options: [.mixWithOthers])
+        try? session.setActive(true)
+        if testSilence.engine !== engine {
+            testSilence.engine?.detach(testSilence)
+            engine.attach(testSilence)
+        }
+        let format = engine.outputNode.inputFormat(forBus: 0)
+        engine.connect(testSilence, to: engine.mainMixerNode, format: format)
+        guard let silence = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4800) else { return }
+        silence.frameLength = 4800
+        try? engine.start()
+        testSilence.scheduleBuffer(silence, at: nil, options: .loops)
+        testSilence.play()
     }
 }
 
