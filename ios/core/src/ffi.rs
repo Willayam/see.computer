@@ -65,6 +65,7 @@ pub unsafe extern "C" fn see_engine_start(
 
 fn forward(sink: Sink, event: Event) {
     match event {
+        Event::Timing(..) => {}
         Event::Progress(progress) => {
             let kind = match progress.phase {
                 Phase::Downloading => PROGRESS_DOWNLOADING,

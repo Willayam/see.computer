@@ -117,6 +117,8 @@ Environment variables provide deterministic seams for local checks.
 
 `scripts/bench-footprint.sh` measures memory and latency. `scripts/bench-under-load.sh [runs] [hogs] [wav]` reports median inference time for a spoken WAV while `scripts/busy.swift` keeps the machine busy. It fails if any trial returns no words or timing. `scripts/bench-cold-recording.sh` evicts the memory-mapped model weights and measures the first recording afterwards.
 
+`see-computer transcribe --timed <wav> [block-phase-ms]` replays a spoken WAV at recording speed through the app’s worker. It prints the final words on standard output and one JSON timing record on standard error. The record includes model readiness, first preview, preview compute time, queue wait, final inference and time from release to the CLI result. Vary the block phase from 0 through 199 to check whether release collided with a live preview. Set `SEE_COMPUTER_MODELS_DIR` and `SEE_COMPUTER_DOCUMENTS_DIR` to use a disposable model cache and vocabulary.
+
 ```sh
 cd src-tauri && cargo test
 ./target/debug/see-computer transcribe ../fixtures/en.wav

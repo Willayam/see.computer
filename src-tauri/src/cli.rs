@@ -10,6 +10,7 @@ pub enum Cmd {
     Transcribe(PathBuf),
     TranscribeLive(PathBuf),
     TranscribePreview(PathBuf),
+    TranscribeTimed(PathBuf, String),
     Clip(PathBuf),
     Ocr(Vec<PathBuf>),
     Snapshot,
@@ -29,6 +30,9 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
         Some("transcribe") => match args.next().as_deref() {
             Some("--live") => args.next().map(PathBuf::from).map(Cmd::TranscribeLive),
             Some("--preview") => args.next().map(PathBuf::from).map(Cmd::TranscribePreview),
+            Some("--timed") => args.next().map(|path| {
+                Cmd::TranscribeTimed(path.into(), args.next().unwrap_or_else(|| "0".into()))
+            }),
             Some(path) => Some(Cmd::Transcribe(PathBuf::from(path))),
             None => None,
         },
@@ -62,6 +66,16 @@ pub fn run(cmd: Cmd) -> i32 {
         Cmd::Transcribe(path) => transcribe(path),
         Cmd::TranscribeLive(path) => transcribe_live(path),
         Cmd::TranscribePreview(path) => transcribe_preview(path),
+        Cmd::TranscribeTimed(path, phase) => match transcribe_timed(path, &phase) {
+            Ok(words) => {
+                println!("{words}");
+                0
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                1
+            }
+        },
         Cmd::Ocr(paths) => ocr(paths),
         Cmd::Snapshot => snapshot(),
         Cmd::Clip(path) => clip(path),
@@ -315,6 +329,97 @@ fn transcribe_preview(path: PathBuf) -> i32 {
         Err(code) => return code,
     };
     print_text(result)
+}
+
+fn transcribe_timed(path: PathBuf, phase: &str) -> Result<String, Box<dyn std::error::Error>> {
+    use crate::engine::{Event, Loader, Models, Worker};
+    use crate::mic::{Audio16k, RATE};
+    use std::sync::mpsc;
+    let phase: usize = phase.parse()?;
+    if phase >= 200 {
+        return Err("block phase must be 0 to 199 milliseconds".into());
+    }
+    let audio = Audio16k::from_wav(&path)?;
+    let samples = audio.samples();
+    let (reply, events) = mpsc::channel::<Event>();
+    let loading = Instant::now();
+    let mut engine = Worker::spawn(Loader::Models(Models::default_root()), reply);
+    loop {
+        if let Event::Ready(ready) = events.recv_timeout(Duration::from_secs(120))? {
+            ready?;
+            break;
+        }
+    }
+    let cpu_before = process_cpu_ms()?;
+    let ready_ms = loading.elapsed().as_millis();
+    let (terms, context) = mpsc::channel();
+    terms.send(Vec::new())?;
+    let started = Instant::now();
+    let take = engine.begin_context(context);
+    engine.warm();
+    let block = RATE as usize / 5;
+    let mut end = if phase == 0 {
+        block
+    } else {
+        phase * RATE as usize / 1000
+    };
+    let mut sent = 0;
+    let mut first_preview = None;
+    loop {
+        let next =
+            started + Duration::from_secs_f64(end.min(samples.len()) as f64 / f64::from(RATE));
+        match events.recv_timeout(next.saturating_duration_since(Instant::now())) {
+            Ok(Event::Preview(id, words)) if id == take && !words.is_empty() => {
+                first_preview.get_or_insert(started.elapsed().as_millis());
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("speech worker stopped".into()),
+            Err(mpsc::RecvTimeoutError::Timeout) if end >= samples.len() => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                engine.feed(Audio16k::from_samples(samples[sent..end].to_vec()));
+                sent = end;
+                end += block;
+            }
+        }
+    }
+    let released = Instant::now();
+    let job = engine.submit(Audio16k::from_samples(samples[sent..].to_vec()))?;
+    let mut report = None;
+    loop {
+        match events.recv_timeout(Duration::from_secs(60))? {
+            Event::Timing(id, timing) if id == job => report = Some(timing),
+            Event::Done(id, result) if id == job => {
+                let elapsed = released.elapsed();
+                let cpu_ms = process_cpu_ms()? - cpu_before;
+                let result = result?;
+                if result.audio.as_ref().map(Audio16k::samples) != Some(samples) {
+                    return Err("replay changed the captured audio".into());
+                }
+                let words = result.text.ok_or("nothing heard")?;
+                let timing = report.ok_or("missing engine timings")?;
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "ready_ms": ready_ms, "first_preview_ms": first_preview, "previews": timing.preview_count,
+                        "preview_ms": timing.preview_total.as_millis(), "preview_overlap_ms": timing.preview_overlap.as_millis(),
+                        "queue_ms": timing.queued.as_millis(), "final_ms": timing.inference.as_millis(),
+                        "release_to_result_ms": elapsed.as_millis(), "take_cpu_ms": cpu_ms, "samples": samples.len()
+                    })
+                );
+                return Ok(words.as_str().to_owned());
+            }
+            _ => {}
+        }
+    }
+}
+
+fn process_cpu_ms() -> std::io::Result<f64> {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let ms = |t: libc::timeval| t.tv_sec as f64 * 1000.0 + t.tv_usec as f64 / 1000.0;
+    Ok(ms(usage.ru_utime) + ms(usage.ru_stime))
 }
 
 fn replay_live(

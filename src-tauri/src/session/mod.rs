@@ -334,6 +334,15 @@ impl Controller {
     /// | PackagingTake | notice/ignore | ignore | ignore | matching `Turn` pastes | timeout/quit |
     /// | Pasting | ignore | ignore | ignore | matching `Turn` ends | timeout/quit |
     fn step(&mut self, msg: Msg) {
+        if let Msg::Engine(engine::Event::Timing(job, timing)) = msg {
+            let state = session_label(&self.session);
+            self.trail.note(state, "EngineTiming", &format!(
+                "job={} queue_ms={} inference_ms={} preview_overlap_ms={} previews={} preview_ms={}",
+                job.0, timing.queued.as_millis(), timing.inference.as_millis(),
+                timing.preview_overlap.as_millis(), timing.preview_count, timing.preview_total.as_millis()
+            ));
+            return;
+        }
         if let Msg::Deadline(at) = msg {
             self.deadline_queued = false;
             if self.deadline() == Some(at) {
@@ -1501,6 +1510,7 @@ fn session_label(session: &Session) -> &'static str {
 
 pub fn msg_label(message: &Msg) -> &'static str {
     match message {
+        Msg::Engine(engine::Event::Timing(..)) => "EngineTiming",
         Msg::Deadline(_) => "Deadline",
         Msg::MainPressed => "MainPressed",
         Msg::MainReleased => "MainReleased",

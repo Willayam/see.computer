@@ -25,10 +25,9 @@ const CHUNK_TARGET: usize = 20 * SAMPLE_RATE;
 const CHUNK_MAX: usize = 30 * SAMPLE_RATE;
 const CUT_SEARCH: usize = 5 * SAMPLE_RATE;
 const CUT_WINDOW: usize = SAMPLE_RATE / 5;
-/// A preview waits for this much new audio, or for three times what the last
-/// one cost to decode if that is longer. A long take, whose pending chunk takes
-/// half a second to read, then leaves the engine idle two thirds of the time.
-const PREVIEW_STEP: Duration = Duration::from_millis(400);
+/// The first preview runs as soon as speech is long enough. Later previews leave
+/// room for the final pass, especially when the pending audio costs more to decode.
+const PREVIEW_STEP: Duration = Duration::from_millis(800);
 /// Less than this and the model has too little to say anything sensible.
 const PREVIEW_MIN: usize = SAMPLE_RATE * 6 / 10;
 
@@ -71,6 +70,9 @@ pub struct Utterance {
     /// Length of `whole` when the last preview ran, and what that preview cost.
     previewed: usize,
     preview_cost: Duration,
+    preview_count: u32,
+    preview_total: Duration,
+    last_preview_finished: Option<Instant>,
 }
 
 impl Utterance {
@@ -125,10 +127,10 @@ impl Utterance {
     }
 
     pub fn preview_due(&self) -> bool {
-        let step = PREVIEW_STEP.max(self.preview_cost * 3).as_secs_f64() * SAMPLE_RATE as f64;
+        let step = PREVIEW_STEP.max(self.preview_cost * 5).as_secs_f64() * SAMPLE_RATE as f64;
         !self.chunk_error
             && self.pending.len() >= PREVIEW_MIN
-            && (self.whole.len() - self.previewed) as f64 >= step
+            && (self.preview_count == 0 || (self.whole.len() - self.previewed) as f64 >= step)
     }
 
     /// What the take reads as so far: the chunks already transcribed, then a
@@ -141,6 +143,9 @@ impl Utterance {
             .transcribe(&Audio16k::from_samples(self.pending.clone()))
             .ok();
         self.preview_cost = started.elapsed();
+        self.preview_total += self.preview_cost;
+        self.preview_count += 1;
+        self.last_preview_finished = Some(Instant::now());
         let mut parts = self.texts.clone();
         parts.extend(
             tail.and_then(|tail| tail.text)
@@ -170,6 +175,9 @@ impl Utterance {
         self.chunk_error = false;
         self.previewed = 0;
         self.preview_cost = Duration::ZERO;
+        self.preview_count = 0;
+        self.preview_total = Duration::ZERO;
+        self.last_preview_finished = None;
     }
 }
 
@@ -255,6 +263,15 @@ pub enum Loader {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JobId(pub u64);
 
+#[derive(Debug)]
+pub struct Timings {
+    pub queued: Duration,
+    pub inference: Duration,
+    pub preview_overlap: Duration,
+    pub preview_total: Duration,
+    pub preview_count: u32,
+}
+
 pub enum Event {
     Progress(Progress),
     Ready(Result<(), EngineError>),
@@ -262,6 +279,7 @@ pub enum Event {
     /// utterance `begin_context` numbered, so one still in flight when a take
     /// was cancelled cannot land on the next.
     Preview(u64, String),
+    Timing(JobId, Timings),
     Done(JobId, Result<Transcription, EngineError>),
 }
 
@@ -274,7 +292,7 @@ enum Job {
     Context(u64, std::sync::mpsc::Receiver<Vec<crate::context::Term>>),
     Feed(Audio16k),
     Discard,
-    Transcribe(JobId, Audio16k),
+    Transcribe(JobId, Instant, Audio16k),
 }
 
 pub struct Worker {
@@ -370,10 +388,27 @@ impl Worker {
                         engine.set_context(&[]);
                         context = None;
                     }
-                    Job::Transcribe(job, audio) => {
+                    Job::Transcribe(job, submitted, audio) => {
+                        let started = Instant::now();
+                        let preview_overlap = utterance
+                            .last_preview_finished
+                            .map_or(Duration::ZERO, |end| {
+                                end.saturating_duration_since(submitted)
+                            })
+                            .min(utterance.preview_cost);
+                        let preview_total = utterance.preview_total;
+                        let preview_count = utterance.preview_count;
                         let result = utterance.finish(engine.as_mut(), &audio);
+                        let timings = Timings {
+                            queued: started.saturating_duration_since(submitted),
+                            inference: started.elapsed(),
+                            preview_overlap,
+                            preview_total,
+                            preview_count,
+                        };
                         engine.set_context(&[]);
                         context = None;
+                        let _ = reply.send(Event::Timing(job, timings).into());
                         if reply.send(Event::Done(job, result).into()).is_err() {
                             break;
                         }
@@ -407,7 +442,7 @@ impl Worker {
         self.next = self.next.wrapping_add(1);
         let job = JobId(self.next);
         self.jobs
-            .send(Job::Transcribe(job, audio))
+            .send(Job::Transcribe(job, Instant::now(), audio))
             .map_err(|_| EngineError::Inference("transcription worker stopped".to_owned()))?;
         Ok(job)
     }
@@ -489,7 +524,7 @@ mod tests {
                     break;
                 }
                 Event::Ready(result) => result.expect("ready"),
-                Event::Progress(_) | Event::Preview(..) => {}
+                Event::Progress(_) | Event::Preview(..) | Event::Timing(..) => {}
             }
         }
     }
