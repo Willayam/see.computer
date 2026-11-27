@@ -707,10 +707,12 @@ copyEl.addEventListener('click', () => {
 window.__TAURI__.event.listen('pill-copy-result', ({ payload: [id, copied] }) => {
   if (!carded || cardKind !== 'held' || id !== cardId) return;
   if (!copied) {
+    copyEl.textContent = 'Retry';
     copyEl.title = 'Copy failed. Click to try again.';
     return;
   }
   copyEl.textContent = 'Copied';
+  copyEl.title = '';
   copyEl.classList.add('done');
   collapseTimer = setTimeout(hideCard, 850);
 });

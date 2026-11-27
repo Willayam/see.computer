@@ -9,7 +9,11 @@ final class PillProbe: NSObject, WKNavigationDelegate {
         config.websiteDataStore = .nonPersistent()
         let bridge = """
             window.listeners = {};
-            window.__TAURI__ = {event:{listen: async (name, cb) => listeners[name] = cb, emit: async () => {}}};
+            window.actions = [];
+            window.__TAURI__ = {event:{
+                listen: async (name, cb) => listeners[name] = cb,
+                emit: async (name, payload) => { if (name === 'pill-action') actions.push(payload); }
+            }};
             window.queuedFrames = [];
             window.requestAnimationFrame = cb => (queuedFrames.push(cb), queuedFrames.length);
             window.canvasClears = window.canvasFills = 0;
@@ -51,7 +55,25 @@ final class PillProbe: NSObject, WKNavigationDelegate {
             send({kind:'show', activity:'listening'});
             tick(60);
             if (canvasFills <= before) throw Error('Next take failed to wake the pill');
-            return 'Idle and post-fade each cleared zero frames across 600 ticks. Both listening takes drew.';
+            const copy = document.getElementById('ccopy');
+            const reply = (id, ok) => listeners['pill-copy-result']({payload:[id, ok]});
+            send({kind:'held', id:41, text:'First take'});
+            copy.click();
+            send({kind:'held', id:42, text:'Next take'});
+            reply(41, true);
+            if (copy.textContent !== 'Copy') throw Error('Previous reply claimed the next take');
+            copy.click();
+            reply(42, false);
+            if (copy.textContent !== 'Retry') throw Error('Failed copy did not offer a retry');
+            copy.click();
+            reply(42, true);
+            if (copy.textContent !== 'Copied') throw Error('Successful retry was not shown');
+            send({kind:'held', id:43, text:'Dismiss this take'});
+            document.getElementById('cx').click();
+            const actual = actions.map(({action,id}) => [action,id]);
+            const expected = [['copy',41],['copy',42],['copy',42],['discard',43]];
+            if (JSON.stringify(actual) !== JSON.stringify(expected)) throw Error('Wrong take: ' + JSON.stringify(actual));
+            return 'Idle drawing stopped, listening resumed, and only the selected take could be copied or discarded.';
             """
         webView.callAsyncJavaScript(script, arguments: [:], in: nil, in: .page) { response in
             switch response {
