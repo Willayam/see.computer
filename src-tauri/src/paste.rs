@@ -223,6 +223,7 @@ fn paste_loop(
         }
         match post_cmd_v() {
             Ok(()) => {
+                let posted_at = Instant::now();
                 if let Some(id) = &job.dictation {
                     ledger.landed(id, &target, Landing::Pasted);
                 }
@@ -230,6 +231,7 @@ fn paste_loop(
                     if ledger.enabled() && target.focus != crate::target::Focus::NotEditable {
                         readback.watch(crate::readback::Watch {
                             id,
+                            posted_at,
                             pid: target.pid,
                             bundle: target.bundle.clone(),
                             pasted: job.text.as_str().trim().to_owned(),
