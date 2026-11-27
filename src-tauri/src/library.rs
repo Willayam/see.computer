@@ -793,17 +793,10 @@ fn take(path: &Path) -> Option<Item> {
     }
     media.sort_by_key(|entry| entry.at_ms);
     let markdown_path = markdown.as_ref().map(|path| path_string(path));
-    let share = shadow::read(&path.join("share.json"))
-        .text()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|value| {
-            value
-                .get("url")
-                .and_then(serde_json::Value::as_str)
-                .map(|url| Share {
-                    url: url.to_owned(),
-                })
-        });
+    let share = match shadow::read(&path.join("share.json")) {
+        Text::Current(text) => crate::sharing::eligible_url(&text).map(|url| Share { url }),
+        Text::Stale(_) | Text::Waiting | Text::Missing => None,
+    };
     let title = full_text
         .split_whitespace()
         .take(7)
