@@ -27,6 +27,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - run: TZ=Europe/Stockholm cargo test history::tests::repeated_hour_edits_the_selected_occurrence
       - name: Check recording, clipboard preservation and idle drawing
         working-directory: .
         run: |
@@ -76,6 +77,7 @@ jobs:
         working-directory: .
         run: |
           ios/scripts/test-draft.sh
+          ios/scripts/test-history.sh
           device=$(xcrun simctl list devices available --json | jq -er '[.devices[][] | select(.name | startswith("iPhone"))][0].udid')
           xcrun simctl bootstatus "$device" -b
           SWIPE_RUNTIME_ARTIFACTS="$RUNNER_TEMP/see-ios/SourcePackages/artifacts/swiperuntime" ios/scripts/test-typing.sh "$device"
