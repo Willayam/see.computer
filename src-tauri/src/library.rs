@@ -189,10 +189,15 @@ pub async fn library_items(
     known: BTreeMap<String, String>,
 ) -> Result<Changes, String> {
     let root = history.root();
-    request(&read_by_items(&root, &crate::paths::documents()));
-    let result = changes(&root, &crate::paths::documents(), &known);
-    shadow::prune();
-    Ok(result)
+    let documents = crate::paths::documents();
+    tauri::async_runtime::spawn_blocking(move || {
+        request(&read_by_items(&root, &documents));
+        let result = changes(&root, &documents, &known);
+        shadow::prune();
+        result
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
