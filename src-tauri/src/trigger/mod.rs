@@ -127,8 +127,6 @@ pub enum Ignored {
     KeyDown,
     /// Command, Control or Fn was down with the trigger.
     OtherModifier,
-    /// Held past the threshold, but no tick ran before the release to open it.
-    NoTick,
 }
 
 impl Ignored {
@@ -136,7 +134,6 @@ impl Ignored {
         match self {
             Ignored::KeyDown => "HoldIgnoredKeyDown",
             Ignored::OtherModifier => "HoldIgnoredModifier",
-            Ignored::NoTick => "HoldIgnoredNoTick",
         }
     }
 }
@@ -235,6 +232,10 @@ impl Decoder {
         !matches!(self.take, Take::Off)
     }
 
+    pub fn hold_deadline(&self) -> Option<Instant> {
+        self.arming_since.map(|press| press + HOLD_THRESHOLD)
+    }
+
     /// Whether the take is being held open with nothing on the trigger.
     pub fn locked(&self) -> bool {
         matches!(self.take, Take::Locked(_))
@@ -262,6 +263,11 @@ impl Decoder {
         // Shift no longer disqualifies the trigger. Under the grammar it is the
         // camera inside a session, not a separate gesture that replaces one.
         let session_held = mod_held && !other_held;
+        if other_held {
+            self.arming_since = None;
+            self.arm_locks = false;
+            self.tapped_at = None;
+        }
         if other_held && matches!(self.take, Take::Locked(Locked::Pressed(_))) {
             self.take = Take::Locked(Locked::Inert);
         }
@@ -297,7 +303,7 @@ impl Decoder {
                     }
                     self.tapped_at = Some(now);
                 } else {
-                    out.push(Msg::HoldIgnored(Ignored::NoTick));
+                    out.extend(self.maybe_begin_dictation(now));
                 }
             }
             self.arm_locks = false;
@@ -802,13 +808,17 @@ mod tests {
     }
 
     #[test]
-    fn a_hold_released_before_any_tick_says_so() {
+    fn a_qualifying_hold_finishes_when_released_between_ticks() {
         let start = Instant::now();
         let mut decoder = Decoder::new(Trigger::LeftOption);
         assert!(out(&decoder.step(Input::Flags(LEFT_OPTION), start)).is_empty());
+        for millis in [50, 100, 150] {
+            assert!(decoder.step(Input::Tick, after(start, millis)).is_empty());
+        }
+        assert_eq!(decoder.hold_deadline(), Some(after(start, 180)));
         assert_eq!(
-            out(&decoder.step(Input::Flags(0), after(start, 900))),
-            ["HoldIgnoredNoTick"]
+            out(&decoder.step(Input::Flags(0), after(start, 190))),
+            ["MainPressed", "MainReleased"]
         );
         assert!(!decoder.dictating());
     }

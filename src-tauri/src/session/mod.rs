@@ -143,6 +143,7 @@ pub enum Msg {
     TriggerReady,
     TriggerUnavailable,
     HoldIgnored(trigger::Ignored),
+    Deadline(Instant),
     Cancel,
     Quit,
     RetryEngine,
@@ -215,6 +216,8 @@ struct Controller {
     /// Jobs that outran the deadline, still owed their words, with the audio
     /// file that stands in for them if the engine never answers.
     late: Vec<LateJob>,
+    /// Results the pill already owns. Retrying their WAV must not file the same words twice.
+    recovered: std::collections::HashSet<PathBuf>,
     /// Every sample of the live take sent to the engine so far.
     heard: Vec<f32>,
     sharing: crate::sharing::Sharing,
@@ -225,6 +228,8 @@ struct Controller {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     next_turn: u64,
+    next_mic_poll: Instant,
+    deadline_queued: bool,
     /// The engine's number for the take now live, which its previews carry.
     utterance: u64,
 }
@@ -260,6 +265,7 @@ impl Controller {
             saved: wiring.saved,
             empties: wiring.empties,
             late: Vec::new(),
+            recovered: Default::default(),
             heard: Vec::new(),
             sharing: wiring.sharing,
             updating: false,
@@ -269,6 +275,8 @@ impl Controller {
             tx: inbox.0,
             rx: inbox.1,
             next_turn: 0,
+            next_mic_poll: Instant::now() + RELEASE_POLL,
+            deadline_queued: false,
             utterance: 0,
         }
     }
@@ -284,13 +292,7 @@ impl Controller {
 
     fn run(mut self) {
         loop {
-            let received = match self.deadline() {
-                Some(deadline) => self
-                    .rx
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now())),
-                None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-            };
-            match received {
+            match self.receive_message() {
                 Ok(message) => {
                     let quitting = matches!(message, Msg::Quit);
                     self.step(message);
@@ -298,10 +300,27 @@ impl Controller {
                         break;
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => self.expire(),
+                Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
+    }
+
+    fn receive_message(&mut self) -> Result<Msg, RecvTimeoutError> {
+        if !self.deadline_queued {
+            if let Some(deadline) = self.deadline() {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if !remaining.is_zero() {
+                    return self.rx.recv_timeout(remaining);
+                }
+                // FIFO puts an already queued completion before expiry and new traffic after it.
+                self.tx
+                    .send(Msg::Deadline(deadline))
+                    .map_err(|_| RecvTimeoutError::Disconnected)?;
+                self.deadline_queued = true;
+            }
+        }
+        self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
     }
 
     /// Moves `self.session` out and applies the complete transition table.
@@ -315,6 +334,13 @@ impl Controller {
     /// | PackagingTake | notice/ignore | ignore | ignore | matching `Turn` pastes | timeout/quit |
     /// | Pasting | ignore | ignore | ignore | matching `Turn` ends | timeout/quit |
     fn step(&mut self, msg: Msg) {
+        if let Msg::Deadline(at) = msg {
+            self.deadline_queued = false;
+            if self.deadline() == Some(at) {
+                self.expire()
+            }
+            return;
+        }
         let from = session_label(&self.session);
         let message = msg_label(&msg);
         if let Msg::TriggerEdge { at, .. } = msg {
@@ -449,6 +475,7 @@ impl Controller {
                                 return;
                             }
                             let armed = mic.arm();
+                            self.next_mic_poll = Instant::now() + RELEASE_POLL;
                             self.heard.clear();
                             self.share_take = self.sharing.enabled();
                             let (terms, screen) = crate::context::begin(self.ledger.clone());
@@ -777,6 +804,7 @@ impl Controller {
                                 text: text.as_str().to_owned(),
                                 note: None,
                                 clipboard: text.as_str().to_owned(),
+                                ..Default::default()
                             };
                             self.begin_paste(
                                 text.followed_by_space(),
@@ -839,6 +867,7 @@ impl Controller {
                         }),
                         note: packaged.note.clone(),
                         clipboard: packaged.paste.clone(),
+                        ..Default::default()
                     };
                     self.begin_paste(
                         Text::literal(packaged.paste),
@@ -974,7 +1003,7 @@ impl Controller {
 
     fn deadline(&self) -> Option<Instant> {
         match &self.session {
-            Session::Dictating { .. } => Some(Instant::now() + RELEASE_POLL),
+            Session::Dictating { .. } => Some(self.next_mic_poll),
             Session::Transcribing { since, .. } | Session::TranscribingTake { since, .. } => {
                 Some(*since + TRANSCRIBE_TIMEOUT)
             }
@@ -986,6 +1015,7 @@ impl Controller {
 
     fn expire(&mut self) {
         if let Session::Dictating { .. } = &self.session {
+            self.next_mic_poll = Instant::now() + RELEASE_POLL;
             // A locked take has no key left to poll, so the watchdog stands
             // down for it. The flag is cleared by the event tap itself if the
             // tap dies, and the take then ends here as it always would.
@@ -1016,8 +1046,8 @@ impl Controller {
                 Session::Transcribing {
                     job, audio, screen, ..
                 } => {
-                    self.keep_late(job, &audio, screen);
-                    self.finish(Notice::Saved);
+                    let notice = self.keep_late(job, &audio, screen);
+                    self.finish(notice);
                 }
                 Session::TranscribingTake {
                     job,
@@ -1078,13 +1108,19 @@ impl Controller {
     /// Stops waiting on a job without giving up on it. Its words still come
     /// back as an ordinary `Done`, and the audio on disk covers an engine that
     /// never answers, for a retry from the menu.
-    fn keep_late(&mut self, job: JobId, audio: &mic::Audio16k, screen: Screen) {
+    fn keep_late(&mut self, job: JobId, audio: &mic::Audio16k, screen: Screen) -> Notice {
         let path = self.saved.keep(audio).ok();
+        let notice = if path.is_some() {
+            Notice::Saved
+        } else {
+            Notice::SaveFailed
+        };
         self.late.push(LateJob {
             job,
             path,
             screen: Some(screen),
         });
+        notice
     }
 
     /// Words that missed their deadline. They are filed like any dictation but
@@ -1109,13 +1145,22 @@ impl Controller {
                         let _ = screen.send(id);
                     }
                 }
-                self.history.record(text.as_str(), spoken);
-                if matches!(self.session, Session::Idle) {
-                    let _ = self.pill.send(PillEvent::Held(crate::pill::Held {
-                        text: text.as_str().to_owned(),
-                        note: None,
-                        clipboard: text.as_str().to_owned(),
-                    }));
+                self.history
+                    .record_recovery(text.as_str(), spoken, path.clone());
+                self.recovered.retain(|path| path.exists());
+                let held = crate::pill::Held {
+                    id: self.mint_turn().0,
+                    text: text.as_str().to_owned(),
+                    note: None,
+                    clipboard: text.as_str().to_owned(),
+                    recovery: Some(crate::pill::Recovery {
+                        audio: path.clone(),
+                    }),
+                };
+                if self.pill.send(PillEvent::Held(held)).is_ok() {
+                    if let Some(path) = path {
+                        self.recovered.insert(path);
+                    }
                 }
                 "LateText"
             }
@@ -1123,11 +1168,6 @@ impl Controller {
             // Kept on disk, so the menu can offer another pass.
             Err(_) => "LateFailed",
         };
-        if outcome != "LateFailed" {
-            if let Some(path) = &path {
-                self.saved.remove(path);
-            }
-        }
         let state = session_label(&self.session);
         self.trail.record(state, outcome, state);
     }
@@ -1153,6 +1193,9 @@ impl Controller {
         let mut sent = 0;
         let mut waiting = 0;
         for path in self.saved.list() {
+            if self.recovered.contains(&path) {
+                continue;
+            }
             if self
                 .late
                 .iter()
@@ -1268,10 +1311,11 @@ impl Controller {
         &mut self,
         text: Text,
         clipboard: paste::Clipboard,
-        held: crate::pill::Held,
+        mut held: crate::pill::Held,
         dictation: Option<crate::ledger::Id>,
     ) -> Session {
         let turn = self.mint_turn();
+        held.id = turn.0;
         let tx = self.tx.clone();
         self.paste
             .paste(text, clipboard, dictation, move |outcome| {
@@ -1447,6 +1491,7 @@ fn session_label(session: &Session) -> &'static str {
 
 pub fn msg_label(message: &Msg) -> &'static str {
     match message {
+        Msg::Deadline(_) => "Deadline",
         Msg::MainPressed => "MainPressed",
         Msg::MainReleased => "MainReleased",
         Msg::CaptureStarted => "CaptureStarted",

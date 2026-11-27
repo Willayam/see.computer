@@ -250,6 +250,7 @@ const pillEl = document.getElementById('pill'), textEl = document.getElementById
 function showText(cls, msg) { pillEl.className = 'on ' + cls; textEl.textContent = msg; }
 function clearText() { pillEl.className = ''; notice = null; }
 function applyActivity(p) {
+  wakeCanvas();
   cv.setAttribute('aria-label', p.activity === 'recording-locked'
     ? 'Video and narration locked. Tap your dictation key to stop.'
     : p.activity === 'locked' ? 'Dictation locked.' : p.activity);
@@ -277,6 +278,8 @@ const ICON_BOOK = '<svg class="book" viewBox="0 0 16 16" fill="none" stroke="cur
 /* A fix card goes away on its own; the pointer resting on it holds it. */
 const FIX_SHOWN_MS = 6000, FIX_AFTER_HOVER_MS = 2500;
 let carded = false, cardKind = null, cardWidth = 0, collapseTimer = 0, dismissTimer = 0, fittedTimer = 0, fixTimer = 0;
+let cardId = null;
+const cardAction = (action, id = cardId) => window.__TAURI__.event.emit('pill-action', {action, id});
 
 function showCard(payload) {
   /* A card left over from the last one must not collapse this one, and its
@@ -287,6 +290,7 @@ function showCard(payload) {
   clearTimeout(fixTimer);
   carded = true;
   cardKind = payload.kind;
+  cardId = payload.id ?? null;
   document.body.classList.toggle('level-card', cardKind === 'level');
   clearText();
   st = 'hidden';
@@ -381,7 +385,8 @@ function hideCard() {
   /* Told after the collapse finishes, so the window shrinks once the card is
      gone rather than mid-animation. Matches the 340ms width transition. */
   const kind = cardKind;
-  dismissTimer = setTimeout(() => window.__TAURI__.event.emit('pill-action', `dismiss-${kind}`), 340);
+  const id = cardId;
+  dismissTimer = setTimeout(() => cardAction(`dismiss-${kind}`, id), 340);
 }
 /* ---------- the preview: the words so far, in a capsule that grows with them ---------- */
 /* The words are DOM text over the canvas, one span per word, left-aligned
@@ -692,19 +697,30 @@ function syncWords(g, dt) {
 
 copyEl.addEventListener('click', () => {
   if (carded && cardKind === 'fixed') {
-    window.__TAURI__.event.emit('pill-action', 'review');
+    cardAction('review');
     hideCard();
     return;
   }
   if (!carded || copyEl.classList.contains('done')) return;
-  window.__TAURI__.event.emit('pill-action', 'copy');
+  cardAction('copy');
+});
+window.__TAURI__.event.listen('pill-copy-result', ({ payload: [id, copied] }) => {
+  if (!carded || cardKind !== 'held' || id !== cardId) return;
+  if (!copied) {
+    copyEl.title = 'Copy failed. Click to try again.';
+    return;
+  }
   copyEl.textContent = 'Copied';
   copyEl.classList.add('done');
   collapseTimer = setTimeout(hideCard, 850);
 });
-document.getElementById('cx').addEventListener('click', hideCard);
+document.getElementById('cx').addEventListener('click', () => {
+  if (carded && cardKind === 'held') cardAction('discard');
+  hideCard();
+});
 
 window.__TAURI__.event.listen('pill', ({ payload: p }) => {
+  wakeCanvas();
   if (p.kind === 'preview') { showPreview(p.text); return; }
   clearTimeout(hideTimer);
   if (p.kind === 'held' || p.kind === 'fixed' || p.kind === 'level') { hidePreview(); showCard(p); return; }
@@ -830,8 +846,14 @@ function fillGlow(x, y, w, h, r, a, col) {
   ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill();
   ctx.restore();
 }
-let last = performance.now(), fadeGlyph = 'bars';
+let last = 0, scheduledFrame = 0, fadeGlyph = 'bars';
+function wakeCanvas() {
+  if (scheduledFrame) return;
+  last = performance.now();
+  scheduledFrame = requestAnimationFrame(frame);
+}
 function frame(now) {
+  scheduledFrame = 0;
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
   const t = now / 1000;
   const active = taking(st);
@@ -853,7 +875,13 @@ function frame(now) {
     ctx.globalAlpha = 1;
   }
   syncWords(g, dt);
-  requestAnimationFrame(frame);
+  if ((st !== 'hidden' && !notice) || g.sc > 0.02 || closing) {
+    scheduledFrame = requestAnimationFrame(frame);
+  } else {
+    store.sc.x = store.sc.v = 0;
+    bands.fill(0);
+    avgT = store.pres = fx.flash = fx.shutter = 0;
+  }
 }
 function draw(t, W, H, morph, pinch) {
   const cx = CX, cy = 25;
@@ -909,5 +937,4 @@ function draw(t, W, H, morph, pinch) {
     ctx.restore();
   }
 }
-requestAnimationFrame(frame);
 </script>

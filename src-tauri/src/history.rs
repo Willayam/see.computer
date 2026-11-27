@@ -19,7 +19,7 @@ pub struct History {
 enum Request {
     Load,
     Refresh(Sender<()>),
-    Append(String, Option<std::time::Duration>),
+    Append(String, Option<std::time::Duration>, Option<PathBuf>),
     Replace(Fix, Sender<Result<(), String>>),
 }
 
@@ -153,7 +153,7 @@ impl History {
             };
             load();
             while let Ok(write) = rx.recv() {
-                let (text, spoken) = match write {
+                let (text, spoken, saved_audio) = match write {
                     Request::Load => {
                         load();
                         crate::library::changed();
@@ -164,7 +164,7 @@ impl History {
                         let _ = reply.send(());
                         continue;
                     }
-                    Request::Append(text, spoken) => (text, spoken),
+                    Request::Append(text, spoken, saved_audio) => (text, spoken, saved_audio),
                     Request::Replace(fix, reply) => {
                         let result = replace_entry(&locked_root(&writer_root), &fix);
                         if result.is_ok() {
@@ -181,15 +181,20 @@ impl History {
                 let at = Local::now();
                 let live = locked_root(&writer_root);
                 let filed = match append_entry(&live, at, &text) {
-                    Ok(()) => true,
                     Err(error) if can_fallback && error.raw_os_error() == Some(libc::EPERM) => {
                         let _ = std::fs::create_dir_all(&fallback);
                         set_root(&writer_root, fallback.clone());
-                        append_entry(&fallback, at, &text).is_ok()
+                        append_entry(&fallback, at, &text)
                     }
-                    Err(_) => false,
+                    result => result,
                 };
-                if filed {
+                if let Ok(file) = filed {
+                    if let Some(path) = saved_audio {
+                        // Keep the retry WAV if the history file cannot be flushed to disk.
+                        if file.sync_data().is_ok() {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    }
                     if let Some(spoken) = spoken {
                         let _ =
                             crate::tally::log_speed(&speed, at, spoken, crate::tally::words(&text));
@@ -241,8 +246,19 @@ impl History {
     }
 
     pub fn record(&self, text: &str, spoken: Option<std::time::Duration>) {
+        self.record_recovery(text, spoken, None);
+    }
+
+    pub fn record_recovery(
+        &self,
+        text: &str,
+        spoken: Option<std::time::Duration>,
+        saved_audio: Option<PathBuf>,
+    ) {
         if self.enabled() {
-            let _ = self.tx.send(Request::Append(text.to_owned(), spoken));
+            let _ = self
+                .tx
+                .send(Request::Append(text.to_owned(), spoken, saved_audio));
         }
     }
 
@@ -339,10 +355,11 @@ fn resolve_root(preferred: &Path, fallback: &Path) -> PathBuf {
     fallback.to_path_buf()
 }
 
-fn append_entry(root: &Path, at: DateTime<Local>, text: &str) -> io::Result<()> {
+fn append_entry(root: &Path, at: DateTime<Local>, text: &str) -> io::Result<std::fs::File> {
     let path = root.join(format!("{}.md", at.format("%Y-%m-%d")));
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    write!(file, "## {}\n\n{text}\n\n", at.format("%H:%M:%S"))
+    write!(file, "## {}\n\n{text}\n\n", at.format("%H:%M:%S"))?;
+    Ok(file)
 }
 
 fn read_recent(root: &Path, limit: usize) -> Vec<Entry> {
@@ -568,6 +585,38 @@ mod tests {
         let naive =
             NaiveDateTime::parse_from_str(&format!("{date} {time}"), "%Y-%m-%d %H:%M:%S").unwrap();
         Local.from_local_datetime(&naive).single().unwrap()
+    }
+
+    #[test]
+    fn late_audio_survives_a_failed_history_write_and_is_removed_after_a_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("history");
+        let history = History::start_at(
+            true,
+            None,
+            root.clone(),
+            root.clone(),
+            Some(root.clone()),
+            dir.path().join("speed"),
+            dir.path().join("ledger"),
+            Some(vec![]),
+        );
+        history.refresh_words();
+        let audio = dir.path().join("take.wav");
+        fs::write(&audio, b"test audio").unwrap();
+        let day = root.join(format!("{}.md", Local::now().format("%Y-%m-%d")));
+        if day.is_file() {
+            fs::remove_file(&day).unwrap()
+        }
+        fs::create_dir(&day).unwrap();
+        history.record_recovery("recovered", None, Some(audio.clone()));
+        history.refresh_words();
+        assert!(audio.exists());
+        fs::remove_dir(day).unwrap();
+        history.record_recovery("recovered", None, Some(audio.clone()));
+        history.refresh_words();
+        assert!(!audio.exists());
+        assert_eq!(history.recent(1)[0].text, "recovered");
     }
 
     #[test]

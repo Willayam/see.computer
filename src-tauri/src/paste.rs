@@ -5,7 +5,30 @@ use std::time::{Duration, Instant};
 
 use crate::text::Text;
 
-const DEDUP_WINDOW: Duration = Duration::from_millis(1_500);
+use std::ffi::c_void;
+use std::ptr::NonNull;
+
+unsafe extern "C" {
+    fn see_pasteboard_open(name: *const std::ffi::c_char) -> *mut c_void;
+    fn see_pasteboard_release(value: *mut c_void);
+    fn see_pasteboard_count(board: *mut c_void) -> isize;
+    fn see_pasteboard_snapshot(board: *mut c_void, expected: isize) -> *mut c_void;
+    fn see_pasteboard_write(
+        board: *mut c_void,
+        expected: isize,
+        bytes: *const u8,
+        length: usize,
+    ) -> isize;
+    fn see_pasteboard_restore(board: *mut c_void, expected: isize, snapshot: *mut c_void) -> bool;
+}
+
+struct Retained(NonNull<c_void>);
+
+impl Drop for Retained {
+    fn drop(&mut self) {
+        unsafe { see_pasteboard_release(self.0.as_ptr()) };
+    }
+}
 
 pub struct Paste {
     mode: Mode,
@@ -93,9 +116,17 @@ impl Paste {
 /// The prior clipboard goes back only if `NSPasteboard.changeCount` is still the
 /// value we wrote. Comparing text would misread "user copied the same text".
 struct PendingRestore {
-    prior: Option<String>,
-    change_count: i64,
+    prior: Retained,
+    change_count: isize,
     at: Instant,
+}
+
+impl PendingRestore {
+    fn restore(self, board: &Retained) {
+        unsafe {
+            see_pasteboard_restore(board.0.as_ptr(), self.change_count, self.prior.0.as_ptr())
+        };
+    }
 }
 
 fn paste_loop(
@@ -103,130 +134,115 @@ fn paste_loop(
     ledger: crate::ledger::Ledger,
     readback: crate::readback::Readback,
 ) {
-    let mut clipboard = match arboard::Clipboard::new() {
-        Ok(clipboard) => clipboard,
-        Err(error) => {
-            while let Ok(job) = rx.recv() {
-                (job.done)(Outcome(Err(Error::Clipboard(error.to_string()))));
-            }
-            return;
+    let Some(board) = NonNull::new(unsafe { see_pasteboard_open(std::ptr::null()) }).map(Retained)
+    else {
+        for job in rx {
+            (job.done)(Outcome(Err(Error::Clipboard(
+                "pasteboard unavailable".to_owned(),
+            ))));
         }
+        return;
     };
     let mut pending: Option<PendingRestore> = None;
-    let mut last: Option<(String, Instant)> = None;
     loop {
-        let incoming = match pending.as_ref() {
-            Some(restore) => {
-                let timeout = restore.at.saturating_duration_since(Instant::now());
-                match rx.recv_timeout(timeout) {
-                    Ok(job) => Some(job),
-                    Err(RecvTimeoutError::Timeout) => {
-                        if let Some(restore) = pending.take() {
-                            if pasteboard_change_count() == restore.change_count {
-                                if let Some(prior) = restore.prior {
-                                    let _ = clipboard.set_text(prior);
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    Err(RecvTimeoutError::Disconnected) => break,
+        let next = match &pending {
+            Some(restore) => rx.recv_timeout(restore.at.saturating_duration_since(Instant::now())),
+            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let job = match next {
+            Ok(job) => job,
+            Err(error) => {
+                if let Some(restore) = pending.take() {
+                    restore.restore(&board)
                 }
+                if error == RecvTimeoutError::Disconnected {
+                    return;
+                }
+                continue;
             }
-            None => match rx.recv() {
-                Ok(job) => Some(job),
-                Err(_) => break,
-            },
         };
-        let Some(job) = incoming else {
-            continue;
-        };
-        if !accessibility_trusted(false) {
-            pending = None;
-            last = None;
-            let outcome = match clipboard.set_text(job.text.as_str()) {
-                Ok(()) => Err(Error::AccessibilityDenied),
-                Err(error) => Err(Error::Clipboard(error.to_string())),
-            };
-            (job.done)(Outcome(outcome));
-            continue;
-        }
-        let now = Instant::now();
-        if is_duplicate(&last, job.text.as_str(), now) {
-            (job.done)(Outcome(Ok(Landing::Pasted)));
-            continue;
-        }
-        let carried_prior = pending.take().and_then(|restore| {
-            if pasteboard_change_count() == restore.change_count {
-                restore.prior
-            } else {
-                clipboard.get_text().ok()
-            }
-        });
-        let prior = carried_prior.or_else(|| clipboard.get_text().ok());
-        if let Err(error) = clipboard.set_text(job.text.as_str()) {
-            (job.done)(Outcome(Err(Error::Clipboard(error.to_string()))));
-            continue;
-        }
-        let change_count = pasteboard_change_count();
-        // Asked here rather than earlier because the frontmost app can change
-        // between transcription finishing and the keystroke going out. Two AX
-        // round trips at a 0.25s timeout each, so an unresponsive app can delay
-        // the paste by up to half a second before we give up and paste anyway.
-        let mut observation = crate::target::observe();
-        // SEE_COMPUTER_PASTE=hold lets a verification run with the screen locked
-        // exercise everything but the keystroke, which would otherwise land in
-        // the lock screen's password field.
-        let hold = observation.focus.holds_instead_of_pasting()
+        let handle = board.0.as_ptr();
+        let expected = unsafe { see_pasteboard_count(handle) };
+        let trusted = accessibility_trusted(false);
+        let mut observation = trusted.then(crate::target::observe);
+        let hold = observation
+            .as_ref()
+            .is_some_and(|target| target.focus.holds_instead_of_pasting())
             || std::env::var("SEE_COMPUTER_PASTE").is_ok_and(|value| value == "hold");
-        if hold {
-            // No Cmd+V, and the prior clipboard is not restored, so the words
-            // survive for the user to place. This is the whole fix: today a
-            // dictation with nothing focused is overwritten 1.2s later.
-            last = None;
+        let restore = trusted && !hold && job.clipboard == Clipboard::RestorePrior;
+        // A copy during Accessibility lookup belongs to the user. Offer our words in the pill.
+        if unsafe { see_pasteboard_count(handle) } != expected {
+            (job.done)(Outcome(Ok(Landing::Held)));
+            continue;
+        }
+        let prior = if restore {
+            if pending
+                .as_ref()
+                .is_some_and(|previous| previous.change_count == expected)
+            {
+                pending.take().map(|previous| previous.prior)
+            } else {
+                NonNull::new(unsafe { see_pasteboard_snapshot(handle, expected) }).map(Retained)
+            }
+        } else {
+            None
+        };
+        if restore && prior.is_none() {
+            (job.done)(Outcome(Ok(Landing::Held)));
+            continue;
+        }
+        let text = job.text.as_str().as_bytes();
+        let owned = unsafe { see_pasteboard_write(handle, expected, text.as_ptr(), text.len()) };
+        if owned == -1 {
+            (job.done)(Outcome(Ok(Landing::Held)));
+            continue;
+        }
+        if owned < 0 {
+            (job.done)(Outcome(Err(Error::Clipboard(
+                "could not write text".to_owned(),
+            ))));
+            continue;
+        }
+        pending = None;
+        let Some(mut target) = observation.take() else {
+            (job.done)(Outcome(Err(Error::AccessibilityDenied)));
+            continue;
+        };
+        if hold || unsafe { see_pasteboard_count(handle) } != owned {
             if let Some(id) = &job.dictation {
-                ledger.landed(id, &observation, Landing::Held);
+                ledger.landed(id, &target, Landing::Held);
             }
             (job.done)(Outcome(Ok(Landing::Held)));
-            crate::target::log(&observation, true);
+            crate::target::log(&target, true);
             continue;
         }
         match post_cmd_v() {
             Ok(()) => {
-                last = Some((job.text.as_str().to_owned(), Instant::now()));
                 if let Some(id) = &job.dictation {
-                    ledger.landed(id, &observation, Landing::Pasted);
+                    ledger.landed(id, &target, Landing::Pasted);
                 }
                 if let Some(id) = job.dictation {
-                    if ledger.enabled() && observation.focus != crate::target::Focus::NotEditable {
+                    if ledger.enabled() && target.focus != crate::target::Focus::NotEditable {
                         readback.watch(crate::readback::Watch {
                             id,
-                            pid: observation.pid,
-                            bundle: observation.bundle.clone(),
+                            pid: target.pid,
+                            bundle: target.bundle.clone(),
                             pasted: job.text.as_str().trim().to_owned(),
-                            element: observation.element.take(),
+                            element: target.element.take(),
                         });
                     }
                 }
                 (job.done)(Outcome(Ok(Landing::Pasted)));
-                crate::target::log(&observation, false);
-                if job.clipboard == Clipboard::RestorePrior {
-                    pending = Some(PendingRestore {
-                        prior,
-                        change_count,
-                        at: Instant::now() + Duration::from_millis(1_200),
-                    });
-                }
+                crate::target::log(&target, false);
+                pending = prior.map(|prior| PendingRestore {
+                    prior,
+                    change_count: owned,
+                    at: Instant::now() + Duration::from_millis(1_200),
+                });
             }
             Err(error) => (job.done)(Outcome(Err(error))),
         }
     }
-}
-
-fn is_duplicate(last: &Option<(String, Instant)>, text: &str, now: Instant) -> bool {
-    last.as_ref().is_some_and(|(prior, at)| {
-        prior == text && now.saturating_duration_since(*at) < DEDUP_WINDOW
-    })
 }
 
 pub struct Outcome(pub Result<Landing, Error>);
@@ -281,22 +297,6 @@ pub fn accessibility_trusted(prompt: bool) -> bool {
     }
 }
 
-fn pasteboard_change_count() -> i64 {
-    unsafe {
-        use objc2::msg_send;
-        use objc2::runtime::{AnyClass, AnyObject};
-        let Some(class) = AnyClass::get(c"NSPasteboard") else {
-            return -1;
-        };
-        let pasteboard: *mut AnyObject = msg_send![class, generalPasteboard];
-        if pasteboard.is_null() {
-            -1
-        } else {
-            msg_send![pasteboard, changeCount]
-        }
-    }
-}
-
 /// Flags are set, not or'ed: `set_flags` replaces them, which is what stops a
 /// physically held Option key from turning this into Cmd+Option+V.
 fn post_cmd_v() -> Result<(), Error> {
@@ -315,27 +315,4 @@ fn post_cmd_v() -> Result<(), Error> {
     std::thread::sleep(Duration::from_millis(8));
     up.post(CGEventTapLocation::HID);
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{is_duplicate, DEDUP_WINDOW};
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn identical_recent_paste_is_duplicate() {
-        let start = Instant::now();
-        let last = Some(("hello".to_owned(), start));
-        assert!(is_duplicate(
-            &last,
-            "hello",
-            start + DEDUP_WINDOW - Duration::from_millis(1)
-        ));
-        assert!(!is_duplicate(&last, "hello", start + DEDUP_WINDOW));
-        assert!(!is_duplicate(
-            &last,
-            "different",
-            start + Duration::from_millis(1)
-        ));
-    }
 }

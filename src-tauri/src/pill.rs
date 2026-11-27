@@ -67,12 +67,28 @@ fn queue_fixed(pending: &mut std::collections::VecDeque<Card>, next: Fix) {
 /// `video.fill` (`DICTATION` and `CLIP` in `tray.rs`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Held {
+    pub id: u64,
     pub text: String,
     pub note: Option<String>,
     /// The whole paste, which for a capture is the narration *and* the path.
     /// The card shows `text`; Copy writes this. Never sent to the webview.
     #[serde(skip)]
     pub clipboard: String,
+    #[serde(skip)]
+    pub recovery: Option<Recovery>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Recovery {
+    pub audio: Option<std::path::PathBuf>,
+}
+
+impl Held {
+    fn acknowledge(&mut self) {
+        if let Some(Recovery { audio: Some(path) }) = self.recovery.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -112,6 +128,7 @@ pub enum Notice {
     /// A transcription outran its deadline. Its audio is saved and its words
     /// still come.
     Saved,
+    SaveFailed,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -134,6 +151,7 @@ impl Notice {
             | Notice::CopiedNoPaste
             | Notice::Saved => Tone::Info,
             Notice::MicSilent
+            | Notice::SaveFailed
             | Notice::Unavailable(_)
             | Notice::MicUnavailable(_)
             | Notice::ScreenRecordingFailed(_)
@@ -164,6 +182,7 @@ impl Notice {
             Notice::PasteFailed(error) => format!("Paste failed: {error}"),
             Notice::TimedOut(activity) => format!("{activity} timed out"),
             Notice::Saved => "Slow to transcribe · saved, the words will follow".to_owned(),
+            Notice::SaveFailed => "Still transcribing. Couldn’t save audio for retry.".to_owned(),
         }
     }
 }
@@ -260,6 +279,22 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                 pending.push_back(Card::LevelUp(next));
                 continue;
             }
+            if let PillEvent::Held(ref held) = event {
+                if let Some(recovery) = &held.recovery {
+                    // A manual retry can finish while the first result still awaits Copy.
+                    let same_audio = |card: &Card| {
+                        matches!(card, Card::Held(other)
+                        if recovery.audio.is_some() && other.recovery.as_ref() == Some(recovery))
+                    };
+                    let showing = card
+                        .lock()
+                        .is_ok_and(|slot| slot.as_ref().is_some_and(same_audio));
+                    if !showing && !pending.iter().any(same_audio) {
+                        pending.push_back(Card::Held(held.clone()));
+                    }
+                    continue;
+                }
+            }
             if let PillEvent::Preview(text) = event {
                 // One that lost the race with the end of its take has
                 // nothing left to describe.
@@ -294,7 +329,11 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
                 },
                 PillEvent::Held(held) => {
                     if let Ok(mut slot) = card.lock() {
-                        *slot = Some(Card::Held(held.clone()));
+                        if let Some(Card::Held(old)) = slot.replace(Card::Held(held.clone())) {
+                            if old.recovery.is_some() {
+                                pending.push_front(Card::Held(old));
+                            }
+                        }
                     }
                     Wire::Held(held)
                 }
@@ -310,7 +349,10 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
             // size and makes it click-through again.
             if !matches!(wire, Wire::Held(_)) {
                 if let Ok(mut slot) = card.lock() {
-                    if slot.take().is_some() {
+                    if let Some(old) = slot.take() {
+                        if matches!(&old, Card::Held(held) if held.recovery.is_some()) {
+                            pending.push_front(old);
+                        }
                         let dispatcher = app.clone();
                         let window = window.clone();
                         let _ = dispatcher.run_on_main_thread(move || {
@@ -442,16 +484,33 @@ fn attach_card_listeners(
     let acting = app.clone();
     let acting_window = window;
     app.listen_any("pill-action", move |event| {
-        match event.payload().trim_matches('"') {
-            "copy" => {
-                let held = card.lock().ok().and_then(|slot| slot.clone());
-                if let Some(Card::Held(held)) = held {
-                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                        // The words are usually still there, because a held
-                        // paste never restores the prior clipboard. This covers
-                        // the case where something else has copied since.
-                        let _ = clipboard.set_text(held.clipboard);
+        #[derive(serde::Deserialize)]
+        struct Action {
+            action: String,
+            id: Option<u64>,
+        }
+        let Ok(action) = serde_json::from_str::<Action>(event.payload()) else {
+            return;
+        };
+        match action.action.as_str() {
+            "copy" | "discard" => {
+                let Ok(mut slot) = card.lock() else { return };
+                let Some(Card::Held(held)) = slot.as_mut() else {
+                    return;
+                };
+                if action.id != Some(held.id) {
+                    return;
+                }
+                if action.action == "discard" {
+                    held.acknowledge();
+                } else {
+                    let copied = arboard::Clipboard::new()
+                        .and_then(|mut clipboard| clipboard.set_text(held.clipboard.as_str()))
+                        .is_ok();
+                    if copied {
+                        held.acknowledge()
                     }
+                    let _ = acting.emit_to("pill", "pill-copy-result", (held.id, copied));
                 }
             }
             // The click is the user asking for the Library, so it may come
@@ -469,7 +528,9 @@ fn attach_card_listeners(
             dismiss @ ("dismiss-held" | "dismiss-fixed" | "dismiss-level") => {
                 if let Ok(mut slot) = card.lock() {
                     let same = match slot.as_ref() {
-                        Some(Card::Held(_)) => dismiss == "dismiss-held",
+                        Some(Card::Held(held)) => {
+                            dismiss == "dismiss-held" && action.id == Some(held.id)
+                        }
                         Some(Card::Fixed(_)) => dismiss == "dismiss-fixed",
                         Some(Card::LevelUp(_)) => dismiss == "dismiss-level",
                         None => true,

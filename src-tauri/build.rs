@@ -1,11 +1,13 @@
 fn main() {
     cc::Build::new()
         .file("native/menu.m")
+        .file("native/pasteboard.m")
         .flag("-fobjc-arc")
         .compile("seemenu");
     println!("cargo:rustc-link-lib=framework=AppKit");
     println!("cargo:rustc-link-lib=framework=QuartzCore");
     println!("cargo:rerun-if-changed=native/menu.m");
+    println!("cargo:rerun-if-changed=native/pasteboard.m");
     cc::Build::new()
         .file("native/frame.m")
         .flag("-fobjc-arc")
