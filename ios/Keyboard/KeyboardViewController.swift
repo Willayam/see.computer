@@ -493,7 +493,8 @@ final class KeyboardViewController: UIInputViewController {
         var replaced: Draft?
         if let last = ledger[start.id]?.draft {
             let free = current.map { ledger.isFree($0.field, for: start.id) } ?? false
-            guard let placement = last.placement(at: current, before: before, ownsMark: ownsMark(last), mayHaveMoved: free)
+            guard let placement = last.placement(at: current, before: before, ownsMark: ownsMark(last), mayHaveMoved: free),
+                  placement != .uncertain
             else { return false }
             // A host that shows no marked text says so within moments of the first mark.
             shown = last.shown == true || placement == .committed || markHeld
@@ -542,6 +543,8 @@ final class KeyboardViewController: UIInputViewController {
         else { return false }
         markedDraft = nil
         switch placement {
+        case .uncertain:
+            return false
         case .committed:
             guard draft.canErase(before: proxy.documentContextBeforeInput) else { return false }
             for _ in draft.text { proxy.deleteBackward() }
@@ -626,11 +629,9 @@ final class KeyboardViewController: UIInputViewController {
             } else if delivery == .verifyTarget, entry?.standing == nil {
                 place(take, entry, at: current, in: &ledger)
             } else if entry?.standing == .sent {
-                // The keyboard that sent the take did not last to hear the host's answer. The
-                // field as the host reports it now decides, and the take is not sent again.
-                let landed = ledger.shows(take, in: current.field, isOwn: delivery == .verifyTarget, before: before, after: current.after)
-                Diagnostics.log(landed ? "placed" : "unplaced", ["why": "restart"])
-                settle(start.id, as: landed ? .placed : .offered, in: &ledger, field: landed ? current.field : nil)
+                let result = ledger.resultAfterRestart(take, at: current, before: before)
+                Diagnostics.log(result.rawValue, ["why": "restart"])
+                settle(start.id, as: result, in: &ledger)
             }
             if placing != nil { break }
             if let offer = ledger.offer(for: take, in: current.field, at: now) {
@@ -714,23 +715,22 @@ final class KeyboardViewController: UIInputViewController {
             let text = draft.spacing + take.text
             markedDraft = nil
             switch placement {
+            case .uncertain:
+                settle(start.id, as: .unconfirmed, in: &ledger)
+                return
             case .marked:
+                let after = proxy.documentContextAfterInput
                 let sent = send("mark", awaitingReply: true) {
                     proxy.setMarkedText(text, selectedRange: NSRange(location: (text as NSString).length, length: 0))
                     proxy.unmarkText()
                 }
                 guard sent else { return }
                 awaitHost(Placing(
-                    take: take, field: current.field, text: text, before: before, after: proxy.documentContextAfterInput))
+                    take: take, field: current.field, text: text, before: before, after: after))
                 return
             case .committed where draft.text != text:
                 guard draft.canErase(before: before) else {
-                    if text.hasPrefix(draft.text) {
-                        let tail = String(text.dropFirst(draft.text.count))
-                        _ = send("append") { proxy.insertText(tail) }
-                    } else {
-                        settle(start.id, as: .unconfirmed, in: &ledger)
-                    }
+                    settle(start.id, as: .unconfirmed, in: &ledger)
                     return
                 }
                 _ = send("replace") {
@@ -748,6 +748,10 @@ final class KeyboardViewController: UIInputViewController {
             let rest = Transcript.rest(of: take.text, after: edit?.kept ?? "")
             if !rest.isEmpty {
                 _ = send("plain") { proxy.insertText(spaced(rest, replacingSelection: current.selected != nil)) }
+                return
+            }
+            if edit != nil {
+                settle(start.id, as: .unconfirmed, in: &ledger)
                 return
             }
         }
@@ -776,11 +780,15 @@ final class KeyboardViewController: UIInputViewController {
     private func checkPlacing() {
         guard let placing, let id = placing.take.start?.id else { return }
         let proxy = textDocumentProxy
-        guard isActive, SeeDocumentIdentifier(proxy) == placing.field else { return settlePlacing() }
-        guard HostContext.refused(
-            placing.text, before: placing.before, after: placing.after,
-            now: proxy.documentContextBeforeInput, nowAfter: proxy.documentContextAfterInput)
-        else { return settlePlacing(confirmed: HostContext.ends(proxy.documentContextBeforeInput, with: placing.text)) }
+        guard isActive, SeeDocumentIdentifier(proxy) == placing.field, proxy.selectedText?.isEmpty != false
+        else { return settlePlacing() }
+        switch HostContext.reply(to: placing.text, before: placing.before, after: placing.after,
+                                 now: proxy.documentContextBeforeInput, nowAfter: proxy.documentContextAfterInput,
+                                 hasText: proxy.hasText) {
+        case .placed: return settlePlacing(confirmed: true)
+        case .uncertain: return settlePlacing()
+        case .refused: break
+        }
         self.placing = nil
         placingDeadline?.cancel()
         Diagnostics.log("mark_refused", ["chars": placing.text.count, "phase": state.phase.rawValue])
@@ -1058,7 +1066,7 @@ final class KeyboardViewController: UIInputViewController {
         showWords()
     }
 
-    private func save(_ edit: ManualEdit, for start: DictationStart) {
+    private func save(_ edit: ManualEdit, for start: DictationStart, uncertain: Bool = false) {
         manualEdit = edit
         takeField = edit.target?.field ?? takeField
         guard var ledger = readLedger() else { return }
@@ -1066,6 +1074,7 @@ final class KeyboardViewController: UIInputViewController {
             $0.draft = nil
             $0.edit = edit
             $0.field = edit.target?.field ?? $0.field
+            if uncertain { $0.standing = .unconfirmed }
         }
         saveLedger(ledger)
     }
@@ -1077,6 +1086,7 @@ final class KeyboardViewController: UIInputViewController {
         let proxy = textDocumentProxy
         var kept = ""
         var known = state.phase == .recording
+        var uncertain = false
         if var draft = readLedger()?[start.id]?.draft {
             let owned = ownsMark(draft)
             let placement = draft.placement(at: currentTarget, before: proxy.documentContextBeforeInput, ownsMark: owned)
@@ -1095,11 +1105,12 @@ final class KeyboardViewController: UIInputViewController {
             }
             kept = draft.kept(placement, retyped: retyped)
             known = known || placement != nil
+            uncertain = placement == .uncertain
         } else {
             known = known || start.target.matches(currentTarget)
         }
         Diagnostics.log("words_kept", ["chars": kept.count, "phase": state.phase.rawValue, "known": known])
-        save(ManualEdit(startID: start.id, target: known ? currentTarget : nil, kept: kept), for: start)
+        save(ManualEdit(startID: start.id, target: known ? currentTarget : nil, kept: kept), for: start, uncertain: uncertain)
     }
 
     /// While recording, wherever the user leaves the caret in the take's field is where

@@ -112,6 +112,13 @@ struct DictationTarget: Codable, Equatable {
         return matchesPosition(current) && hasText == current.hasText
     }
 
+    func showsInsertion(_ text: String, before context: String?) -> Bool {
+        guard !text.isEmpty, let context, context.hasSuffix(text) else { return false }
+        let prefix = String(context.dropLast(text.count))
+        if let before { return Self.fingerprint(prefix) == before }
+        return !hasText && prefix.isEmpty
+    }
+
     fileprivate static func fingerprint(_ text: String) -> Data {
         Data(SHA256.hash(data: Data(text.precomposedStringWithCanonicalMapping.utf8)))
     }
@@ -208,16 +215,17 @@ struct Draft: Codable, Equatable {
         else { return nil }
         let known = home == current.field
         guard known || mayHaveMoved else { return nil }
-        if let committedBefore, current.before == committedBefore, known || words.count >= Self.recognisable {
+        let complete = committedBefore.map { $0 == current.before } ?? target.showsInsertion(text, before: before)
+        if complete, known || words.count >= Self.recognisable {
             return .committed
         }
         guard known else { return nil }
         if target.before == current.before { return ownsMark ? .marked : nil }
-        return HostContext.ends(before, with: text) ? .committed : nil
+        return HostContext.overlapsEnding(before, of: text) ? .uncertain : nil
     }
 
     enum Placement {
-        case marked, committed
+        case marked, committed, uncertain
     }
 
     func canErase(before: String?) -> Bool {
@@ -227,7 +235,7 @@ struct Draft: Codable, Equatable {
     func recovery(at current: DictationTarget, before: String?) -> Ledger.Standing? {
         guard shown == true, let target = start?.target, current.selected == nil, target.after == current.after
         else { return nil }
-        if HostContext.isEnd(before, of: text) { return .unconfirmed }
+        if HostContext.overlapsEnding(before, of: text) { return .unconfirmed }
         return target.before != nil && target.before == current.before && current.hasText ? .offered : nil
     }
 
@@ -235,7 +243,8 @@ struct Draft: Codable, Equatable {
     /// updating the draft. Words the keyboard only asked the host to show do not count,
     /// or the final text would leave them out without their ever having been there.
     func kept(_ placement: Placement?, retyped: Bool) -> String {
-        retyped || placement == .committed || shown == true ? words : ""
+        guard placement != .uncertain else { return "" }
+        return retyped || placement == .committed || shown == true ? words : ""
     }
 }
 
@@ -256,31 +265,21 @@ struct ManualEdit: Codable, Equatable {
 /// most 300 characters. After the keyboard's own edit the keyboard holds its own guess,
 /// which can be longer, until the host sends the field again.
 enum HostContext {
-    /// Enough of a text's end to tell it from a short word the field happens to share.
-    private static let tail = 12
+    enum Reply { case placed, refused, uncertain }
 
-    static func ends(_ context: String?, with text: String) -> Bool {
-        let context = form(context), text = form(text)
-        guard !context.isEmpty, !text.isEmpty else { return false }
-        let whole = text.drop(while: \.isWhitespace).count
-        if context.hasSuffix(text) { return true }
-        return text.hasSuffix(context) && context.count >= min(tail, whole)
+    static func overlapsEnding(_ context: String?, of text: String) -> Bool {
+        let reported = form(context), words = form(text).drop(while: \.isWhitespace)
+        guard !reported.isEmpty, !words.isEmpty else { return false }
+        return reported.hasSuffix(words) || words.hasSuffix(reported)
     }
 
-    /// Whether what the host reports, however little, is how `text` ends.
-    static func isEnd(_ context: String?, of text: String) -> Bool {
-        let context = form(context)
-        return !context.isEmpty && form(text).hasSuffix(context)
-    }
-
-    /// The host has sent the field back as it was before `text` went in, so the text did
-    /// not land. A field the host emptied meanwhile says nothing, and neither does a
-    /// caret the user moved in front of the text.
-    static func refused(_ text: String, before: String?, after: String?, now: String?, nowAfter: String?) -> Bool {
-        let before = form(before), now = form(now)
-        guard form(after) == form(nowAfter) else { return false }
-        if now.isEmpty { return before.isEmpty }
-        return before.hasSuffix(now) && !ends(now, with: text)
+    static func reply(to text: String, before: String?, after: String?, now: String?, nowAfter: String?,
+                      hasText: Bool) -> Reply {
+        guard !text.isEmpty, form(after) == form(nowAfter) else { return .uncertain }
+        let prior = form(before), reported = form(now)
+        if hasText, reported == form(prior + text) { return .placed }
+        if reported.isEmpty { return prior.isEmpty && !hasText ? .refused : .uncertain }
+        return prior.hasSuffix(reported) && !overlapsEnding(reported, of: text) ? .refused : .uncertain
     }
 
     private static func form(_ text: String?) -> String {
@@ -358,22 +357,16 @@ struct Ledger: Codable, Equatable {
         !entries.contains { $0.id != id && $0.home == field }
     }
 
-    /// Whether a field holds a take that an earlier keyboard sent without lasting to hear the
-    /// host's answer. `before` is the text the host reports before the caret. Under a new
-    /// identifier the field may still be the take's own, unless another take has words there.
-    func shows(_ take: Take, in field: UUID, isOwn: Bool, before: String?, after: Data?) -> Bool {
-        guard let start = take.start, let before else { return false }
-        let entry = self[start.id]
-        let sent = Transcript.rest(of: take.text, after: entry?.edit?.kept ?? "")
-        if isOwn { return HostContext.ends(before.trimmingCharacters(in: .whitespaces), with: sent) }
-        let origin = entry?.edit?.target ?? start.target
-        guard !sent.isEmpty, isFree(field, for: start.id), after == origin.after else { return false }
-        let context = before.hasSuffix(sent + " ") ? String(before.dropLast()) : before
-        guard context.hasSuffix(sent) else { return false }
-        let prefix = String(context.dropLast(sent.count))
-        if origin.before == nil { return !origin.hasText && prefix.isEmpty }
-        return DictationTarget.fingerprint(prefix) == origin.before ||
-            (prefix.hasSuffix(" ") && DictationTarget.fingerprint(String(prefix.dropLast())) == origin.before)
+    func resultAfterRestart(_ take: Take, at field: DictationTarget, before: String?) -> Standing {
+        guard let start = take.start, let entry = self[start.id], entry.standing == .sent,
+              (entry.home ?? start.target.field) == field.field, entry.edit == nil,
+              field.hasText, field.selected == nil, field.after == start.target.after, let before
+        else { return .unconfirmed }
+        let words = take.text
+        let context = before.hasSuffix(words + " ") ? String(before.dropLast()) : before
+        let complete = start.target.showsInsertion(words, before: context) ||
+            start.target.showsInsertion(" " + words, before: context)
+        return complete ? .placed : .unconfirmed
     }
 
     /// A take without a tap comes from a build that named no field, so nothing can place it.

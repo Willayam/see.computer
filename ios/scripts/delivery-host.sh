@@ -215,15 +215,15 @@ legacy() {
     done
     arm
 }
-# A keyboard killed after it sent a take, before the host answered, cannot say whether the
-# take landed. The next one types nothing. It reads the field, and offers words that are not there.
 unanswered() {
-    sent='Sent just before the keyboard went away\.'
-    left unanswered "Alpha. Sent just before the keyboard went away."
-    verdict unanswered_landed "$(text plain)" "Alpha\. $sent" placed
-    left unanswered "Alpha."
-    verdict unanswered_first "$(text plain)" "Alpha\." unplaced
-    note; tap "$strip"; sleep 2; events; verdict unanswered_lost "$(text plain)" "Alpha\. $sent"
+    sent='Sent just before the keyboard went away.'
+    for existing in "Alpha. $sent" "Alpha."; do
+        left unanswered "$existing"
+        same unanswered_field "$(text plain)" "$existing"
+        note; tap "$strip"; await dictation_copied 5 || return 1
+        same unanswered_copy "$(xcrun simctl pbpaste "$udid")" "$sent"
+        same unanswered_keeps_field "$(text plain)" "$existing"
+    done
     arm
 }
 # Opens the host on a field holding $2, with the shared files as an earlier keyboard left them.

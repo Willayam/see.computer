@@ -41,7 +41,7 @@ enum DraftChecks {
         try theLedgerSettlesEachTakeOnce()
         try aSilentOrFailedInsertKeepsAllTheWords()
         try unreadableDeliveryRecordsSurviveMigration()
-        aTakeSentBeforeARestart()
+        try aTakeSentBeforeARestart()
         try whatAnOlderKeyboardLeftBehind()
         print("Draft checks passed")
     }
@@ -62,7 +62,7 @@ enum DraftChecks {
         precondition(placement(draft, "hello", ownsMark: false) == nil)
         precondition(placement(draft, full, ownsMark: false) == .committed)
         precondition(placement(draft, "hello", field: other, ownsMark: true) == nil, "A mark belongs to the field it was set in")
-        precondition(placement(draft, "words", ownsMark: true) == nil, "A word the field shares with the draft proves nothing")
+        precondition(placement(draft, "words", ownsMark: true) == .uncertain, "A word the field shares with the draft proves nothing")
         precondition(placement(draft, full, after: "changed", ownsMark: true) == nil)
         precondition(placement(draft, full, selected: "next", ownsMark: true) == nil)
         precondition(placement(draft, full + " extra", ownsMark: true) == nil)
@@ -174,16 +174,17 @@ enum DraftChecks {
         shown.shown = true
         precondition(Transcript.rest(of: final, after: shown.kept(nil, retyped: false)) == "gamma delta")
         precondition(busy.kept(.committed, retyped: false) == "alpha beta")
+        precondition(shown.kept(.uncertain, retyped: false).isEmpty)
     }
 
     /// A host reports the last sentence or two before the caret, never the whole field.
     static func hostsThatReportOnlyTheEnd() {
         let words = "Alpha beta gamma. Delta epsilon zeta eta theta. Phi chi psi omega and the tail."
         let draft = Draft(start: tap(at: target("Existing")), before: "Existing", spacing: " ", words: words)
-        precondition(placement(draft, "Phi chi psi omega and the tail.", ownsMark: false) == .committed)
+        precondition(placement(draft, "Phi chi psi omega and the tail.", ownsMark: false) == .uncertain)
         precondition(placement(draft, "Existing" + draft.text, ownsMark: false) == .committed)
-        precondition(placement(draft, "Edited" + draft.text, ownsMark: false) == .committed, "Text before the draft may change")
-        precondition(placement(draft, "tail.", ownsMark: false) == nil)
+        precondition(placement(draft, "Edited" + draft.text, ownsMark: false) == .uncertain)
+        precondition(placement(draft, "tail.", ownsMark: false) == .uncertain)
         precondition(placement(draft, "Something else entirely.", ownsMark: false) == nil)
 
         // iOS gives a field a new identifier each time the keyboard comes back to it. The
@@ -238,28 +239,30 @@ enum DraftChecks {
         precondition(placement(echo, "say hello hello", ownsMark: false) == nil)
         precondition(placement(echo, "say hello hello", ownsMark: true) == .marked)
 
-        precondition(HostContext.ends("Phi chi psi omega and the tail.", with: " " + words))
-        precondition(HostContext.ends("Existing " + words, with: " " + words))
-        precondition(HostContext.ends("Ok.", with: " Ok."))
-        precondition(!HostContext.ends("Existing", with: " " + words))
-        precondition(!HostContext.ends(nil, with: words) && !HostContext.ends("", with: words))
-        precondition(HostContext.ends("re\u{301}sume\u{301} sent", with: "résumé sent"), "Accents compare as the field shows them")
+        var legacy = draft
+        legacy.committedBefore = nil
+        precondition(placement(legacy, "Existing" + legacy.text, field: other, ownsMark: false, mayHaveMoved: true) == .committed)
     }
 
     /// What a host that ignores marked text sends back after the final text went in as marked text.
     static func refusals() {
         let text = " Hi, this is a quick dictation test in English."
-        func refused(before: String?, now: String?, after: String? = nil, nowAfter: String? = nil) -> Bool {
-            HostContext.refused(text, before: before, after: after, now: now, nowAfter: nowAfter)
+        func reply(_ sent: String, before: String?, now: String?, after: String? = nil,
+                   nowAfter: String? = nil, hasText: Bool = true) -> HostContext.Reply {
+            HostContext.reply(to: sent, before: before, after: after, now: now, nowAfter: nowAfter, hasText: hasText)
         }
-        precondition(refused(before: "Existing text.", now: "Existing text."))
-        precondition(refused(before: nil, now: nil), "An empty field that stayed empty")
-        precondition(refused(before: "One. Two. Existing text.", now: "Existing text."), "The host reports less than the keyboard had guessed")
-        precondition(!refused(before: "Existing text.", now: "Hi, this is a quick dictation test in English."))
-        precondition(!refused(before: "Existing text.", now: "Existing text." + text))
-        precondition(!refused(before: "Existing text.", now: nil), "A field the host emptied was sent, not refused")
-        precondition(!refused(before: "Existing text.", now: "Existing text.", nowAfter: "Hi, this is"), "The user moved the caret in front of the take")
-        precondition(!HostContext.refused(" Thanks.", before: "Thanks.", after: nil, now: "Thanks.", nowAfter: nil), "A take that repeats the sentence before it cannot be told apart, and is not typed twice")
+        precondition(reply(text, before: "Existing text.", now: "Existing text.") == .refused)
+        precondition(reply(text, before: nil, now: nil, hasText: false) == .refused)
+        precondition(reply(text, before: nil, now: nil) == .uncertain)
+        precondition(reply(text, before: "One. Two. Existing text.", now: "Existing text.") == .refused)
+        precondition(reply(text, before: "Existing text.", now: "Existing text." + text) == .placed)
+        precondition(reply("résumé", before: nil, now: "re\u{301}sume\u{301}") == .placed)
+        precondition(reply(text, before: "Existing text.", now: nil, hasText: false) == .uncertain)
+        precondition(reply(text, before: "Existing text.", now: "Existing text.", nowAfter: "Hi, this is") == .uncertain)
+        precondition(reply(" Thanks.", before: "Agenda. Thanks.", now: "Agenda. Thanks.") == .uncertain)
+        precondition(reply(" Thanks.", before: "Agenda. Thanks.", now: "Agenda. Thanks. Thanks.") == .placed)
+        precondition(reply(" First part is missing. Only the final sentence.", before: "Agenda.", now: "Only the final sentence.") == .uncertain)
+        precondition(reply(" A sentence ending in OK.", before: "Agenda. OK.", now: "OK.") == .uncertain)
     }
 
     /// One finished take used to replace the one before it, even while that one still waited for its field.
@@ -356,9 +359,7 @@ enum DraftChecks {
         precondition(Ledger.read(in: nil) == nil)
     }
 
-    /// A keyboard killed after it sent a take cannot say whether the take landed. The next
-    /// one reads the field. It types nothing, and offers the words when they are not there.
-    static func aTakeSentBeforeARestart() {
+    static func aTakeSentBeforeARestart() throws {
         let start = tap(at: target("Alpha."))
         let take = Take(id: 11, text: "Sent just before the keyboard went away.", finished: Date(), start: start)
         var ledger = Ledger()
@@ -366,22 +367,30 @@ enum DraftChecks {
             $0.standing = .sent
             $0.field = field
         }
-        precondition(ledger.shows(take, in: field, isOwn: true, before: "Alpha. " + take.text + " ", after: start.target.after))
-        precondition(ledger.shows(take, in: other, isOwn: false, before: "Alpha. " + take.text, after: start.target.after), "The field under a new identifier")
-        precondition(!ledger.shows(take, in: field, isOwn: true, before: "Alpha.", after: start.target.after), "The host dropped the insert")
-        precondition(!ledger.shows(take, in: other, isOwn: false, before: nil, after: start.target.after))
-        precondition(!ledger.shows(take, in: other, isOwn: false, before: "Another field. " + take.text, after: start.target.after))
-
-        var crowded = ledger
-        crowded.update(UUID()) {
-            $0.standing = .placed
-            $0.field = other
+        let contents = "Alpha. " + take.text
+        let restored = try reopened(ledger)
+        func result(_ before: String?, in id: UUID, after: String? = "next") -> Ledger.Standing {
+            restored.resultAfterRestart(take, at: target(before, after: after, field: id), before: before)
         }
-        precondition(!crowded.shows(take, in: other, isOwn: false, before: "Alpha. " + take.text, after: start.target.after), "Another take's words prove nothing")
-
-        // Only the words after the ones the user kept in the field were sent.
-        ledger.update(start.id) { $0.edit = ManualEdit(startID: start.id, target: nil, kept: "Sent just before") }
-        precondition(ledger.shows(take, in: field, isOwn: true, before: "Sent just before, typed, the keyboard went away.", after: start.target.after))
+        precondition(result(contents, in: field) == .placed)
+        precondition(result(contents + " ", in: field) == .placed)
+        precondition(result(contents, in: field, after: "changed") == .unconfirmed)
+        precondition(result("Alpha.", in: field) == .unconfirmed)
+        precondition(result("keyboard went away.", in: field) == .unconfirmed)
+        precondition(result(contents, in: other) == .unconfirmed)
+        var returned = restored
+        returned.update(start.id) { $0.standing = result("Another field.", in: other) }
+        for id in [other, field] {
+            let offer = returned.offer(for: take, in: id)
+            precondition(offer?.action == .copy && offer?.words == take.text)
+            precondition(!returned.reserveInsert(start.id, in: id, from: .offered, save: { _ in true }))
+        }
+        let echoed = tap(at: target("Agenda. Thanks."))
+        let repeated = Take(id: 12, text: "Thanks.", finished: Date(), start: echoed)
+        ledger.update(echoed.id) { $0.standing = .sent; $0.field = field }
+        for (contents, expected) in [("Agenda. Thanks.", Ledger.Standing.unconfirmed), ("Agenda. Thanks. Thanks.", .placed)] {
+            precondition(ledger.resultAfterRestart(repeated, at: target(contents), before: contents) == expected)
+        }
     }
 
     static func whatAnOlderKeyboardLeftBehind() throws {
