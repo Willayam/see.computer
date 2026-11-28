@@ -10,5 +10,5 @@ esac
 
 export PATH="$HOME/.cargo/bin:$PATH"
 root="$(cd "$(dirname "$0")/.." && pwd)"
-unset IPHONEOS_DEPLOYMENT_TARGET SDKROOT
+unset SDKROOT
 exec cargo build --release --target "$target" --manifest-path "$root/core/Cargo.toml"
