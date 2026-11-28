@@ -33,7 +33,7 @@ final class Session: ObservableObject {
     let stats = StatsStore()
     @Published private(set) var state = SessionState()
     @Published private(set) var stage: Engine.Stage = .waiting
-    @Published private(set) var recent: [History.Entry] = History.recent(limit: 30)
+    @Published private(set) var recent: [History.Entry] = History.recent(limit: recentLimit)
     /// The app was opened by the keyboard and could not send the user back.
     @Published var showSwipeBack = false
     @Published var readyFor: ReadyFor {
@@ -71,6 +71,7 @@ final class Session: ObservableObject {
     private static let keyboardGoneAfter: TimeInterval = 3
     /// A take the user walked away from ends after this, in case they forgot it.
     private static let awayLimit: TimeInterval = 5 * 60
+    private static let recentLimit = 30
 
     init(benching: Bool) {
         readyFor =
@@ -432,11 +433,14 @@ final class Session: ObservableObject {
             state.take = Take(
                 id: Int64(now.timeIntervalSince1970 * 1000), text: trimmed, finished: now,
                 sent: takeSent ? true : nil, start: state.start)
+            // The day file first, so words the keyboard cannot place are already in History.
             History.append(trimmed, at: now)
+            settle(problem: nil)
+            // The keyboard has the take by now. Recent gains this one entry, and the day
+            // files are read again only by the statistics, off the main thread.
+            recent = Array(([History.Entry(at: now, text: trimmed)] + recent).prefix(Self.recentLimit))
             StatsStore.logTake(at: now, seconds: spokenSeconds, text: trimmed)
             stats.refresh()
-            recent = History.recent(limit: 30)
-            settle(problem: nil)
         case .failure(let failure):
             Diagnostics.log("engine_error", ["error": failure.message, "engine_ms": engineMs])
             settle(problem: failure.message)
