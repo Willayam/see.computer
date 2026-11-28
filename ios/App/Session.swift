@@ -78,7 +78,8 @@ final class Session: ObservableObject {
             UserDefaults.standard.string(forKey: "readyFor").flatMap(ReadyFor.init(rawValue:))
             ?? .oneHour
         var restored = SessionState()
-        restored.take = Bridge.read(SessionState.self, "state.json")?.take
+        // Takes the keyboard has not placed yet outlive the app being killed.
+        restored.takes = Bridge.read(SessionState.self, "state.json")?.takes ?? []
         restored.model = stage.model
         state = restored
         publish()
@@ -430,9 +431,10 @@ final class Session: ObservableObject {
                 "transcript_delivered",
                 ["words": trimmed.split(whereSeparator: \.isWhitespace).count, "chars": trimmed.count, "engine_ms": engineMs])
             let now = Date()
-            state.take = Take(
+            let take = Take(
                 id: Int64(now.timeIntervalSince1970 * 1000), text: trimmed, finished: now,
                 sent: takeSent ? true : nil, start: state.start)
+            state.keep(take, at: now)
             // The day file first, so words the keyboard cannot place are already in History.
             History.append(trimmed, at: now)
             settle(problem: nil)
@@ -533,6 +535,7 @@ final class Session: ObservableObject {
     }
 
     private func publish() {
+        state.dropExpired(at: Date())
         Bridge.write(state, "state.json")
         Signals.post(.changed)
         Island.show(state)
