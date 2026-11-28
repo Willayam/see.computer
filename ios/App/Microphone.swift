@@ -55,12 +55,19 @@ final class Microphone {
     }
 
     func beginCapture(_ sink: @escaping ([Float]) -> Void) {
-        Microphone.testInput?.rewind()
-        gate.begin(replayingKept: Microphone.testInput == nil) { samples in
+        let take: ([Float]) -> Void = { samples in
             sink(samples)
             let energy = samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count)
             // From -50 dB, a quiet room, to -10 dB, loud speech close to the phone.
             Bridge.writeLevel((10 * log10(max(energy, 1e-9)) + 50) / 40)
+        }
+        if let input = Microphone.testInput {
+            testQueue.sync {
+                input.rewind()
+                gate.begin(replayingKept: false, take)
+            }
+        } else {
+            gate.begin(take)
         }
     }
 
@@ -119,12 +126,13 @@ final class Microphone {
         #endif
     }()
     private var testTimer: DispatchSourceTimer?
+    private let testQueue = DispatchQueue(label: "computer.see.ios.file-mic", qos: .userInitiated)
     private let testSilence = AVAudioPlayerNode()
 
     private func startTestInput() -> Bool {
         guard let input = Microphone.testInput else { return false }
         guard testTimer == nil else { return true }
-        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+        let timer = DispatchSource.makeTimerSource(queue: testQueue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(100))
         timer.setEventHandler { [weak self] in self?.gate.deliver(input.next(count: 1600)) }
         timer.resume()

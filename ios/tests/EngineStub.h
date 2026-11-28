@@ -13,3 +13,4 @@ void stub_release_feed(void);
 /* Calls that entered the engine while another call was still inside it. */
 int stub_overlaps(void);
 int stub_finishes(void);
+int stub_releases(void);

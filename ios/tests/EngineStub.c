@@ -8,7 +8,7 @@
 
 static SeeCallback callback;
 static void *context;
-static atomic_int inside, overlaps, finishes;
+static atomic_int inside, overlaps, finishes, releases;
 static atomic_bool hold;
 static atomic_uint_fast64_t utterance, job;
 static dispatch_semaphore_t entered, released;
@@ -32,6 +32,9 @@ SeeEngine *see_engine_start(const char *models, const char *dictionary, bool pre
   context = caller;
   return (SeeEngine *)&callback;
 }
+
+void see_engine_release(SeeEngine *engine) { atomic_fetch_add(&releases, 1); }
+int stub_releases(void) { return atomic_load(&releases); }
 
 uint64_t see_engine_begin(SeeEngine *engine) {
   enter();

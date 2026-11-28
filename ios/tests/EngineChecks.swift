@@ -5,6 +5,8 @@ enum EngineChecks {
     static func main() {
         let engine = Engine.shared
         engine.start(previews: true)
+        engine.restart(previews: true)
+        precondition(stub_releases() == 1, "Retry releases the previous engine")
         previewsKeepTheirTake(engine)
         engineHasOneCaller(engine)
         keptAudioComesFirst()

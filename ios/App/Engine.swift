@@ -43,7 +43,10 @@ final class Engine {
 
     /// After a failure the old worker has exited, so a new one takes its place.
     func restart(previews: Bool) {
-        handle.withLockUnchecked { $0 = nil }
+        handle.withLockUnchecked { handle in
+            if let failed = handle { see_engine_release(failed) }
+            handle = nil
+        }
         start(previews: previews)
     }
 

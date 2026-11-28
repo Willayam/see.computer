@@ -7,9 +7,9 @@
 
 typedef struct SeeEngine SeeEngine;
 
-/* Event kinds. `a` and `b` carry: progress done and total, or a job number and
- * 1 on failure. `text` carries a preview, a transcript or an error, and is only
- * valid for the duration of the call. */
+/* Progress carries done and total in a and b. A preview carries the take
+ * number from begin in a. Done carries the job number in a and 1 on failure
+ * in b. The text is valid for the duration of the callback. */
 enum {
   SeeEventDownloading = 0,
   SeeEventLoading = 1,
@@ -23,9 +23,10 @@ enum {
 typedef void (*SeeCallback)(void *context, int32_t kind, uint64_t a, uint64_t b, const char *text);
 
 /* Downloads the model if it is missing, loads it, and warms it, on its own
- * thread. Events arrive on another thread. Call once per process. */
+ * thread. Events arrive on another thread. Release a failed engine before retrying. */
 SeeEngine *see_engine_start(const char *models, const char *dictionary, bool previews,
                             void *context, SeeCallback callback);
+void see_engine_release(SeeEngine *engine);
 
 /* One take: begin, any number of feeds, then finish or discard. Samples are
  * 16 kHz mono floats and are copied before the call returns. */
