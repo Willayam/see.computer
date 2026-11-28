@@ -601,6 +601,110 @@ describe("public reads", () => {
     expect(invalid.headers.get("Content-Range")).toBe("bytes */10");
   });
 
+  test("a file replaced during a read is served as one version", async () => {
+    const [older, newer] = ['{"shots":[]}', '{"shots":[{"file":"shots/001.jpg"}]}'];
+    for (const readFirst of [false, true]) {
+      const { service, bucket } = fixture();
+      const shareId = id(16);
+      await create(service, shareId);
+      await upload(service, shareId, "live.json", older);
+      const reading = bucket.hold("get", `${shareId}/live.json`, { after: readFirst });
+      const pending = service.fetch(new Request(`${origin}/s/${shareId}/live.json`));
+      await reading.reached;
+      expect((await upload(service, shareId, "live.json", newer)).status).toBe(201);
+      reading.release();
+      const response = await pending;
+      const body = await response.text();
+      expect(response.status).toBe(200);
+      expect(body).toBe(readFirst ? older : newer);
+      expect(response.headers.get("Content-Length")).toBe(String(body.length));
+      expect(response.headers.get("ETag")).toBe(`"${await sha256Hex(body)}"`);
+    }
+  });
+
+  test("ranges and validators follow a replaced file", async () => {
+    const { service } = fixture();
+    const shareId = id(17);
+    await create(service, shareId);
+    const url = `${origin}/s/${shareId}/live/001/index.m3u8`;
+    await upload(service, shareId, "live/001/index.m3u8", "#EXTM3U\n#EXTINF:1,\nsegment-000.m4s\n");
+    const stale = (await service.fetch(new Request(url, { method: "HEAD" }))).headers.get("ETag");
+    const playlist = "#EXTM3U\n#EXTINF:1,\nsegment-000.m4s\n#EXTINF:1,\nsegment-001.m4s\n";
+    await upload(service, shareId, "live/001/index.m3u8", playlist);
+
+    const head = await service.fetch(new Request(url, { method: "HEAD" }));
+    expect(head.headers.get("Content-Length")).toBe(String(playlist.length));
+    const fresh = head.headers.get("ETag");
+    expect(fresh).not.toBe(stale);
+    const changed = await service.fetch(new Request(url, { headers: { "If-None-Match": stale } }));
+    expect(changed.status).toBe(200);
+    expect(await changed.text()).toBe(playlist);
+    expect((await service.fetch(new Request(url, { headers: { "If-None-Match": fresh } }))).status).toBe(304);
+    const tail = await service.fetch(new Request(url, { headers: { Range: "bytes=-16" } }));
+    expect(tail.status).toBe(206);
+    expect(tail.headers.get("Content-Range")).toBe(`bytes ${playlist.length - 16}-${playlist.length - 1}/${playlist.length}`);
+    expect(tail.headers.get("Content-Length")).toBe("16");
+    expect(await tail.text()).toBe(playlist.slice(-16));
+    const invalid = await service.fetch(new Request(url, { headers: { Range: `bytes=${playlist.length}-` } }));
+    expect(invalid.status).toBe(416);
+    expect(invalid.headers.get("Content-Range")).toBe(`bytes */${playlist.length}`);
+  });
+
+  test("a read in flight when the share is canceled is not served", async () => {
+    const { service, bucket } = fixture();
+    const shareId = id(18);
+    await create(service, shareId);
+    await upload(service, shareId, "take.md", "# Take");
+    const reading = bucket.hold("get", `${shareId}/take.md`, { after: true });
+    const pending = service.fetch(new Request(`${origin}/s/${shareId}/take.md`));
+    await reading.reached;
+    const deleting = service.fetch(internalRequest(`/api/shares/${shareId}`, { method: "DELETE" }));
+    reading.release();
+    expect((await pending).status).toBe(404);
+    expect((await deleting).status).toBe(204);
+  });
+
+  test("absolute Markdown is built from the committed take.md", async () => {
+    const { service, bucket } = fixture();
+    const shareId = id(19);
+    await create(service, shareId);
+    await upload(service, shareId, "take.md", "![shot](shots/001.jpg)");
+    const url = `${origin}/s/${shareId}/take.md?absolute=1`;
+    const absolute = `![shot](${origin}/s/${shareId}/shots/001.jpg)`;
+    const full = await service.fetch(new Request(url));
+    expect(await full.text()).toBe(absolute);
+    expect(full.headers.get("Content-Length")).toBe(String(absolute.length));
+    const head = await service.fetch(new Request(url, { method: "HEAD" }));
+    expect(head.headers.get("ETag")).toBe(full.headers.get("ETag"));
+    expect(await (await service.fetch(new Request(url, { headers: { Range: "bytes=0-7" } }))).text()).toBe("![shot](");
+
+    // Storage holds a replacement that the coordinator has not committed.
+    const reading = bucket.hold("get", `${shareId}/take.md`);
+    const pending = service.fetch(new Request(url));
+    await reading.reached;
+    await bucket.put(`${shareId}/take.md`, new TextEncoder().encode("[unfinished](shots/002.jpg)"));
+    reading.release();
+    expect((await pending).status).toBe(404);
+  });
+
+  test("first-beta shares keep their 32-character IDs, packaged video and ranges", async () => {
+    const { service } = fixture();
+    const legacy = "0123456789abcdef0123456789abcdef";
+    expect((await create(service, legacy)).status).toBe(201);
+    await upload(service, legacy, "fullclip.mp4", "abcdefghij");
+    await upload(service, legacy, "clips/001/clip.mov", "quicktime");
+    expect((await service.fetch(new Request(`${origin}/s/${legacy}/`))).status).toBe(200);
+    const probe = await service.fetch(new Request(`${origin}/s/${legacy}/fullclip.mp4`, { method: "HEAD" }));
+    expect(probe.status).toBe(200);
+    expect(probe.headers.get("Content-Length")).toBe("10");
+    const part = await service.fetch(new Request(`${origin}/s/${legacy}/fullclip.mp4`, { headers: { Range: "bytes=0-1" } }));
+    expect(part.status).toBe(206);
+    expect(await part.text()).toBe("ab");
+    const movie = await service.fetch(new Request(`${origin}/s/${legacy}/clips/001/clip.mov`));
+    expect(movie.headers.get("Content-Type")).toBe("video/quicktime");
+    expect(await movie.text()).toBe("quicktime");
+  });
+
   test("status and viewer stay available while uploading without unsafe DOM sinks", async () => {
     const { service } = fixture();
     const shareId = id(12);

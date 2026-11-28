@@ -582,18 +582,37 @@ export class ShareCoordinatorService {
     });
   }
 
+  publicFile(id, path) {
+    if (!publicState(this.metadata.getShare(id), this.now())) return null;
+    const file = this.metadata.getFile(id, path);
+    return file?.committed_sha ? file : null;
+  }
+
   async asset(request, id, rawPath) {
     const valid = validateRelativePath(rawPath);
     if (!valid) return notFound();
-    const share = this.metadata.getShare(id);
-    if (!publicState(share, this.now())) return notFound();
-    const file = this.metadata.getFile(id, valid.path);
-    if (!file?.committed_sha) return notFound();
+    const absolute = valid.path === "take.md" && new URL(request.url).searchParams.get("absolute") === "1";
     const key = `${id}/${valid.path}`;
-    const object = await this.bucket.head(key);
-    if (!object || object.size !== file.committed_size || object.customMetadata?.sha256 !== file.committed_sha) return notFound();
-    const url = new URL(request.url);
-    if (valid.path === "take.md" && url.searchParams.get("absolute") === "1") return this.absoluteMarkdown(request, id);
+    // One storage call returns the validator, the length and the bytes of one
+    // object version. A replacement committed during that call is read again.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const file = this.publicFile(id, valid.path);
+      if (!file) return notFound();
+      const range = absolute ? null : parseByteRange(request.headers.get("Range"), file.committed_size);
+      const object = absolute || (request.method === "GET" && range !== false)
+        ? await this.bucket.get(key, range ? { range: { offset: range.offset, length: range.length } } : undefined)
+        : await this.bucket.head(key);
+      const latest = this.publicFile(id, valid.path);
+      if (latest && object?.size === file.committed_size && object.customMetadata?.sha256 === file.committed_sha) {
+        return absolute ? this.absoluteMarkdown(request, id, object) : this.stored(request, valid, object, range);
+      }
+      await object?.body?.cancel();
+      if (!latest || latest.committed_sha === file.committed_sha) return notFound();
+    }
+    return notFound();
+  }
+
+  async stored(request, valid, object, range) {
     const headers = {
       "Content-Type": valid.contentType,
       "Accept-Ranges": "bytes",
@@ -602,24 +621,19 @@ export class ShareCoordinatorService {
       "Content-Length": String(object.size),
     };
     if (etagMatches(request.headers.get("If-None-Match"), object.httpEtag)) {
+      await object.body?.cancel();
       delete headers["Content-Length"];
       return response(null, 304, headers);
     }
-    const range = parseByteRange(request.headers.get("Range"), object.size);
     if (range === false) return response(null, 416, { "Content-Range": `bytes */${object.size}`, "Accept-Ranges": "bytes", "Cache-Control": "no-store" });
     if (range) {
       headers["Content-Length"] = String(range.length);
       headers["Content-Range"] = `bytes ${range.offset}-${range.end}/${object.size}`;
     }
-    if (request.method === "HEAD") return response(null, range ? 206 : 200, headers);
-    const stored = await this.bucket.get(key, range ? { range: { offset: range.offset, length: range.length } } : undefined);
-    if (!stored) return notFound();
-    return response(stored.body, range ? 206 : 200, headers);
+    return response(request.method === "HEAD" ? null : object.body, range ? 206 : 200, headers);
   }
 
-  async absoluteMarkdown(request, id) {
-    const stored = await this.bucket.get(`${id}/take.md`);
-    if (!stored) return notFound();
+  async absoluteMarkdown(request, id, stored) {
     const source = await new Response(stored.body).text();
     const body = rewriteMarkdownPaths(source, `${this.publicOrigin}/s/${id}/`);
     const bytes = new TextEncoder().encode(body);

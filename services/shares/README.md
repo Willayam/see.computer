@@ -80,7 +80,7 @@ DELETE /api/shares/<id>
 Authorization: Bearer <installation secret>
 ```
 
-Public files support `GET`, `HEAD`, one byte range, `ETag`, and `If-None-Match`. `take.md?absolute=1` rewrites allowlisted relative Markdown file links to this share's absolute public URLs. It does not render uploaded Markdown as HTML.
+Public files support `GET`, `HEAD`, one byte range, `ETag`, and `If-None-Match`. A response takes its validator, its length and its bytes from one R2 read, so a file replaced during the request is served as one version. `take.md?absolute=1` rewrites allowlisted relative Markdown file links to this share's absolute public URLs. It does not render uploaded Markdown as HTML.
 
 ## Test
 
