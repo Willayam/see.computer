@@ -56,6 +56,8 @@ final class KeyboardViewController: UIInputViewController {
     private var takeField: UUID?
     /// An unreadable `state.json` lists no takes, which must not read as every take having ended.
     private var stateWasRead = false
+    /// When the take's field first read as emptied. See `endTakeIfFieldWasSent`.
+    private var emptiedAt: Date?
     /// When this appearance committed a mark that an earlier keyboard left. See `strandedMarkIsCommitted`.
     private var strandedMarkCommitted: Date?
     private let offerIcon = UIImageView(image: UIImage(systemName: "text.insert"))
@@ -86,6 +88,8 @@ final class KeyboardViewController: UIInputViewController {
     private static let hostAnswers: TimeInterval = 1
     /// How long a host gets to commit a mark before the keyboard edits the words in it.
     private static let commitTakes: TimeInterval = 0.5
+    /// How long a field has to stay empty before the keyboard takes it for sent.
+    private static let emptyHolds: TimeInterval = 0.25
 
     private struct Placing {
         let take: Take
@@ -158,7 +162,7 @@ final class KeyboardViewController: UIInputViewController {
         // A take goes on while the user looks elsewhere. The Dynamic Island shows it
         // and can finish it. Sending the words is the one way of leaving that ends it.
         // A controller iOS has already replaced has no field left to speak for.
-        if Self.shown === self, !endTakeIfFieldWasSent(), state.phase == .recording, !takeWasSent {
+        if Self.shown === self, !endTakeIfFieldWasSent(leaving: true), state.phase == .recording, !takeWasSent {
             Diagnostics.log("away_sent")
             Signals.post(.away)
         }
@@ -318,19 +322,38 @@ final class KeyboardViewController: UIInputViewController {
 
     /// A chat app empties its field when it sends, live words included. Only the
     /// field can say so, because a keyboard never sees the send button.
-    private func endTakeIfFieldWasSent() -> Bool {
+    private func endTakeIfFieldWasSent(leaving: Bool = false) -> Bool {
         let proxy = textDocumentProxy
         guard state.phase == .recording || state.phase == .transcribing, !takeWasSent, let start = state.start,
             isIn(start), !proxy.hasText,
             proxy.selectedText?.isEmpty != false, proxy.documentContextBeforeInput?.isEmpty != false,
             proxy.documentContextAfterInput?.isEmpty != false
-        else { return false }
+        else {
+            emptiedAt = nil
+            return false
+        }
         let draft = Ledger.read()[start.id]?.draft
         // Only words the host showed can have gone out with the field.
         let marked = draft.map { wordsInField && markHeld && ownsMark($0) } ?? false
         // After an edit the keyboard knows what the field held, so an empty field is the host's doing.
         let edited = manualEdit?.startID == start.id && manualEdit?.target?.hasText == true
-        guard marked || edited else { return false }
+        guard marked || edited else {
+            emptiedAt = nil
+            return false
+        }
+        // iOS can report a field as empty for a moment while the user switches apps. A
+        // field that was sent is still empty when the keyboard looks again, or as it hides.
+        let held = emptiedAt.map { Date().timeIntervalSince($0) >= Self.emptyHolds } ?? false
+        guard leaving || (isActive && held) else {
+            if emptiedAt == nil {
+                emptiedAt = Date()
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.emptyHolds) { [weak self] in
+                    _ = self?.endTakeIfFieldWasSent()
+                }
+            }
+            return false
+        }
+        emptiedAt = nil
         Diagnostics.log("sent_seen", ["phase": state.phase.rawValue, "chars": draft?.text.count ?? 0, "active": isActive])
         takeWasSent = true
         markedDraft = nil
@@ -436,8 +459,10 @@ final class KeyboardViewController: UIInputViewController {
         }
         let preview = Bridge.read(DictationPreview.self, "words.json")
         let words = preview?.startID == state.start?.id ? preview?.words ?? "" : ""
-        if wordsInField, state.phase == .recording, !takeWasSent, isActive, fieldHasSettled, strandedMarkIsCommitted(),
-            !words.isEmpty, !putInField(words)
+        // A field that has just read as emptied may have been sent. Until that is settled,
+        // new words must not turn the take into one whose words are on the keyboard.
+        if wordsInField, state.phase == .recording, !takeWasSent, isActive, fieldHasSettled, emptiedAt == nil,
+            strandedMarkIsCommitted(), !words.isEmpty, !putInField(words)
         {
             Diagnostics.log("words_left_field", ["chars": words.count])
             if manualEdit == nil, let start = state.start, start.target.selected == nil, isIn(start) {
