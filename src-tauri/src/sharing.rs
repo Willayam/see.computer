@@ -1,15 +1,22 @@
 //! Opt-in, disk-backed uploads. Capture and transcription never wait for HTTP.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HOST: &str = "https://see.computer";
 const MAX_OBJECT: u64 = 8 * 1024 * 1024;
+/// How long one job uploads before it saves its progress and another job gets a turn.
+const TURN: Duration = Duration::from_secs(1);
+const MISSING: &str = "A recording file is missing. The share is incomplete.";
+
+/// Upload name to the stamp of the version the share holds.
+type Sent = BTreeMap<String, String>;
 
 #[derive(Clone)]
 pub struct Sharing(Arc<Shared>);
@@ -19,6 +26,11 @@ struct Shared {
     host: String,
     state: Mutex<State>,
     wake: Condvar,
+    /// Orders writes of the queue and link files, and remembers the link state
+    /// last written for each job. Lock it before `state` and never while
+    /// holding `state`, so reading or changing the state never waits on a file
+    /// sync.
+    disk: Mutex<BTreeMap<String, &'static str>>,
 }
 
 struct State {
@@ -36,7 +48,7 @@ struct Job {
     cancelled: bool,
     ready: bool,
     error: Option<String>,
-    sent: BTreeMap<String, String>,
+    sent: Sent,
     #[serde(default)]
     attempts: u32,
     #[serde(default)]
@@ -62,6 +74,31 @@ struct Asset {
 enum Source {
     File(PathBuf),
     Bytes(Vec<u8>),
+}
+
+/// What one walk of a take folder found to upload.
+struct Folder {
+    /// Upload name and local path of each media file, init segments first.
+    media: Vec<(String, PathBuf)>,
+    playlists: Vec<Playlist>,
+}
+
+struct Playlist {
+    asset: Asset,
+    /// The init and media files it lists. `None` until it lists any media.
+    parts: Option<Vec<String>>,
+}
+
+/// The finished take's Markdown and transcript as the share serves them.
+struct Documents {
+    assets: [Asset; 2],
+    /// The media the transcript refers to. `None` when a capture names no file.
+    captured: Option<Vec<String>>,
+}
+
+struct Turn {
+    started: Instant,
+    worked: bool,
 }
 
 impl Sharing {
@@ -109,6 +146,7 @@ impl Sharing {
                 message: String::new(),
             }),
             wake: Condvar::new(),
+            disk: Mutex::new(BTreeMap::new()),
         }))
     }
 
@@ -149,14 +187,16 @@ impl Sharing {
 
     /// Called only for a capture, never for plain dictation. Generates the URL locally.
     pub fn begin(&self, dir: &Path) {
-        let mut state = self.0.state.lock().unwrap();
-        if !state.enabled || state.jobs.values().any(|job| job.dir == dir) {
-            return;
+        let mut links = self.0.disk.lock().unwrap();
+        {
+            let state = self.0.state.lock().unwrap();
+            if !state.enabled || state.jobs.values().any(|job| job.dir == dir) {
+                return;
+            }
         }
         let result = (|| -> io::Result<Job> {
-            let id = random_id()?;
             let job = Job {
-                id,
+                id: random_id()?,
                 dir: dir.to_owned(),
                 created: false,
                 finalized: false,
@@ -168,21 +208,42 @@ impl Sharing {
                 retry_at: 0,
                 created_at: epoch(),
             };
-            self.save(&job)?;
-            self.write_link(&job)?;
+            self.write(&mut links, &job)?;
             Ok(job)
         })();
-        match result {
-            Ok(job) => {
-                state.jobs.insert(job.id.clone(), job);
+        {
+            let mut state = self.0.state.lock().unwrap();
+            match result {
+                Ok(job) => {
+                    state.jobs.insert(job.id.clone(), job);
+                }
+                Err(error) => state.message = format!("Could not queue share: {error}"),
             }
-            Err(error) => state.message = format!("Could not queue share: {error}"),
         }
         self.0.wake.notify_one();
     }
 
+    /// Marks the take finished. A take that refers to a file it does not have
+    /// fails here, before the paste reads the link, so the paste keeps the
+    /// local path.
     pub fn finalize(&self, dir: &Path) {
-        self.change_dir(dir, |job| job.finalized = true);
+        let sent = {
+            let state = self.0.state.lock().unwrap();
+            let job = state.jobs.values().find(|job| job.dir == dir);
+            job.map(|job| job.sent.clone())
+        };
+        let Some(sent) = sent else { return };
+        let failure = Folder::finished(dir, &sent)
+            .err()
+            .filter(|error| error.permanent)
+            .map(|error| error.message);
+        if let Some(message) = &failure {
+            self.0.state.lock().unwrap().message.clone_from(message);
+        }
+        self.change_dir(dir, |job| {
+            job.finalized = true;
+            job.error = job.error.take().or(failure);
+        });
     }
 
     pub fn cancel(&self, dir: Option<&Path>) {
@@ -195,60 +256,77 @@ impl Sharing {
     }
 
     pub fn retry(&self) {
-        let mut state = self.0.state.lock().unwrap();
-        state.message.clear();
-        for job in state
-            .jobs
-            .values_mut()
-            .filter(|job| !job.ready && !job.cancelled)
-        {
-            job.error = None;
-            job.retry_at = 0;
-            job.attempts = 0;
-            let _ = self.save(job);
-            let _ = self.write_link(job);
+        let retried: Vec<String> = {
+            let mut state = self.0.state.lock().unwrap();
+            state.message.clear();
+            let waiting = state.jobs.values_mut().filter(|j| !j.ready && !j.cancelled);
+            waiting
+                .map(|job| {
+                    job.error = None;
+                    job.retry_at = 0;
+                    job.attempts = 0;
+                    job.id.clone()
+                })
+                .collect()
+        };
+        for id in retried {
+            let _ = self.persist(&id);
         }
         self.0.wake.notify_one();
     }
 
     pub fn revoke_latest(&self) {
-        let mut state = self.0.state.lock().unwrap();
-        if let Some(job) = state
-            .jobs
-            .values_mut()
-            .filter(|j| !j.cancelled)
-            .max_by(|a, b| a.dir.cmp(&b.dir))
-        {
-            job.cancelled = true;
-            job.retry_at = 0;
-            let _ = self.save(job);
-            let _ = self.write_link(job);
-            state.message = "Removing shared link…".to_owned();
+        let revoked = {
+            let mut state = self.0.state.lock().unwrap();
+            let latest = state.jobs.values_mut().filter(|j| !j.cancelled);
+            let id = latest.max_by(|a, b| a.dir.cmp(&b.dir)).map(|job| {
+                job.cancelled = true;
+                job.retry_at = 0;
+                job.id.clone()
+            });
+            if id.is_some() {
+                state.message = "Removing shared link…".to_owned();
+            }
+            id
+        };
+        if let Some(id) = revoked {
+            let _ = self.persist(&id);
         }
         self.0.wake.notify_one();
     }
 
     fn change_dir(&self, dir: &Path, change: impl FnOnce(&mut Job)) {
-        let mut state = self.0.state.lock().unwrap();
-        if let Some(job) = state.jobs.values_mut().find(|job| job.dir == dir) {
-            change(job);
-            let _ = self.save(job);
-            let _ = self.write_link(job);
+        let changed = {
+            let mut state = self.0.state.lock().unwrap();
+            let job = state.jobs.values_mut().find(|job| job.dir == dir);
+            job.map(|job| {
+                change(job);
+                job.id.clone()
+            })
+        };
+        if let Some(id) = changed {
+            let _ = self.persist(&id);
         }
         self.0.wake.notify_one();
     }
 
-    fn save(&self, job: &Job) -> io::Result<()> {
+    /// Saves the job as it is now. Each save reads the job after it has the
+    /// disk, so a file never goes back to an older state.
+    fn persist(&self, id: &str) -> io::Result<()> {
+        let mut links = self.0.disk.lock().unwrap();
+        let job = self.0.state.lock().unwrap().jobs.get(id).cloned();
+        match job {
+            Some(job) => self.write(&mut links, &job),
+            None => Ok(()),
+        }
+    }
+
+    /// Writes the queue file, and the link file when its state changed.
+    fn write(&self, links: &mut BTreeMap<String, &'static str>, job: &Job) -> io::Result<()> {
         write_private(
             &self.0.root.join(format!("{}.json", job.id)),
             &serde_json::to_vec(job)?,
-        )
-    }
-
-    fn write_link(&self, job: &Job) -> io::Result<()> {
-        if !job.dir.is_dir() {
-            return Ok(());
-        }
+        )?;
         let state = if job.cancelled {
             "removed"
         } else if job.error.is_some() {
@@ -258,6 +336,9 @@ impl Sharing {
         } else {
             "uploading"
         };
+        if links.get(&job.id) == Some(&state) || !job.dir.is_dir() {
+            return Ok(());
+        }
         write_private(
             &job.dir.join("share.json"),
             &serde_json::to_vec(&Link {
@@ -265,7 +346,9 @@ impl Sharing {
                 state: state.to_owned(),
                 expires_at: job.created_at + 30 * 24 * 60 * 60,
             })?,
-        )
+        )?;
+        links.insert(job.id.clone(), state);
+        Ok(())
     }
 
     fn run(&self) {
@@ -276,46 +359,53 @@ impl Sharing {
             .build()
             .into();
         loop {
-            let jobs: Vec<Job> = {
-                let state = self.0.state.lock().unwrap();
-                state
-                    .jobs
-                    .values()
-                    .filter(|job| {
-                        job.retry_at <= epoch()
-                            && (job.cancelled
-                                || (state.enabled && !job.ready && job.error.is_none()))
-                    })
-                    .cloned()
-                    .collect()
-            };
             let mut progress = false;
-            for mut job in jobs {
+            for mut job in self.due() {
                 if !job.dir.is_dir() {
                     job.cancelled = true;
                 }
-                match self.tick(&agent, &job) {
-                    Ok(worked) => progress |= worked,
-                    Err(error) => {
-                        let mut state = self.0.state.lock().unwrap();
-                        state.message = error.message.clone();
-                        if let Some(current) = state.jobs.get_mut(&job.id) {
-                            current.attempts = current.attempts.saturating_add(1);
-                            current.retry_at = epoch() + (1_u64 << current.attempts.min(5));
-                            if error.permanent && !current.cancelled {
-                                current.error = Some(error.message);
-                            }
-                            let _ = self.save(current);
-                            let _ = self.write_link(current);
-                        }
-                    }
-                }
+                progress |= self.step(&agent, &job);
             }
             if !progress {
                 let state = self.0.state.lock().unwrap();
                 let _ = self.0.wake.wait_timeout(state, Duration::from_millis(200));
             }
         }
+    }
+
+    /// The jobs whose turn has come. A cancel is due even while sharing is off.
+    fn due(&self) -> Vec<Job> {
+        let state = self.0.state.lock().unwrap();
+        state
+            .jobs
+            .values()
+            .filter(|job| {
+                job.retry_at <= epoch()
+                    && (job.cancelled || (state.enabled && !job.ready && job.error.is_none()))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// One turn for a job, with its failure recorded. Returns whether it made progress.
+    fn step(&self, agent: &ureq::Agent, job: &Job) -> bool {
+        let error = match self.tick(agent, job) {
+            Ok(worked) => return worked,
+            Err(error) => error,
+        };
+        {
+            let mut state = self.0.state.lock().unwrap();
+            state.message.clone_from(&error.message);
+            if let Some(current) = state.jobs.get_mut(&job.id) {
+                current.attempts = current.attempts.saturating_add(1);
+                current.retry_at = epoch() + (1_u64 << current.attempts.min(5));
+                if error.permanent && !current.cancelled {
+                    current.error = Some(error.message);
+                }
+            }
+        }
+        let _ = self.persist(&job.id);
+        false
     }
 
     fn allowed(&self, id: &str) -> bool {
@@ -332,9 +422,13 @@ impl Sharing {
             // DELETE is retried even while sharing is off. It never uploads content.
             // Always send it: a create response may have been lost before local persistence.
             self.request(agent, "DELETE", job, "", &[])?;
-            let mut state = self.0.state.lock().unwrap();
-            state.jobs.remove(&job.id);
-            state.message.clear();
+            let mut links = self.0.disk.lock().unwrap();
+            {
+                let mut state = self.0.state.lock().unwrap();
+                state.jobs.remove(&job.id);
+                state.message.clear();
+            }
+            links.remove(&job.id);
             let _ = std::fs::remove_file(self.0.root.join(format!("{}.json", job.id)));
             let _ = std::fs::remove_dir_all(self.0.root.join(&job.id));
             return Ok(true);
@@ -347,60 +441,118 @@ impl Sharing {
             self.update(&job.id, |j| j.created = true)?;
             return Ok(true);
         }
-        let assets = self.assets(job)?;
-        for asset in &assets {
-            if job.sent.get(&asset.name) == Some(&asset.stamp) {
-                continue;
+        let mut sent = Cow::Borrowed(&job.sent);
+        let outcome = self.upload(agent, job, &mut sent);
+        // The uploads of this turn reach the queue file in one write. A crash
+        // before it sends them again, and the service accepts the same bytes twice.
+        let saved = match sent {
+            Cow::Owned(_) => self.persist(&job.id),
+            Cow::Borrowed(_) => Ok(()),
+        };
+        let worked = outcome?;
+        saved?;
+        Ok(worked)
+    }
+
+    /// Sends what one walk of the take folder found, in dependency order, and
+    /// publishes a finished take once nothing is left.
+    fn upload(
+        &self,
+        agent: &ureq::Agent,
+        job: &Job,
+        sent: &mut Cow<Sent>,
+    ) -> Result<bool, UploadError> {
+        // Media can still arrive while the take records. Once it is finished,
+        // a file it refers to and does not have will never come.
+        let (folder, documents) = if job.finalized {
+            let (folder, documents) = Folder::finished(&job.dir, sent)?;
+            (folder, Some(documents))
+        } else {
+            (Folder::read(&job.dir, false)?, None)
+        };
+        let mut turn = Turn {
+            started: Instant::now(),
+            worked: false,
+        };
+        for (name, path) in &folder.media {
+            let asset = self.media(job, name, path, sent)?;
+            if !self.send(agent, job, &asset, sent, &mut turn)? {
+                return Ok(turn.worked);
             }
-            if !self.allowed(&job.id) {
-                return Ok(false);
-            }
-            let bytes = match &asset.source {
-                Source::Bytes(bytes) => bytes.clone(),
-                Source::File(path) => read_bounded(path)?,
-            };
+        }
+        for playlist in &folder.playlists {
             // A playlist can only refer to segments that have reached R2.
-            if asset.name.ends_with(".m3u8") && !playlist_uploaded(&asset.name, &bytes, &job.sent) {
-                continue;
+            if playlist.lists_only(|part| sent.contains_key(part))
+                && !self.send(agent, job, &playlist.asset, sent, &mut turn)?
+            {
+                return Ok(turn.worked);
             }
-            self.request(agent, "PUT", job, &asset.name, &bytes)?;
-            self.update(&job.id, |j| {
-                j.sent.insert(asset.name.clone(), asset.stamp.clone());
-            })?;
+        }
+        let live = folder.live_manifest(sent)?;
+        if !self.send(agent, job, &live, sent, &mut turn)? {
+            return Ok(turn.worked);
+        }
+        let Some(documents) = documents else {
+            return Ok(turn.worked);
+        };
+        for asset in &documents.assets {
+            if !self.send(agent, job, asset, sent, &mut turn)? {
+                return Ok(turn.worked);
+            }
+        }
+        if !self.allowed(&job.id) {
+            return Ok(turn.worked);
+        }
+        self.request(agent, "POST", job, "complete", &[])?;
+        self.update(&job.id, |j| j.ready = true)?;
+        let _ = std::fs::remove_dir_all(self.0.root.join(&job.id));
+        Ok(true)
+    }
+
+    /// Uploads the asset unless the share already holds this version. `false`
+    /// ends the turn: the job was paused or canceled, or its time is up.
+    fn send(
+        &self,
+        agent: &ureq::Agent,
+        job: &Job,
+        asset: &Asset,
+        sent: &mut Cow<Sent>,
+        turn: &mut Turn,
+    ) -> Result<bool, UploadError> {
+        if sent.get(&asset.name) == Some(&asset.stamp) {
             return Ok(true);
         }
-        if job.finalized
-            && assets
-                .iter()
-                .all(|a| job.sent.get(&a.name) == Some(&a.stamp))
-        {
-            if !manifest_uploaded(&assets, &job.sent) {
-                return Err(UploadError::permanent(
-                    "A recording file is missing. The share is incomplete.",
-                ));
-            }
-            if !self.allowed(&job.id) {
-                return Ok(false);
-            }
-            self.request(agent, "POST", job, "complete", &[])?;
-            self.update(&job.id, |j| j.ready = true)?;
-            let _ = std::fs::remove_dir_all(self.0.root.join(&job.id));
-            return Ok(true);
+        if (turn.worked && turn.started.elapsed() >= TURN) || !self.allowed(&job.id) {
+            return Ok(false);
         }
-        Ok(false)
+        let bytes = match &asset.source {
+            Source::Bytes(bytes) => Cow::Borrowed(bytes.as_slice()),
+            Source::File(path) => Cow::Owned(read_bounded(path)?),
+        };
+        self.request(agent, "PUT", job, &asset.name, &bytes)?;
+        sent.to_mut()
+            .insert(asset.name.clone(), asset.stamp.clone());
+        self.change(&job.id, |j| {
+            j.sent.insert(asset.name.clone(), asset.stamp.clone());
+        });
+        turn.worked = true;
+        Ok(true)
     }
 
     fn update(&self, id: &str, change: impl FnOnce(&mut Job)) -> io::Result<()> {
+        self.change(id, change);
+        self.persist(id)
+    }
+
+    /// Changes the job in memory after a request succeeded.
+    fn change(&self, id: &str, change: impl FnOnce(&mut Job)) {
         let mut state = self.0.state.lock().unwrap();
         state.message.clear();
         if let Some(job) = state.jobs.get_mut(id) {
             change(job);
             job.attempts = 0;
             job.retry_at = 0;
-            self.save(job)?;
-            self.write_link(job)?;
         }
-        Ok(())
     }
 
     fn request(
@@ -461,160 +613,231 @@ impl Sharing {
         }
     }
 
-    fn assets(&self, job: &Job) -> Result<Vec<Asset>, UploadError> {
-        let mut files = Vec::new();
-        collect_files(&job.dir.join("live"), &mut files)?;
-        collect_files(&job.dir.join("shots"), &mut files)?;
-        if job.finalized {
-            collect_files(&job.dir.join("clips"), &mut files)?;
+    /// The upload for one media file. A screenshot goes up as a JPEG, converted once.
+    fn media(&self, job: &Job, name: &str, path: &Path, sent: &Sent) -> Result<Asset, UploadError> {
+        let stamp = file_stamp(path)?;
+        if path.extension().is_none_or(|extension| extension != "png") {
+            return Ok(Asset {
+                name: name.to_owned(),
+                source: Source::File(path.to_owned()),
+                stamp,
+            });
         }
-        files.sort();
-        let mut assets = Vec::new();
-        let mut playlists = Vec::new();
-        let mut shots = Vec::new();
-        for path in files {
-            let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-            if !matches!(extension, "mp4" | "m4s" | "m3u8" | "png" | "jpg") {
-                continue;
+        let cache = self.0.root.join(&job.id).join(format!("{stamp}.jpg"));
+        if sent.get(name) != Some(&stamp) && !cache.is_file() {
+            std::fs::create_dir_all(cache.parent().unwrap())?;
+            let status = std::process::Command::new("/usr/bin/sips")
+                .args([
+                    "-Z",
+                    "2560",
+                    "-s",
+                    "format",
+                    "jpeg",
+                    "-s",
+                    "formatOptions",
+                    "85",
+                ])
+                .arg(path)
+                .arg("--out")
+                .arg(&cache)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()?;
+            if !status.success() {
+                return Err(UploadError::temporary(
+                    "Could not compress screenshot. Retrying.",
+                ));
             }
+        }
+        Ok(Asset {
+            name: name.to_owned(),
+            source: Source::File(cache),
+            stamp,
+        })
+    }
+}
+
+impl Folder {
+    fn read(dir: &Path, finalized: bool) -> io::Result<Self> {
+        let mut files = Vec::new();
+        collect_files(&dir.join("live"), &mut files)?;
+        collect_files(&dir.join("shots"), &mut files)?;
+        if finalized {
+            collect_files(&dir.join("clips"), &mut files)?;
+        }
+        let mut folder = Folder {
+            media: Vec::new(),
+            playlists: Vec::new(),
+        };
+        for path in files {
             let name = path
-                .strip_prefix(&job.dir)
+                .strip_prefix(dir)
                 .map_err(io::Error::other)?
                 .to_string_lossy()
                 .into_owned();
-            if extension == "png" && !complete_png(&path) {
-                continue;
-            }
-            if extension == "m3u8" && job.sent.contains_key(&name) {
-                playlists.push(serde_json::json!({"playlist": name}));
-            }
-            let asset = if extension == "png" {
-                let name = name.strip_suffix(".png").unwrap().to_owned() + ".jpg";
-                let stamp = file_stamp(&path)?;
-                let cache = self.0.root.join(&job.id).join(format!("{stamp}.jpg"));
-                if job.sent.get(&name) != Some(&stamp) && !cache.is_file() {
-                    std::fs::create_dir_all(cache.parent().unwrap())?;
-                    let status = std::process::Command::new("/usr/bin/sips")
-                        .args([
-                            "-Z",
-                            "2560",
-                            "-s",
-                            "format",
-                            "jpeg",
-                            "-s",
-                            "formatOptions",
-                            "85",
-                        ])
-                        .arg(&path)
-                        .arg("--out")
-                        .arg(&cache)
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status()?;
-                    if !status.success() {
-                        return Err(UploadError::temporary(
-                            "Could not compress screenshot. Retrying.",
-                        ));
-                    }
+            match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
+                "m3u8" => {
+                    let bytes = read_bounded(&path)?;
+                    folder.playlists.push(Playlist {
+                        parts: playlist_parts(&name, &bytes),
+                        asset: bytes_asset(&name, bytes),
+                    });
                 }
-                Asset {
-                    name,
-                    source: Source::File(cache),
-                    stamp,
+                "png" if complete_png(&path) => {
+                    let jpeg = name.strip_suffix(".png").unwrap().to_owned() + ".jpg";
+                    folder.media.push((jpeg, path));
                 }
-            } else {
-                Asset {
-                    name,
-                    stamp: file_stamp(&path)?,
-                    source: Source::File(path),
-                }
-            };
-            if asset.name.starts_with("shots/") && job.sent.contains_key(&asset.name) {
-                shots.push(serde_json::json!({"file": asset.name}));
+                "mp4" | "m4s" | "jpg" => folder.media.push((name, path)),
+                _ => {}
             }
-            assets.push(asset);
         }
         // Immutable init/media objects precede manifests that reference them.
-        assets.sort_by_key(|a| {
-            (
-                a.name.ends_with(".m3u8"),
-                !a.name.ends_with("init.mp4"),
-                a.name.clone(),
-            )
+        folder
+            .media
+            .sort_by_cached_key(|(name, _)| (!name.ends_with("init.mp4"), name.clone()));
+        folder
+            .playlists
+            .sort_by(|a, b| a.asset.name.cmp(&b.asset.name));
+        Ok(folder)
+    }
+
+    /// Reads a finished take. Fails when it refers to media that can never
+    /// reach the share: a file that is neither in the folder nor uploaded, or
+    /// a playlist that lists one.
+    fn finished(dir: &Path, sent: &Sent) -> Result<(Self, Documents), UploadError> {
+        let folder = Folder::read(dir, true)?;
+        let documents = documents(dir)?;
+        let here: HashSet<&str> = folder.media.iter().map(|(name, _)| name.as_str()).collect();
+        let reachable = |name: &str| sent.contains_key(name) || here.contains(name);
+        let complete = documents.captured.as_ref().is_some_and(|captured| {
+            captured.iter().all(|name| {
+                let playlist = folder.playlists.iter().find(|p| p.asset.name == *name);
+                playlist.map_or_else(
+                    || reachable(name),
+                    |playlist| playlist.lists_only(reachable),
+                )
+            })
         });
-        assets.push(bytes_asset(
+        if !complete {
+            return Err(UploadError::permanent(MISSING));
+        }
+        Ok((folder, documents))
+    }
+
+    /// What the share page shows while the take records.
+    fn live_manifest(&self, sent: &Sent) -> serde_json::Result<Asset> {
+        let clips: Vec<_> = self
+            .playlists
+            .iter()
+            .filter(|playlist| sent.contains_key(&playlist.asset.name))
+            .map(|playlist| serde_json::json!({"playlist": playlist.asset.name}))
+            .collect();
+        let shots: Vec<_> = self
+            .media
+            .iter()
+            .filter(|(name, _)| name.starts_with("shots/") && sent.contains_key(name))
+            .map(|(name, _)| serde_json::json!({"file": name}))
+            .collect();
+        Ok(bytes_asset(
             "live.json",
-            serde_json::to_vec(&serde_json::json!({"clips": playlists, "shots": shots}))?,
-        ));
-        if job.finalized {
-            let mut transcript: serde_json::Value =
-                serde_json::from_slice(&read_bounded(&job.dir.join("transcript.json"))?)?;
-            let mut markdown = String::from_utf8(read_bounded(&job.dir.join("take.md"))?)
-                .map_err(io::Error::other)?;
-            if let Some(captures) = transcript
-                .get_mut("captures")
-                .and_then(serde_json::Value::as_array_mut)
+            serde_json::to_vec(&serde_json::json!({"clips": clips, "shots": shots}))?,
+        ))
+    }
+}
+
+impl Playlist {
+    /// Whether it lists media and `known` holds for every file it lists.
+    fn lists_only(&self, known: impl Fn(&str) -> bool) -> bool {
+        let parts = self.parts.as_ref();
+        parts.is_some_and(|parts| parts.iter().all(|part| known(part)))
+    }
+}
+
+fn documents(dir: &Path) -> Result<Documents, UploadError> {
+    let gone = |error: io::Error| match error.kind() {
+        io::ErrorKind::NotFound => UploadError::permanent(MISSING),
+        _ => error.into(),
+    };
+    let mut transcript: serde_json::Value =
+        serde_json::from_slice(&read_bounded(&dir.join("transcript.json")).map_err(gone)?)?;
+    let mut markdown = String::from_utf8(read_bounded(&dir.join("take.md")).map_err(gone)?)
+        .map_err(io::Error::other)?;
+    let mut captured = None;
+    if let Some(captures) = transcript
+        .get_mut("captures")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        captured = Some(Vec::new());
+        for capture in captures {
+            if let Some(playlist) = capture
+                .get("playlist")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
             {
-                for capture in captures {
-                    if let Some(playlist) = capture
-                        .get("playlist")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                    {
-                        if let Some(video) =
-                            capture.get("video").and_then(serde_json::Value::as_str)
-                        {
-                            markdown = markdown.replace(video, &playlist);
-                        }
-                        capture["video"] = playlist.into();
-                    }
-                    if let Some(file) = capture
-                        .get("file")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                    {
-                        if let Some(base) = file.strip_suffix(".png") {
-                            let jpeg = format!("{base}.jpg");
-                            markdown = markdown.replace(&file, &jpeg);
-                            capture["file"] = jpeg.into();
-                        }
-                    }
+                if let Some(video) = capture.get("video").and_then(serde_json::Value::as_str) {
+                    markdown = markdown.replace(video, &playlist);
+                }
+                capture["video"] = playlist.into();
+            }
+            if let Some(file) = capture
+                .get("file")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+            {
+                if let Some(base) = file.strip_suffix(".png") {
+                    let jpeg = format!("{base}.jpg");
+                    markdown = markdown.replace(&file, &jpeg);
+                    capture["file"] = jpeg.into();
                 }
             }
-            assets.push(bytes_asset("take.md", markdown.into_bytes()));
-            assets.push(bytes_asset(
-                "transcript.json",
-                serde_json::to_vec(&transcript)?,
-            ));
+            let media = capture.get("file").or_else(|| capture.get("video"));
+            let frames = capture
+                .get("frames")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|frame| frame.get("file"));
+            let named: Option<Vec<String>> = std::iter::once(media)
+                .chain(frames)
+                .map(|name| name?.as_str().map(str::to_owned))
+                .collect();
+            match (&mut captured, named) {
+                (Some(all), Some(named)) => all.extend(named),
+                _ => captured = None,
+            }
         }
-        Ok(assets)
     }
+    Ok(Documents {
+        assets: [
+            bytes_asset("take.md", markdown.into_bytes()),
+            bytes_asset("transcript.json", serde_json::to_vec(&transcript)?),
+        ],
+        captured,
+    })
+}
+
+/// The share URL in the text of a `share.json`, when a paste may use it: the
+/// share is ready or uploading, has not expired, and lives on our host.
+pub(crate) fn eligible_url(text: &str) -> Option<String> {
+    let link: Link = serde_json::from_str(text).ok()?;
+    let live = matches!(link.state.as_str(), "ready" | "uploading")
+        && (link.expires_at == 0 || link.expires_at > epoch())
+        && link.url.starts_with(&format!("{HOST}/s/"));
+    live.then_some(link.url)
 }
 
 /// The paste is either the link or the local path, never both. The local
 /// path returns when sharing fails or a link is revoked.
 pub fn paste_link(markdown: &Path, local_paste: String) -> String {
-    let Some(dir) = markdown.parent() else {
-        return local_paste;
-    };
-    let Some(link) = std::fs::read(dir.join("share.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Link>(&b).ok())
-    else {
-        return local_paste;
-    };
-    if !matches!(link.state.as_str(), "ready" | "uploading") {
-        return local_paste;
+    let link = markdown
+        .parent()
+        .and_then(|dir| std::fs::read_to_string(dir.join("share.json")).ok())
+        .and_then(|text| eligible_url(&text));
+    match link {
+        // A queued upload finishes within seconds, so the paste is the link alone.
+        Some(url) => local_paste.replace(&markdown.to_string_lossy().to_string(), &url),
+        None => local_paste,
     }
-    if link.expires_at != 0 && link.expires_at <= epoch() {
-        return local_paste;
-    }
-    // Only links belonging to our host may replace a local path.
-    if !link.url.starts_with(&format!("{HOST}/s/")) {
-        return local_paste;
-    }
-    // A queued upload finishes within seconds, so the paste is the link alone.
-    local_paste.replace(&markdown.to_string_lossy().to_string(), &link.url)
 }
 
 fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
@@ -635,14 +858,13 @@ fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
-fn playlist_uploaded(name: &str, bytes: &[u8], sent: &BTreeMap<String, String>) -> bool {
+/// The init and media files a playlist lists. `None` until it lists any media.
+fn playlist_parts(name: &str, bytes: &[u8]) -> Option<Vec<String>> {
     if !bytes.windows(8).any(|part| part == b"#EXTINF:") {
-        return false;
+        return None;
     }
-    let Some((parent, _)) = name.rsplit_once('/') else {
-        return false;
-    };
-    String::from_utf8_lossy(bytes)
+    let (parent, _) = name.rsplit_once('/')?;
+    let parts = String::from_utf8_lossy(bytes)
         .lines()
         .filter_map(|line| {
             if let Some(map) = line.strip_prefix("#EXT-X-MAP:URI=\"") {
@@ -653,43 +875,9 @@ fn playlist_uploaded(name: &str, bytes: &[u8], sent: &BTreeMap<String, String>) 
                 None
             }
         })
-        .all(|file| sent.contains_key(&format!("{parent}/{file}")))
-}
-
-fn manifest_uploaded(assets: &[Asset], sent: &BTreeMap<String, String>) -> bool {
-    let Some(asset) = assets.iter().find(|a| a.name == "transcript.json") else {
-        return false;
-    };
-    let Source::Bytes(bytes) = &asset.source else {
-        return false;
-    };
-    let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return false;
-    };
-    let Some(captures) = manifest
-        .get("captures")
-        .and_then(serde_json::Value::as_array)
-    else {
-        return false;
-    };
-    captures.iter().all(|capture| {
-        let media = capture
-            .get("file")
-            .or_else(|| capture.get("video"))
-            .and_then(serde_json::Value::as_str);
-        media.is_some_and(|name| sent.contains_key(name))
-            && capture
-                .get("frames")
-                .and_then(serde_json::Value::as_array)
-                .is_none_or(|frames| {
-                    frames.iter().all(|frame| {
-                        frame
-                            .get("file")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|name| sent.contains_key(name))
-                    })
-                })
-    })
+        .map(|file| format!("{parent}/{file}"))
+        .collect();
+    Some(parts)
 }
 
 fn bytes_asset(name: &str, bytes: Vec<u8>) -> Asset {
