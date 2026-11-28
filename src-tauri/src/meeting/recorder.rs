@@ -1,153 +1,305 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, PoisonError};
 use std::thread::JoinHandle;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::meeting::folder::{self, Manifest, State, THEM, YOU};
-use crate::meeting::{holders, processes_of, MeetingApp};
-use crate::mic::{meeting_sink, Block, StreamingResampler};
+use crate::engine::Engine;
+use crate::meeting::folder::{
+    self, CallAudio, Manifest, Microphone, Scope, State, Tracks, THEM, YOU,
+};
+use crate::meeting::holders::{self, AudioProcess};
+use crate::meeting::{processes_of, MeetingApp};
+use crate::mic::{meeting_sink, Block, StreamingResampler, RATE};
 use crate::qos::{self, Class};
+use cpal::StreamInstant;
 
 use super::live::{self, Live};
-use super::tap::{self, SystemTap};
+use super::tap::{self, TapError, Target};
+
+/// The parts of the Mac a recording reaches for, so a test can stand in for them.
+pub trait System: Send + Sync {
+    fn input_time(&self) -> StreamInstant;
+    fn processes(&self) -> Result<Vec<AudioProcess>, String>;
+    /// Dropping the tap stops it and finishes the WAV. The number is the
+    /// wall-clock time of the WAV's first sample, in milliseconds since 1970.
+    fn tap(&self, target: Target, wav: &Path) -> Result<(Box<dyn Send>, i64), TapError>;
+    /// The engine live lines are read with, or why there are none.
+    fn engine(&self) -> Result<Box<dyn Engine>, String>;
+}
+
+pub struct Mac;
+
+impl System for Mac {
+    fn input_time(&self) -> StreamInstant {
+        // CPAL's CoreAudio capture timestamps use the Mac's host clock across device changes.
+        #[link(name = "CoreAudio", kind = "framework")]
+        extern "C" {
+            fn AudioGetCurrentHostTime() -> u64;
+            fn AudioConvertHostTimeToNanos(time: u64) -> u64;
+        }
+        StreamInstant::from_nanos(unsafe { AudioConvertHostTimeToNanos(AudioGetCurrentHostTime()) })
+    }
+
+    fn processes(&self) -> Result<Vec<AudioProcess>, String> {
+        holders::processes().map_err(|error| error.to_string())
+    }
+
+    fn tap(&self, target: Target, wav: &Path) -> Result<(Box<dyn Send>, i64), TapError> {
+        tap::start(target, wav).map(|(tap, at_ms)| (Box::new(tap) as Box<dyn Send>, at_ms))
+    }
+
+    fn engine(&self) -> Result<Box<dyn Engine>, String> {
+        live::model()
+    }
+}
+
+/// The other side of the call, as a recording hears it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Call {
+    Recorded(Scope),
+    /// Only the microphone is recording, and why.
+    Missing(String),
+}
+
+/// Which audio to try for the other side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ask {
+    /// What the recording set out to capture: the meeting app alone, or
+    /// everything for a recording started by hand.
+    Again,
+    /// Everything the Mac plays, when the meeting app alone cannot be heard.
+    Wider,
+}
 
 pub struct Recording {
     folder: PathBuf,
     manifest: Manifest,
-    mic: Option<JoinHandle<io::Result<()>>>,
-    tap: Option<SystemTap>,
-    live: Option<Live>,
+    tracks: Tracks,
+    app: Option<MeetingApp>,
+    system: Arc<dyn System>,
+    mic: JoinHandle<io::Result<()>>,
+    tap: Option<Box<dyn Send>>,
+    live: Live,
+}
+
+pub struct Stopped {
+    pub folder: PathBuf,
+    /// Possibly still in its last pass. `Live::finish` waits for it.
+    pub live: Live,
+    /// What went wrong with the microphone track, if its writer failed.
+    pub lost: Option<String>,
+}
+
+pub(super) fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 pub fn start(
     root: &Path,
     app: Option<MeetingApp>,
-    now_ms: i64,
-) -> io::Result<(Recording, Option<String>)> {
-    let folder = folder::create(root, app.map(|app| app.name), now_ms)?;
+    started_ms: i64,
+    system: Arc<dyn System>,
+) -> io::Result<(Recording, Call)> {
+    let folder = folder::create(root, app.map(|app| app.name), started_ms)?;
     let manifest =
         folder::read(&folder).ok_or_else(|| io::Error::other("meeting manifest missing"))?;
+    let writer = hound::WavWriter::create(
+        folder.join(YOU),
+        hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        },
+    )
+    .map_err(|error| {
+        // Nothing was recorded, so no meeting is left behind to show as one.
+        let _ = std::fs::remove_dir_all(&folder);
+        io::Error::other(error)
+    })?;
     let (tx, rx) = std::sync::mpsc::channel();
-    let wav = folder.join(YOU);
+    let opened_ms = now_ms();
+    let opened = system.input_time();
     let mic = qos::spawn("see-meeting-mic", Class::Upkeep, move || {
-        write_mic(rx, &wav)
+        write_mic(rx, writer, opened)
     });
     *meeting_sink()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tx);
-    let objects = app
-        .map(|app| processes_of(app, &holders::processes().unwrap_or_default()))
-        .unwrap_or_default();
-    let (tap, warning) = match tap::start(&objects, &folder.join(THEM)) {
-        Ok(tap) => (Some(tap), None),
-        Err(error) => (None, Some(error.to_string())),
-    };
-    let live = live::start(folder.clone(), manifest.clone());
-    Ok((
-        Recording {
-            folder,
-            manifest,
-            mic: Some(mic),
-            tap,
-            live: Some(live),
+        .unwrap_or_else(PoisonError::into_inner) = Some(tx);
+    let tracks = Tracks {
+        you: Microphone {
+            offset_ms: opened_ms.saturating_sub(started_ms).max(0) as u64,
         },
-        warning,
-    ))
+        them: None,
+    };
+    let loader = system.clone();
+    let live = live::start(folder.clone(), move || loader.engine());
+    let mut recording = Recording {
+        folder,
+        manifest,
+        tracks,
+        app,
+        system,
+        mic,
+        tap: None,
+        live,
+    };
+    let call = recording.hear(Ask::Again);
+    Ok((recording, call))
 }
 
 impl Recording {
-    pub fn stop(mut self, now_ms: i64) -> io::Result<PathBuf> {
-        if let Some(live) = self.live.take() {
-            live.stop_and_wait();
+    /// Starts recording the other side. A meeting app whose audio cannot be
+    /// found leaves the recording on the microphone alone. Only `Ask::Wider`,
+    /// which the user picks, takes in what every other app plays.
+    pub fn hear(&mut self, ask: Ask) -> Call {
+        if let Some(them) = &self.tracks.them {
+            return Call::Recorded(them.scope);
         }
+        let wav = self.folder.join(THEM);
+        let (scope, started) = match (ask, self.app) {
+            (Ask::Again, Some(app)) => {
+                let processes = match self.system.processes() {
+                    Ok(processes) => processes,
+                    Err(error) => {
+                        return Call::Missing(format!(
+                            "macOS could not list the apps playing audio ({error})"
+                        ))
+                    }
+                };
+                let objects = processes_of(app, &processes);
+                if objects.is_empty() {
+                    return Call::Missing(format!("{} has no audio to record yet", app.name));
+                }
+                (
+                    Scope::App,
+                    self.system.tap(Target::Processes(&objects), &wav),
+                )
+            }
+            (Ask::Wider, _) | (Ask::Again, None) => {
+                (Scope::System, self.system.tap(Target::System, &wav))
+            }
+        };
+        match started {
+            Ok((tap, at_ms)) => {
+                self.tap = Some(tap);
+                self.tracks.them = Some(CallAudio {
+                    scope,
+                    offset_ms: at_ms.saturating_sub(self.manifest.started_ms).max(0) as u64,
+                });
+                // Live lines read the manifest to place this track. Stop
+                // writes it again, so a failure here costs only their timing.
+                let _ = self.save();
+                Call::Recorded(scope)
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&wav);
+                Call::Missing(error.to_string())
+            }
+        }
+    }
+
+    /// Cuts off both inputs first, so nothing said after Stop is recorded,
+    /// and never waits for the live lines: a pass in flight can take seconds.
+    pub fn stop(self, now_ms: i64) -> io::Result<Stopped> {
+        let Recording {
+            folder,
+            mut manifest,
+            tracks,
+            mic,
+            tap,
+            mut live,
+            ..
+        } = self;
         *meeting_sink()
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        let mic = self
-            .mic
-            .take()
-            .unwrap()
-            .join()
-            .map_err(|_| io::Error::other("meeting microphone writer panicked"))?;
-        self.tap.take();
-        mic?;
-        self.manifest.ended_ms = Some(now_ms);
-        self.manifest.state = State::Transcribing;
-        folder::write(&self.folder, &self.manifest)?;
-        Ok(self.folder)
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        drop(tap);
+        let lost = match mic.join() {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(format!("the microphone track stopped early ({error})")),
+            Err(_) => Some("the microphone track stopped early".to_owned()),
+        };
+        live.halt();
+        manifest.ended_ms = Some(now_ms);
+        manifest.state = State::Transcribing;
+        manifest.tracks = Some(tracks);
+        folder::write(&folder, &manifest)?;
+        Ok(Stopped { folder, live, lost })
+    }
+
+    fn save(&self) -> io::Result<()> {
+        folder::write(
+            &self.folder,
+            &Manifest {
+                tracks: Some(self.tracks.clone()),
+                ..self.manifest.clone()
+            },
+        )
     }
 }
 
-fn write_mic(blocks: Receiver<Block>, wav: &Path) -> io::Result<()> {
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: 16_000,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut writer = hound::WavWriter::create(wav, spec).map_err(io::Error::other)?;
-    let mut resampler: Option<StreamingResampler> = None;
-    let mut rate = 0;
-    let mut write = |samples: Vec<f32>| -> io::Result<()> {
-        for sample in samples {
-            writer
-                .write_sample((sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16)
-                .map_err(io::Error::other)?;
-        }
-        Ok(())
-    };
+type MicWav = hound::WavWriter<io::BufWriter<std::fs::File>>;
+
+fn write_samples(writer: &mut MicWav, samples: Vec<f32>) -> io::Result<()> {
+    for sample in samples {
+        writer
+            .write_sample((sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16)
+            .map_err(io::Error::other)?;
+    }
+    Ok(())
+}
+
+fn write_mic(blocks: Receiver<Block>, mut writer: MicWav, opened: StreamInstant) -> io::Result<()> {
+    let mut source = (0, 0);
+    let mut next_capture = opened;
+    let mut resampler = StreamingResampler::new(RATE, RATE);
     for block in blocks {
-        if block.rate == 0 || block.channels == 0 {
+        if block.rate == 0 || block.channels == 0 || block.stream_id < source.0 {
             continue;
         }
-        if rate != block.rate {
-            if let Some(previous) = resampler.as_mut() {
-                write(previous.push(&[], true))?;
+        let frames = block.samples.len() / usize::from(block.channels);
+        let duration = Duration::from_secs_f64(frames as f64 / f64::from(block.rate));
+        let missing_buffer =
+            block.captured_at.saturating_duration_since(next_capture) > duration / 2;
+        let mut trim = 0;
+        if source != (block.stream_id, block.rate) || missing_buffer {
+            write_samples(&mut writer, resampler.push(&[], true))?;
+            let elapsed = block.captured_at.saturating_duration_since(opened);
+            let at = (elapsed.as_secs_f64() * f64::from(RATE)).round() as u64;
+            if at > u64::from(u32::MAX - 44) / 2 {
+                return Err(io::Error::other(
+                    "the microphone track exceeds the WAV size limit",
+                ));
             }
-            resampler = Some(StreamingResampler::new(block.rate, 16_000));
-            rate = block.rate;
+            let end =
+                opened + Duration::from_secs_f64(f64::from(writer.duration()) / f64::from(RATE));
+            let overlap = end.saturating_duration_since(block.captured_at);
+            trim = (overlap.as_secs_f64() * f64::from(block.rate)).round() as usize;
+            if trim >= frames {
+                continue;
+            }
+            for _ in u64::from(writer.duration())..at {
+                writer.write_sample(0_i16).map_err(io::Error::other)?;
+            }
+            resampler = StreamingResampler::new(block.rate, RATE);
+            source = (block.stream_id, block.rate);
         }
-        let mono = crate::mic::downmix(&block.samples, block.channels);
-        write(resampler.as_mut().unwrap().push(&mono, false))?;
+        next_capture = block.captured_at + duration;
+        let mono = crate::mic::downmix(
+            &block.samples[trim * usize::from(block.channels)..],
+            block.channels,
+        );
+        write_samples(&mut writer, resampler.push(&mono, false))?;
     }
-    if let Some(resampler) = resampler.as_mut() {
-        write(resampler.push(&[], true))?;
-    }
+    write_samples(&mut writer, resampler.push(&[], true))?;
     writer.finalize().map_err(io::Error::other)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn writes_stereo_blocks_as_mono_16k() {
-        let wav = std::env::temp_dir().join(format!(
-            "see-meeting-mic-{}.wav",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let (tx, rx) = std::sync::mpsc::channel();
-        for _ in 0..3 {
-            tx.send(Block {
-                samples: vec![0.25; 48_000 * 2 / 3],
-                rate: 48_000,
-                channels: 2,
-            })
-            .unwrap();
-        }
-        drop(tx);
-        write_mic(rx, &wav).unwrap();
-        let mut reader = hound::WavReader::open(&wav).unwrap();
-        let samples = reader
-            .samples::<i16>()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert!((samples.len() as isize - 16_000).abs() <= 1);
-        assert_eq!(samples[8_000], 8192);
-        std::fs::remove_file(wav).unwrap();
-    }
-}
+mod tests;

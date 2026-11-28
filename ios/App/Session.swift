@@ -33,7 +33,7 @@ final class Session: ObservableObject {
     let stats = StatsStore()
     @Published private(set) var state = SessionState()
     @Published private(set) var stage: Engine.Stage = .waiting
-    @Published private(set) var recent: [History.Entry] = History.recent(limit: 30)
+    @Published private(set) var recent: [History.Entry] = History.recent(limit: recentLimit)
     /// The app was opened by the keyboard and could not send the user back.
     @Published var showSwipeBack = false
     @Published var readyFor: ReadyFor {
@@ -46,7 +46,8 @@ final class Session: ObservableObject {
     private let microphone = Microphone()
     private let engine = Engine.shared
     private var micIsOn = false
-    /// Why the microphone went away during a take, shown once that take is done.
+    /// The take being recorded, as the engine numbers it.
+    private var live: LiveTake?
     private var job: UInt64 = 0
     /// The short wait for the last audio block. Cancel can still stop it.
     private var pendingFinish: DispatchWorkItem?
@@ -57,6 +58,7 @@ final class Session: ObservableObject {
     private var keyboardWatch: Timer?
     /// The keyboard hid mid-take on purpose, so its silence is not a crash.
     private var keyboardAway = false
+    private var stateNeedsWrite = false
     /// The user sent the live words, so the finished take must not be typed again.
     private var takeSent = false
     /// Tells a tap from this app's own field apart from one that launched or resumed it.
@@ -70,13 +72,16 @@ final class Session: ObservableObject {
     private static let keyboardGoneAfter: TimeInterval = 3
     /// A take the user walked away from ends after this, in case they forgot it.
     private static let awayLimit: TimeInterval = 5 * 60
+    private static let recentLimit = 30
 
     init(benching: Bool) {
         readyFor =
             UserDefaults.standard.string(forKey: "readyFor").flatMap(ReadyFor.init(rawValue:))
             ?? .oneHour
         var restored = SessionState()
-        restored.take = Bridge.read(SessionState.self, "state.json")?.take
+        // Takes the keyboard has not placed yet outlive the app being killed.
+        restored.takes = Bridge.read(SessionState.self, "state.json")?.takes ?? []
+        restored.model = stage.model
         state = restored
         publish()
         guard !benching else { return }
@@ -90,14 +95,17 @@ final class Session: ObservableObject {
         engine.onDone = { [weak self] job, result in
             MainActor.assumeIsolated { self?.finished(job: job, result) }
         }
-        engine.onPreview = { [weak self] words in
-            MainActor.assumeIsolated { self?.previewed(words) }
+        engine.onPreview = { [weak self] utterance, words in
+            MainActor.assumeIsolated { self?.previewed(words, from: utterance) }
         }
         engine.start(previews: true)
 
         Signals.observe(.ping) { [weak self] in
-            MainActor.assumeIsolated { self?.lastPing = Date() }
             Signals.post(.pong)
+            MainActor.assumeIsolated {
+                self?.lastPing = Date()
+                if self?.stateNeedsWrite == true { self?.sendState() }
+            }
         }
         Signals.observe(.start) { [weak self] in
             MainActor.assumeIsolated {
@@ -217,8 +225,9 @@ final class Session: ObservableObject {
     }
 
     func retryEngine() {
+        guard case .failed = stage else { return }
         Diagnostics.log("engine_retry")
-        stage = .waiting
+        stageChanged(.waiting)
         engine.restart(previews: true)
     }
 
@@ -235,6 +244,11 @@ final class Session: ObservableObject {
             }
             let handoff = Bridge.read(Handoff.self, "handoff.json")
             if wasInFront, let start = handoff?.start {
+                // A model still loading leaves the handoff for the keyboard, which starts once it is ready.
+                guard case .ready = stage else {
+                    Diagnostics.log("handoff_waits_for_model", ["stage": stage])
+                    return
+                }
                 Diagnostics.log("handoff_in_front")
                 Bridge.remove("handoff.json")
                 startTake(start)
@@ -269,9 +283,18 @@ final class Session: ObservableObject {
             return
         }
         guard Date().timeIntervalSince(start.asked) < Bridge.handoffWindow else { return }
-        if case .failed(let message) = stage {
+        switch stage {
+        case .ready:
+            break
+        case .failed(let message):
             Diagnostics.log("start_refused", ["error": message])
             state.problem = message
+            publish()
+            return
+        case .waiting, .loading, .downloading:
+            // The worker reads no audio until the model has loaded. A take begun now would
+            // record unheard and finish long after the user tapped Done.
+            Diagnostics.log("start_refused", ["stage": stage])
             publish()
             return
         }
@@ -282,7 +305,12 @@ final class Session: ObservableObject {
         // iOS can reclaim the memory-mapped weights while the app sits idle. As on
         // the Mac, page them back in during the take rather than after it.
         engine.warm()
-        engine.begin()
+        let utterance = engine.begin()
+        guard utterance != 0 else {
+            settle(problem: "The speech engine stopped.")
+            return
+        }
+        live = LiveTake(start: start, utterance: utterance)
         let engine = self.engine
         let audio = CaptureStats()
         takeAudio = audio
@@ -301,10 +329,14 @@ final class Session: ObservableObject {
     }
 
     /// The take so far, for the keyboard to show. A late pass changes nothing once
-    /// the take has ended.
-    private func previewed(_ words: String) {
-        guard state.phase == .recording, let start = state.start else { return }
-        Bridge.write(DictationPreview(startID: start.id, words: words), "words.json")
+    /// the take has ended, and one the engine began for an earlier take is dropped.
+    private func previewed(_ words: String, from utterance: UInt64) {
+        guard state.phase == .recording else { return }
+        guard let preview = live?.preview(words, from: utterance) else {
+            Diagnostics.log("preview_stale", ["utterance": utterance, "current": live?.utterance ?? 0])
+            return
+        }
+        Bridge.write(preview, "words.json")
         Signals.post(.words)
     }
 
@@ -409,14 +441,18 @@ final class Session: ObservableObject {
                 "transcript_delivered",
                 ["words": trimmed.split(whereSeparator: \.isWhitespace).count, "chars": trimmed.count, "engine_ms": engineMs])
             let now = Date()
-            state.take = Take(
+            let take = Take(
                 id: Int64(now.timeIntervalSince1970 * 1000), text: trimmed, finished: now,
                 sent: takeSent ? true : nil, start: state.start)
-            History.append(trimmed, at: now)
+            state.keep(take, at: now)
+            // The day file first, so words the keyboard cannot place are already in History.
+            let saved = History.append(trimmed, at: now)
+            settle(problem: saved ? nil : "Couldn’t save to History. Copy your words from Recent.")
+            // The keyboard has the take by now. Recent gains this one entry, and the day
+            // files are read again only by the statistics, off the main thread.
+            recent = Array(([History.Entry(at: now, text: trimmed)] + recent).prefix(Self.recentLimit))
             StatsStore.logTake(at: now, seconds: spokenSeconds, text: trimmed)
             stats.refresh()
-            recent = History.recent(limit: 30)
-            settle(problem: nil)
         case .failure(let failure):
             Diagnostics.log("engine_error", ["error": failure.message, "engine_ms": engineMs])
             settle(problem: failure.message)
@@ -487,6 +523,10 @@ final class Session: ObservableObject {
         default: Diagnostics.log("engine_stage", ["stage": newStage])
         }
         stage = newStage
+        if state.model != newStage.model {
+            state.model = newStage.model
+            publish()
+        }
         guard case .failed(let message) = newStage else { return }
         Diagnostics.log("engine_failed", ["error": message, "phase": state.phase.rawValue])
         switch state.phase {
@@ -505,8 +545,24 @@ final class Session: ObservableObject {
     }
 
     private func publish() {
-        Bridge.write(state, "state.json")
-        Signals.post(.changed)
+        sendState()
         Island.show(state)
+    }
+
+    private func sendState() {
+        state.dropExpired(at: Date())
+        stateNeedsWrite = !Bridge.write(state, "state.json")
+        if !stateNeedsWrite { Signals.post(.changed) }
+    }
+}
+
+private extension Engine.Stage {
+    var model: SessionState.Model {
+        switch self {
+        case .waiting, .loading: return .loading
+        case .downloading: return .downloading
+        case .ready: return .ready
+        case .failed: return .failed
+        }
     }
 }

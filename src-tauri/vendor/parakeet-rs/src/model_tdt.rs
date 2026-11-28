@@ -1,8 +1,9 @@
 use crate::error::{Error, Result};
 use crate::execution::ModelConfig as ExecutionConfig;
 use ndarray::{Array1, Array2, Array3};
-use ort::session::Session;
+use ort::session::{RunOptions, Session};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// TDT model configs
 #[derive(Debug, Clone)]
@@ -21,6 +22,7 @@ pub struct ParakeetTDTModel {
     encoder: Session,
     decoder_joint: Session,
     config: TDTModelConfig,
+    pub(crate) run_options: Option<Arc<RunOptions>>,
 }
 
 type PathTokens = (Vec<usize>, Vec<usize>, Vec<usize>);
@@ -140,6 +142,7 @@ impl ParakeetTDTModel {
             encoder,
             decoder_joint,
             config,
+            run_options: None,
         })
     }
     //file names simply from: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/tree/main
@@ -340,10 +343,14 @@ impl ParakeetTDTModel {
         let input_value = ort::value::Value::from_array(input)?;
         let length_value = ort::value::Value::from_array(input_length)?;
 
-        let outputs = self.encoder.run(ort::inputs!(
+        let inputs = ort::inputs!(
             "audio_signal" => input_value,
             "length" => length_value
-        ))?;
+        );
+        let outputs = match &self.run_options {
+            Some(options) => self.encoder.run_with_options(inputs, options)?,
+            None => self.encoder.run(inputs)?,
+        };
 
         // TDT encoder outputs [batch, encoder_dim, time] directly
         let encoder_array =
@@ -377,13 +384,17 @@ impl ParakeetTDTModel {
             .map_err(|e| Error::Model(format!("Failed to create targets: {e}")))?;
 
         // Run decoder_joint
-        Ok(self.decoder_joint.run(ort::inputs!(
+        let inputs = ort::inputs!(
             "encoder_outputs" => ort::value::Value::from_array(frame_reshaped)?,
             "targets" => ort::value::Value::from_array(targets)?,
             "target_length" => ort::value::Value::from_array(Array1::from_vec(vec![1i32]))?,
             "input_states_1" => ort::value::Value::from_array(state_h.clone())?,
             "input_states_2" => ort::value::Value::from_array(state_c.clone())?
-        ))?)
+        );
+        Ok(match &self.run_options {
+            Some(options) => self.decoder_joint.run_with_options(inputs, options)?,
+            None => self.decoder_joint.run(inputs)?,
+        })
     }
 
     fn greedy_decode(

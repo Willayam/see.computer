@@ -14,6 +14,16 @@ final class KeyboardViewController: UIInputViewController {
     private var hasLeft = false
     /// A message of the keyboard's own, which the heartbeat must not repaint over.
     private var note: String?
+    /// The user asked for a take while the speech model could not hear one.
+    private var askedBeforeModel = false
+    private var modelNote: String? {
+        switch state.model {
+        case .loading: return "The speech model is still loading"
+        case .downloading: return "Finish the download in see.computer"
+        case .failed: return state.problem ?? "Open see.computer to retry the speech model"
+        case .ready, nil: return nil
+        }
+    }
 
     private let bar = StartBar()
     private let completions = CompletionStrip()
@@ -25,7 +35,34 @@ final class KeyboardViewController: UIInputViewController {
     /// was already edited must never be overwritten by the final transcript.
     private var manualEdit: ManualEdit?
     private var markedDraft: Draft?
-    private var markWasVisible = false
+    /// The take whose words this controller first marked, and when. A host that shows no
+    /// marked text sends the field back unchanged within moments of that.
+    private var marking: (take: UUID, since: Date, field: UUID?)?
+    /// A finished take that went in as marked text, until the host has had its say.
+    private var placing: Placing?
+    private var placingDeadline: DispatchWorkItem?
+    /// Finished takes the keyboard could not place for sure, oldest first, each with the
+    /// words its field still lacks. The user can insert them in whichever field the keyboard
+    /// is showing. An offer tied to its field would be lost with the field's identifier.
+    private var offers: [Ledger.Offer] = []
+    /// Typing puts the offer aside until the keyboard next comes up, so the suggestions return.
+    private var offerSetAside = false
+    /// Fields that a finished take is still waiting to be typed into.
+    private var waitingFields: Set<UUID> = []
+    /// A finished take left words in a field whose identifier has changed since. Any
+    /// field the keyboard comes to may be that one.
+    private var takeIsStranded = false
+    /// The identifier the live take's field has now. It changes when the keyboard comes
+    /// back to the field mid-take.
+    private var takeField: UUID?
+    /// An unreadable `state.json` lists no takes, which must not read as every take having ended.
+    private var stateWasRead = false
+    /// When the take's field first read as emptied. See `endTakeIfFieldWasSent`.
+    private var emptiedAt: Date?
+    /// When this appearance committed a mark that an earlier keyboard left. See `strandedMarkIsCommitted`.
+    private var strandedMarkCommitted: Date?
+    private let offerIcon = UIImageView(image: UIImage(systemName: "text.insert"))
+    private let offerButton = UIControl()
     private let cancel = CloseButton()
     private let keys = TypingKeys()
     private lazy var typist = Typist { [completions, keys] in completions.suggestions(for: $0, trail: $1, layout: keys.keyLayout) }
@@ -48,6 +85,20 @@ final class KeyboardViewController: UIInputViewController {
     /// so this is looser than the check a tap makes.
     private var looksAlive: Bool { Date().timeIntervalSince(lastPong) < 5 }
     private static let fieldSettles: TimeInterval = 0.6
+    /// How long a host gets to refuse marked text. The hosts measured answered in 10 to 50 ms.
+    private static let hostAnswers: TimeInterval = 1
+    /// How long a host gets to commit a mark before the keyboard edits the words in it.
+    private static let commitTakes: TimeInterval = 0.5
+    /// How long a field has to stay empty before the keyboard takes it for sent.
+    private static let emptyHolds: TimeInterval = 0.25
+
+    private struct Placing {
+        let take: Take
+        let field: UUID
+        let text: String
+        let before: String?
+        let after: String?
+    }
 
     override init(nibName nibNameOrNil: String?, bundle nibBundleOrNil: Bundle?) {
         super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
@@ -107,15 +158,35 @@ final class KeyboardViewController: UIInputViewController {
             "keyboard_hidden",
             [
                 "phase": state.phase.rawValue, "has_text": textDocumentProxy.hasText,
-                "draft": Bridge.read(Draft.self, "draft.json") != nil,
+                "draft": Ledger.read()?.entries.contains { $0.draft != nil } == true,
             ])
         // A take goes on while the user looks elsewhere. The Dynamic Island shows it
         // and can finish it. Sending the words is the one way of leaving that ends it.
-        if !endTakeIfFieldWasSent(), state.phase == .recording, !takeWasSent {
+        // A controller iOS has already replaced has no field left to speak for.
+        if Self.shown === self, !endTakeIfFieldWasSent(leaving: true), state.phase == .recording, !takeWasSent {
             Diagnostics.log("away_sent")
             Signals.post(.away)
         }
         markedDraft = nil
+        settlePlacing()
+        heartbeat?.invalidate()
+        heartbeat = nil
+        deleteUp()
+        meter.stop()
+    }
+
+    /// The controller iOS is showing. iOS can build a new one and show it without telling
+    /// the one before, which would go on running its timers and typing into a field it
+    /// no longer has. Those edits reach no host.
+    private static weak var shown: KeyboardViewController?
+
+    private func standDown() {
+        isActive = false
+        // Only iOS showing this controller again brings it back, not its next layout pass.
+        hasLeft = true
+        markedDraft = nil
+        placing = nil
+        placingDeadline?.cancel()
         heartbeat?.invalidate()
         heartbeat = nil
         deleteUp()
@@ -124,7 +195,14 @@ final class KeyboardViewController: UIInputViewController {
 
     private func activate() {
         guard !isActive else { return }
+        if let earlier = Self.shown, earlier !== self {
+            Diagnostics.log("keyboard_replaced")
+            earlier.standDown()
+        }
+        Self.shown = self
         isActive = true
+        offerSetAside = false
+        strandedMarkCommitted = nil
         hasDictationKey = true
         keys.reset()
         configureTypingKeys()
@@ -172,7 +250,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func selectionDidChange(_ textInput: UITextInput?) {
         _ = endTakeIfFieldWasSent()
-        checkMark()
+        checkMark(textChanged: false)
         rememberEditedField(byHost: true)
         checkForFinishedTake()
         updateTypingContext()
@@ -182,45 +260,95 @@ final class KeyboardViewController: UIInputViewController {
 
     override func textDidChange(_ textInput: UITextInput?) {
         switchAwayFromFieldsThatNeedTheirOwnKeys()
+        checkPlacing()
         _ = endTakeIfFieldWasSent()
-        checkMark()
+        checkMark(textChanged: true)
         rememberEditedField(byHost: true)
         checkForFinishedTake()
         updateTypingContext()
     }
 
-    private func checkMark() {
+    /// Whether the host has had the time to refuse this controller's mark, and did not.
+    private var markHeld: Bool {
+        guard let marking, marking.take == state.start?.id else { return false }
+        return Date().timeIntervalSince(marking.since) >= Self.hostAnswers
+    }
+
+    private func isIn(_ start: DictationStart) -> Bool {
+        SeeDocumentIdentifier(textDocumentProxy) == takeField ?? start.target.field
+    }
+
+    private func checkMark(textChanged: Bool) {
         guard let draft = markedDraft else { return }
-        let placement = draft.placement(at: currentTarget, ownsMark: true)
+        let current = currentTarget
+        let placement = draft.placement(at: current, before: textDocumentProxy.documentContextBeforeInput, ownsMark: true)
+        let talking = state.phase == .recording || state.phase == .transcribing
+        let start = state.start.flatMap { talking && $0.id == draft.start?.id && isIn($0) ? $0 : nil }
+        // A host that shows no marked text answers the first mark by sending the field
+        // back as it was. One that shows it sends nothing.
+        let unanswered = textChanged && !markHeld
         if placement == .marked {
-            markWasVisible = true
+            if unanswered, let start { refuseMark(start) }
             return
         }
         // An emptied field is left for `endTakeIfFieldWasSent`, which needs the mark.
-        guard currentTarget?.hasText != false else { return }
-        markedDraft = nil
-        // A caret moved in the host commits the marked words where they stand.
-        if placement == nil, manualEdit == nil, !takeWasSent, let start = state.start, draft.start?.id == start.id,
-            state.phase == .recording || state.phase == .transcribing, currentTarget?.field == start.target.field
-        {
-            keepWordsInField(start)
+        guard current?.hasText != false else {
+            if unanswered, let start, !start.target.hasText { refuseMark(start) }
+            return
         }
+        markedDraft = nil
+        if placement != .committed, manualEdit == nil, !takeWasSent, let start { keepWordsInField(start) }
+    }
+
+    /// The host shows no marked text. The live words go to the keyboard's own row for the
+    /// rest of the take, and none of them counts as being in the field.
+    private func refuseMark(_ start: DictationStart) {
+        Diagnostics.log("mark_refused", ["chars": markedDraft?.text.count ?? 0, "phase": state.phase.rawValue])
+        markedDraft = nil
+        if isActive {
+            // A host that did hold the mark gives it up here, so the field is as it was either way.
+            textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+            textDocumentProxy.unmarkText()
+        }
+        wordsInField = false
+        save(ManualEdit(startID: start.id, target: currentTarget, kept: ""), for: start)
+        showWords()
     }
 
     /// A chat app empties its field when it sends, live words included. Only the
     /// field can say so, because a keyboard never sees the send button.
-    private func endTakeIfFieldWasSent() -> Bool {
+    private func endTakeIfFieldWasSent(leaving: Bool = false) -> Bool {
         let proxy = textDocumentProxy
         guard state.phase == .recording || state.phase == .transcribing, !takeWasSent, let start = state.start,
-            SeeDocumentIdentifier(proxy) == start.target.field, !proxy.hasText,
+            isIn(start), !proxy.hasText,
             proxy.selectedText?.isEmpty != false, proxy.documentContextBeforeInput?.isEmpty != false,
             proxy.documentContextAfterInput?.isEmpty != false
-        else { return false }
-        let draft = Bridge.read(Draft.self, "draft.json").flatMap { $0.start?.id == start.id ? $0 : nil }
-        let marked = draft.map { wordsInField && markWasVisible && ownsMark($0) } ?? false
+        else {
+            emptiedAt = nil
+            return false
+        }
+        let draft = readLedger()?[start.id]?.draft
+        // Only words the host showed can have gone out with the field.
+        let marked = draft.map { wordsInField && markHeld && ownsMark($0) } ?? false
         // After an edit the keyboard knows what the field held, so an empty field is the host's doing.
         let edited = manualEdit?.startID == start.id && manualEdit?.target?.hasText == true
-        guard marked || edited else { return false }
+        guard marked || edited else {
+            emptiedAt = nil
+            return false
+        }
+        // iOS can report a field as empty for a moment while the user switches apps. A
+        // field that was sent is still empty when the keyboard looks again, or as it hides.
+        let held = emptiedAt.map { Date().timeIntervalSince($0) >= Self.emptyHolds } ?? false
+        guard leaving || (isActive && held) else {
+            if emptiedAt == nil {
+                emptiedAt = Date()
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.emptyHolds) { [weak self] in
+                    _ = self?.endTakeIfFieldWasSent()
+                }
+            }
+            return false
+        }
+        emptiedAt = nil
         Diagnostics.log("sent_seen", ["phase": state.phase.rawValue, "chars": draft?.text.count ?? 0, "active": isActive])
         takeWasSent = true
         markedDraft = nil
@@ -247,6 +375,7 @@ final class KeyboardViewController: UIInputViewController {
     private func reload() {
         let read = Bridge.read(SessionState.self, "state.json")
         if read == nil { Diagnostics.log("state_unreadable") }
+        stateWasRead = read != nil
         let previous = state.phase
         let previousStart = state.start?.id
         state = read ?? SessionState()
@@ -254,7 +383,14 @@ final class KeyboardViewController: UIInputViewController {
             wordsInField = true
             takeWasSent = false
         }
-        if let id = state.start?.id, let edit = Bridge.read(ManualEdit.self, "manual-edit.json"), edit.startID == id {
+        guard let ledger = readLedger() else {
+            pendingInsert = false
+            offers = []
+            render()
+            return
+        }
+        takeField = state.start.flatMap { ledger[$0.id]?.home }
+        if let id = state.start?.id, let edit = ledger[id]?.edit {
             manualEdit = edit
             wordsInField = false
         } else {
@@ -265,11 +401,9 @@ final class KeyboardViewController: UIInputViewController {
                 "phase_seen",
                 ["from": previous.rawValue, "to": state.phase.rawValue, "problem": state.problem ?? "none"])
         }
-        pendingInsert = state.take.map {
-            guard $0.sent != true, $0.id > (Bridge.read(Int64.self, "inserted.json") ?? 0),
-                  let field = $0.start?.target.field else { return false }
-            return field == SeeDocumentIdentifier(textDocumentProxy)
-        } ?? false
+        waitingFields = fieldsWaiting(in: ledger)
+        pendingInsert = SeeDocumentIdentifier(textDocumentProxy).map(waitingFields.contains) ?? false
+        if fieldHasSettled { startAfterReturningFromTheApp() }
         settleField()
         showWords()
         render()
@@ -283,33 +417,37 @@ final class KeyboardViewController: UIInputViewController {
             DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.settleField() }
             return
         }
-        insertFinishedTake()
+        guard strandedMarkIsCommitted() else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.commitTakes) { [weak self] in self?.settleField() }
+            return
+        }
+        deliverFinishedTakes()
         pendingInsert = false
-        if state.phase != .recording, state.phase != .transcribing,
-            let edit = Bridge.read(ManualEdit.self, "manual-edit.json"),
-            edit.startID == nil || edit.startID != state.take?.start?.id
-        {
-            manualEdit = nil
-            Bridge.remove("manual-edit.json")
-        }
-        // A take that ended with no transcript has no words to replace these with.
-        if state.phase != .recording, state.phase != .transcribing,
-            let draft = Bridge.read(Draft.self, "draft.json"), let start = draft.start,
-            start.id != state.take?.start?.id, start.target.field == SeeDocumentIdentifier(textDocumentProxy)
-        {
-            if draft.dropped == true { _ = takeDraftBack(draft) }
-            else if draft.placement(at: currentTarget, ownsMark: ownsMark(draft)) == .marked {
-                textDocumentProxy.unmarkText()
-            }
-            markedDraft = nil
-            Bridge.remove("draft.json")
-        }
+        clearEndedTakes()
         showWords()
         updateTypingContext()
         render()
     }
 
     private var fieldHasSettled: Bool { Date().timeIntervalSince(activatedAt) >= Self.fieldSettles }
+
+    /// A keyboard that went away mid-take can leave its words marked in the field. To the
+    /// keyboard that comes back they read as plain text, but one delete removes the whole
+    /// marked run, and the next key typed replaces it. So the mark is committed first, in
+    /// a turn of its own, because the host can apply an edit sent in the same turn before it.
+    private func strandedMarkIsCommitted() -> Bool {
+        if let strandedMarkCommitted { return Date().timeIntervalSince(strandedMarkCommitted) >= Self.commitTakes }
+        let waiting = Set((state.takes.map(\.start) + [state.start]).compactMap { $0?.id })
+        guard let ledger = readLedger() else { return true }
+        let stranded = ledger.entries.contains { $0.standing == nil && $0.draft != nil && waiting.contains($0.id) }
+        guard markedDraft == nil, stranded else {
+            strandedMarkCommitted = .distantPast
+            return true
+        }
+        textDocumentProxy.unmarkText()
+        strandedMarkCommitted = Date()
+        return false
+    }
 
     /// The words go in the field, where the take will land, as marked text: what
     /// a keyboard for Japanese uses for text it has not committed yet. A field that
@@ -322,12 +460,13 @@ final class KeyboardViewController: UIInputViewController {
         }
         let preview = Bridge.read(DictationPreview.self, "words.json")
         let words = preview?.startID == state.start?.id ? preview?.words ?? "" : ""
-        if wordsInField, state.phase == .recording, !takeWasSent, isActive, fieldHasSettled, !words.isEmpty,
-            !putInField(words)
+        // A field that has just read as emptied may have been sent. Until that is settled,
+        // new words must not turn the take into one whose words are on the keyboard.
+        if wordsInField, state.phase == .recording, !takeWasSent, isActive, fieldHasSettled, emptiedAt == nil,
+            strandedMarkIsCommitted(), !words.isEmpty, !putInField(words)
         {
             Diagnostics.log("words_left_field", ["chars": words.count])
-            if manualEdit == nil, let start = state.start, start.target.selected == nil,
-                currentTarget?.field == start.target.field {
+            if manualEdit == nil, let start = state.start, start.target.selected == nil, isIn(start) {
                 keepWordsInField(start)
             }
             wordsInField = false
@@ -342,33 +481,54 @@ final class KeyboardViewController: UIInputViewController {
         let proxy = textDocumentProxy
         let current = currentTarget
         var before = proxy.documentContextBeforeInput
-        if let last = Bridge.read(Draft.self, "draft.json"), last.start?.id == start.id {
-            guard let placement = last.placement(at: current, ownsMark: ownsMark(last)) else { return false }
-            guard last.words != words else { return true }
+        var spacing = Spacing.prefix(before: before)
+        guard var ledger = readLedger() else { return false }
+        var replaced: Draft?
+        if let last = ledger[start.id]?.draft {
+            let free = current.map { ledger.isFree($0.field, for: start.id) } ?? false
+            guard let placement = last.placement(at: current, before: before, ownsMark: ownsMark(last), mayHaveMoved: free),
+                  placement != .uncertain
+            else { return false }
+            if last.words == words { return true }
+            spacing = last.spacing
             if placement == .committed {
-                guard let full = before else { return false }
+                guard let full = before, last.canErase(before: full) else { return false }
                 before = start.target.before == nil ? nil : String(full.dropLast(last.text.count))
-                markedDraft = nil
-                for _ in last.text { proxy.deleteBackward() }
+                replaced = last
             }
         } else {
             guard start.target.matches(current) else { return false }
         }
-        let draft = Draft(start: start, before: before, spacing: Spacing.prefix(before: before), words: words)
-        Bridge.write(draft, "draft.json")
+        var draft = Draft(start: start, before: before, spacing: spacing, words: words)
+        draft.field = current?.field
+        takeField = current?.field
+        ledger.update(start.id) {
+            $0.draft = draft
+            $0.field = current?.field
+        }
+        guard saveLedger(ledger) else { return false }
         markedDraft = nil
+        if let replaced {
+            for _ in replaced.text { proxy.deleteBackward() }
+        }
         proxy.setMarkedText(draft.text, selectedRange: NSRange(location: (draft.text as NSString).length, length: 0))
         markedDraft = draft
-        markWasVisible = draft.placement(at: currentTarget, ownsMark: true) != nil
+        // A field the keyboard has just come back to is a new host session to answer the mark.
+        if marking?.take != start.id || marking?.field != current?.field { marking = (start.id, Date(), current?.field) }
         return true
     }
 
     private func takeDraftBack(_ draft: Draft) -> Bool {
-        guard isActive, let placement = draft.placement(at: currentTarget, ownsMark: ownsMark(draft)) else { return false }
-        markedDraft = nil
         let proxy = textDocumentProxy
+        guard isActive,
+            let placement = draft.placement(at: currentTarget, before: proxy.documentContextBeforeInput, ownsMark: ownsMark(draft))
+        else { return false }
+        markedDraft = nil
         switch placement {
+        case .uncertain:
+            return false
         case .committed:
+            guard draft.canErase(before: proxy.documentContextBeforeInput) else { return false }
             for _ in draft.text { proxy.deleteBackward() }
         case .marked:
             proxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
@@ -382,93 +542,374 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func markDraftDropped() {
-        guard var draft = Bridge.read(Draft.self, "draft.json"), let start = state.start,
-            draft.start?.id == start.id else { return }
-        draft.dropped = true
-        Bridge.write(draft, "draft.json")
+        guard let start = state.start else { return }
+        guard var ledger = readLedger() else { return }
+        guard ledger[start.id]?.draft != nil else { return }
+        ledger.update(start.id) { $0.draft?.dropped = true }
+        saveLedger(ledger)
     }
 
     private func checkForFinishedTake() {
-        guard isActive, fieldHasSettled, state.phase != .recording, state.phase != .transcribing,
-            let take = state.take, let field = take.start?.target.field,
-            field == SeeDocumentIdentifier(textDocumentProxy),
-            take.id > (Bridge.read(Int64.self, "inserted.json") ?? 0) else { return }
+        guard isActive, fieldHasSettled, state.phase != .recording, state.phase != .transcribing, placing == nil,
+            let field = SeeDocumentIdentifier(textDocumentProxy), waitingFields.contains(field) || takeIsStranded
+        else { return }
         DispatchQueue.main.async { [weak self] in self?.settleField() }
     }
 
-    /// Once per take, because the bookmark survives this process being replaced.
-    private func insertFinishedTake() {
-        guard isActive, state.phase != .recording, state.phase != .transcribing, let take = state.take else { return }
-        let inserted = Bridge.read(Int64.self, "inserted.json") ?? 0
-        guard take.id > inserted else { return }
-        guard let start = take.start else {
-            Bridge.write(take.id, "inserted.json")
+    /// The fields of finished takes that the keyboard has not tried to place yet.
+    private func fieldsWaiting(in ledger: Ledger) -> Set<UUID> {
+        Set(state.takes.compactMap { take in
+            guard take.sent != true, let start = take.start, !ledger.isSettled(take),
+                ledger[start.id]?.standing == nil else { return nil }
+            return ledger[start.id]?.home ?? start.target.field
+        })
+    }
+
+    /// Each finished take goes into its own field once. One the keyboard cannot place
+    /// for sure stays with the user as an offer, and none is typed a second time.
+    private func deliverFinishedTakes() {
+        guard isActive, state.phase != .recording, state.phase != .transcribing, placing == nil else { return }
+        guard let saved = readLedger() else { return }
+        guard let current = currentTarget else {
+            // iOS has not attached the field yet, and a take that waits should not have to
+            // wait for the app's next signal as well.
+            if state.takes.contains(where: { !saved.isSettled($0) }) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.fieldSettles) { [weak self] in self?.settleField() }
+            }
             return
         }
-        let draft = Bridge.read(Draft.self, "draft.json").flatMap { $0.start?.id == start.id ? $0 : nil }
-        let edit = Bridge.read(ManualEdit.self, "manual-edit.json").flatMap { $0.startID == start.id ? $0 : nil }
+        var ledger = saved
         let now = Date()
-        guard let current = currentTarget else { return }
-        let delivery = take.delivery(to: current.field, at: now, hasDraft: draft != nil)
-        guard delivery != .waitForField else { return }
-        Bridge.write(take.id, "inserted.json")
-        defer {
-            if draft != nil { Bridge.remove("draft.json") }
-            if edit != nil { Bridge.remove("manual-edit.json") }
+        offers = []
+        for take in state.takes where !ledger.isSettled(take) {
+            guard let start = take.start else { continue }
+            let entry = ledger[start.id]
+            // Words in the field, and a take the keyboard has already tried to place, are
+            // worth coming back to for longer.
+            let lasting = entry?.draft != nil || entry?.standing != nil
+            var delivery = take.delivery(to: current.field, at: now, hasDraft: lasting, home: entry?.home)
+            // The keyboard has come back to the field under a new identifier, and the words
+            // the take left there say which field it is.
+            let before = textDocumentProxy.documentContextBeforeInput
+            if delivery == .waitForField, entry?.standing == nil, let draft = entry?.draft,
+                ledger.isFree(current.field, for: start.id),
+                draft.placement(at: current, before: before, ownsMark: false, mayHaveMoved: true) == .committed {
+                delivery = .verifyTarget
+            }
+            if delivery == .historyOnly {
+                if let copy = ledger.offer(for: take, in: current.field, at: now) { offers.append(copy) }
+                else { ledger.remove(start.id) }
+                continue
+            }
+            if entry?.standing == nil, delivery == .offer ||
+                (delivery == .waitForField && entry?.draft == nil && entry?.edit == nil) {
+                settle(start.id, as: .offered, in: &ledger, field: start.target.field)
+            } else if delivery == .verifyTarget, entry?.standing == nil {
+                place(take, entry, at: current, in: &ledger)
+            } else if entry?.standing == .sent {
+                let result = ledger.resultAfterRestart(take, at: current, before: before)
+                Diagnostics.log(result.rawValue, ["why": "restart"])
+                settle(start.id, as: result, in: &ledger)
+            }
+            if placing != nil { break }
+            if let offer = ledger.offer(for: take, in: current.field, at: now) {
+                offers.append(offer)
+            } else if ledger[start.id]?.standing == .offered {
+                settle(start.id, as: .placed, in: &ledger)
+            }
         }
-        guard delivery == .verifyTarget else { return }
+        if ledger != saved { saveLedger(ledger) }
+        waitingFields = fieldsWaiting(in: ledger)
+        takeIsStranded = state.takes.contains { take in
+            guard let id = take.start?.id, let entry = ledger[id] else { return false }
+            return entry.standing == nil && entry.draft != nil && entry.home != current.field
+        }
+    }
+
+    /// `field` is where the take's words went. It stays with the settled take, so words
+    /// there are not taken for another take's draft.
+    private func settle(_ id: UUID, as standing: Ledger.Standing, in ledger: inout Ledger, field: UUID? = nil) {
+        ledger.update(id) {
+            $0.standing = standing
+            $0.field = field ?? $0.field
+            guard standing == .placed || standing == .copied || standing == .dismissed else { return }
+            $0.draft = nil
+            $0.edit = nil
+        }
+    }
+
+    private static let storageProblem = "Can’t save dictation progress. Open see.computer."
+
+    private func readLedger() -> Ledger? {
+        let ledger = Ledger.read()
+        if ledger == nil {
+            note = Self.storageProblem
+            render()
+        }
+        return ledger
+    }
+
+    @discardableResult
+    private func saveLedger(_ ledger: Ledger) -> Bool {
+        do {
+            try ledger.store()
+            if note == Self.storageProblem { note = nil }
+            return true
+        } catch {
+            note = Self.storageProblem
+            render()
+            return false
+        }
+    }
+
+    /// Checks that the field is where the take left it, then types the take. Nothing is
+    /// typed into a field, a selection or a place the keyboard cannot recognise.
+    private func place(_ take: Take, _ entry: Ledger.Entry?, at current: DictationTarget, in ledger: inout Ledger) {
+        guard let start = take.start else { return }
         let proxy = textDocumentProxy
-        if let draft {
-            guard edit == nil, let placement = draft.placement(at: current, ownsMark: ownsMark(draft)) else { return }
+        let before = proxy.documentContextBeforeInput
+        let age = Date().timeIntervalSince(take.finished)
+        func offer(_ why: String) {
+            Diagnostics.log("unplaced", ["why": why, "chars": take.text.count, "age_s": age])
+            settle(start.id, as: .offered, in: &ledger, field: current.field)
+        }
+        // The ledger says the take was sent before the host hears of it, so a keyboard
+        // killed in between finds the take sent and does not type it again.
+        func send(_ how: String, awaitingReply: Bool = false, _ edits: () -> Void) -> Bool {
+            guard ledger.reserveInsert(start.id, in: current.field, awaitingReply: awaitingReply, save: saveLedger)
+            else { return false }
+            edits()
+            Diagnostics.log("inserted", [
+                "chars": take.text.count, "age_s": age, "draft": entry?.draft != nil,
+                "kept": entry?.edit?.kept?.count ?? 0, "how": how,
+            ])
+            return true
+        }
+        if let draft = entry?.draft {
+            let free = ledger.isFree(current.field, for: start.id)
+            guard entry?.edit == nil,
+                let placement = draft.placement(at: current, before: before, ownsMark: ownsMark(draft), mayHaveMoved: free)
+            else { return settle(start.id, as: .unconfirmed, in: &ledger) }
             let text = draft.spacing + take.text
-            if placement == .marked {
-                markedDraft = nil
-                proxy.setMarkedText(text, selectedRange: NSRange(location: (text as NSString).length, length: 0))
-                proxy.unmarkText()
-            } else {
-                guard takeDraftBack(draft) else { return }
-                proxy.insertText(text)
+            markedDraft = nil
+            switch placement {
+            case .uncertain:
+                settle(start.id, as: .unconfirmed, in: &ledger)
+                return
+            case .marked:
+                let after = proxy.documentContextAfterInput
+                let sent = send("mark", awaitingReply: true) {
+                    proxy.setMarkedText(text, selectedRange: NSRange(location: (text as NSString).length, length: 0))
+                    proxy.unmarkText()
+                }
+                guard sent else { return }
+                awaitHost(Placing(
+                    take: take, field: current.field, text: text, before: before, after: after))
+                return
+            case .committed where draft.text != text:
+                guard draft.canErase(before: before) else {
+                    settle(start.id, as: .unconfirmed, in: &ledger)
+                    return
+                }
+                _ = send("replace") {
+                    for _ in draft.text { proxy.deleteBackward() }
+                    proxy.insertText(text)
+                }
+                return
+            case .committed:
+                Diagnostics.log("inserted", ["chars": take.text.count, "age_s": age, "draft": true, "how": "as_shown"])
             }
         } else {
+            let edit = entry?.edit
+            let rest: String
             if let edit {
-                guard edit.target(for: start, at: current) != nil else { return }
+                guard let confirmed = edit.remainingWords(in: take, before: before, after: proxy.documentContextAfterInput)
+                else { return settle(start.id, as: .unconfirmed, in: &ledger) }
+                rest = confirmed
             } else {
-                guard start.target.matches(current) else { return }
+                rest = take.text
             }
-            let rest = Transcript.rest(of: take.text, after: edit?.kept ?? "")
+            guard edit.map({ $0.target(for: start, at: current) != nil }) ?? start.target.matches(current)
+            else { return offer("target") }
             if !rest.isEmpty {
-                let spacing = current.selected == nil ? Spacing.prefix(before: proxy.documentContextBeforeInput) : ""
-                // The caret can sit before text the user moved it in front of.
-                let next = proxy.documentContextAfterInput?.first
-                let separator = next.map { !$0.isWhitespace && !".,!?;:)]}…’”".contains($0) } == true ? " " : ""
-                proxy.insertText(spacing + rest + separator)
+                _ = send("plain") { proxy.insertText(spaced(rest, replacingSelection: current.selected != nil)) }
+                return
+            }
+            if edit != nil {
+                settle(start.id, as: .unconfirmed, in: &ledger)
+                return
             }
         }
+        settle(start.id, as: .placed, in: &ledger, field: current.field)
+    }
+
+    /// A take's words as they go in at the caret, spaced from the text on both sides.
+    private func spaced(_ words: String, replacingSelection: Bool) -> String {
+        let proxy = textDocumentProxy
+        let spacing = replacingSelection ? "" : Spacing.prefix(before: proxy.documentContextBeforeInput)
+        // The caret can sit before text the user moved it in front of.
+        let next = proxy.documentContextAfterInput?.first
+        let separator = next.map { !$0.isWhitespace && !".,!?;:)]}…’”".contains($0) } == true ? " " : ""
+        return spacing + words + separator
+    }
+
+    /// Marked text is the one edit a host answers. A host that takes none sends the field
+    /// back as it was, within moments, and the take then goes in as plain text.
+    private func awaitHost(_ placing: Placing) {
+        self.placing = placing
+        let deadline = DispatchWorkItem { [weak self] in self?.settlePlacing() }
+        placingDeadline = deadline
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hostAnswers, execute: deadline)
+    }
+
+    private func checkPlacing() {
+        guard let placing, let id = placing.take.start?.id else { return }
+        let proxy = textDocumentProxy
+        guard isActive, SeeDocumentIdentifier(proxy) == placing.field, proxy.selectedText?.isEmpty != false
+        else { return settlePlacing() }
+        switch HostContext.reply(to: placing.text, before: placing.before, after: placing.after,
+                                 now: proxy.documentContextBeforeInput, nowAfter: proxy.documentContextAfterInput,
+                                 hasText: proxy.hasText) {
+        case .placed: return settlePlacing(confirmed: true)
+        case .uncertain: return settlePlacing()
+        case .refused: break
+        }
+        self.placing = nil
+        placingDeadline?.cancel()
+        Diagnostics.log("mark_refused", ["chars": placing.text.count, "phase": state.phase.rawValue])
+        guard var ledger = readLedger() else { return }
+        guard ledger.reserveInsert(id, in: placing.field, from: .sent, save: saveLedger) else { return }
+        proxy.insertText(placing.text)
+        Diagnostics.log("inserted", ["chars": placing.take.text.count, "how": "plain_after_refusal"])
+        DispatchQueue.main.async { [weak self] in self?.settleField() }
+    }
+
+    /// The host raised no objection in time, or the user typed on, or the keyboard is
+    /// leaving. A refusal that comes after any of those can no longer be acted on.
+    private func settlePlacing(confirmed: Bool = false) {
+        guard let placing, let id = placing.take.start?.id else { return }
+        self.placing = nil
+        placingDeadline?.cancel()
+        guard var ledger = readLedger() else { return }
+        guard ledger[id]?.standing == .sent else { return }
+        settle(id, as: confirmed ? .placed : .unconfirmed, in: &ledger, field: placing.field)
+        saveLedger(ledger)
+        Diagnostics.log(confirmed ? "placed" : "unconfirmed")
+        guard isActive else { return }
+        DispatchQueue.main.async { [weak self] in self?.settleField() }
+    }
+
+    /// A take that ended with no transcript left its words in the field and nothing will
+    /// come to replace them. Words in another field wait there for the user to come back.
+    private func clearEndedTakes() {
+        guard stateWasRead, state.phase != .recording, state.phase != .transcribing else { return }
+        guard var ledger = readLedger() else { return }
+        let listed = Set(state.takes.compactMap { $0.start?.id })
+        let field = SeeDocumentIdentifier(textDocumentProxy)
+        var cleared = false
+        for entry in ledger.entries where !listed.contains(entry.id) {
+            if let draft = entry.draft, entry.standing == nil {
+                guard draft.home == field else { continue }
+                let before = textDocumentProxy.documentContextBeforeInput
+                if draft.dropped == true {
+                    _ = takeDraftBack(draft)
+                } else if draft.placement(at: currentTarget, before: before, ownsMark: ownsMark(draft)) == .marked {
+                    textDocumentProxy.unmarkText()
+                }
+                markedDraft = nil
+            }
+            ledger.remove(entry.id)
+            cleared = true
+        }
+        guard cleared else { return }
+        saveLedger(ledger)
+        if let id = manualEdit?.startID, ledger[id] == nil { manualEdit = nil }
+    }
+
+    // MARK: A take the user inserts by hand
+
+    private var shownOffer: Ledger.Offer? {
+        guard !offerSetAside, state.phase != .recording, state.phase != .transcribing,
+            SeeDocumentIdentifier(textDocumentProxy) != nil else { return nil }
+        let now = Date()
+        let fresh = offers.filter { now.timeIntervalSince($0.take.finished) < Bridge.returnWindow }
+        return fresh.first { $0.action == .insert } ?? fresh.last
+    }
+
+    @objc private func offerTapped() {
+        guard isActive, let shown = shownOffer, let id = shown.take.start?.id,
+            let current = currentTarget, var ledger = readLedger(),
+            let offer = ledger.offer(for: shown.take, in: current.field), offer.action == shown.action
+        else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        if offer.action == .copy {
+            UIPasteboard.general.string = offer.words
+            settle(id, as: .copied, in: &ledger)
+            saveLedger(ledger)
+            UIAccessibility.post(notification: .announcement, argument: "Dictation copied")
+            Diagnostics.log("dictation_copied", ["chars": offer.words.count])
+            return settleField()
+        }
+        guard ledger.reserveInsert(id, in: current.field, from: .offered, save: saveLedger) else { return }
+        forgetTypingPosition()
+        logEdit("offer") {
+            textDocumentProxy.insertText(spaced(offer.words, replacingSelection: current.selected != nil))
+        }
         Diagnostics.log("inserted", [
-            "chars": take.text.count, "age_s": now.timeIntervalSince(take.finished), "draft": draft != nil,
-            "kept": edit?.kept?.count ?? 0,
+            "chars": offer.words.count, "age_s": Date().timeIntervalSince(offer.take.finished), "how": "hand",
         ])
+        settleField()
+    }
+
+    private func dismissOffer() {
+        guard let take = shownOffer?.take, let id = take.start?.id else { return }
+        guard var ledger = readLedger() else { return }
+        settle(id, as: .dismissed, in: &ledger)
+        saveLedger(ledger)
+        Diagnostics.log("offer_dismissed", ["chars": take.text.count])
+        settleField()
     }
 
     private func startAfterReturningFromTheApp() {
         guard isActive, let handoff = Bridge.read(Handoff.self, "handoff.json") else { return }
-        guard let start = handoff.start, Date().timeIntervalSince(handoff.asked) < Bridge.handoffWindow else {
+        switch handoff.returning(to: currentTarget, in: HostCapture.host) {
+        case .expired:
             Bridge.remove("handoff.json")
             return
+        case .wait: return
+        case .start, .ask: break
         }
-        guard start.target.matches(currentTarget) else { return }
+        guard let start = handoff.start else { return }
         whenAlive { [weak self] alive in
             guard let self, alive, self.isActive, self.state.phase == .armed,
-                Bridge.read(Handoff.self, "handoff.json")?.start?.id == start.id,
-                start.target.matches(self.currentTarget) else { return }
-            Bridge.remove("handoff.json")
-            self.startTake(start)
+                Bridge.read(Handoff.self, "handoff.json")?.start?.id == start.id else { return }
+            guard self.modelNote == nil else {
+                self.askedBeforeModel = true
+                self.render()
+                return
+            }
+            switch handoff.returning(to: self.currentTarget, in: HostCapture.host) {
+            case .wait: return
+            case .expired: Bridge.remove("handoff.json")
+            case .ask:
+                Bridge.remove("handoff.json")
+                self.askedBeforeModel = false
+                self.note = "Mic is ready. Tap Dictate here."
+                self.render()
+            case .start:
+                Bridge.remove("handoff.json")
+                self.startTake(start)
+            }
         }
     }
 
     private func startTake(_ start: DictationStart) {
         forgetTypingPosition()
-        Bridge.write(start, "start.json")
+        guard Bridge.write(start, "start.json") else {
+            note = Self.storageProblem
+            render()
+            return
+        }
         Signals.post(.start)
     }
 
@@ -495,6 +936,7 @@ final class KeyboardViewController: UIInputViewController {
         pressedAt = Date()
         pressStartedTake = false
         note = nil
+        askedBeforeModel = false
         Diagnostics.log(
             "tap", ["phase": state.phase.rawValue, "pong_age_s": min(Date().timeIntervalSince(lastPong), 9999)])
         guard hasFullAccess else {
@@ -518,6 +960,12 @@ final class KeyboardViewController: UIInputViewController {
                 return
             }
             if self.state.phase == .armed {
+                guard self.modelNote == nil else {
+                    Diagnostics.log("tap_before_model", ["model": self.state.model?.rawValue ?? "none"])
+                    self.askedBeforeModel = true
+                    self.render()
+                    return
+                }
                 Diagnostics.log("start_sent", ["by": "tap"])
                 self.pressStartedTake = true
                 self.startTake(start)
@@ -537,6 +985,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func cancelTapped() {
+        guard shownOffer == nil else { return dismissOffer() }
         Diagnostics.log("cancel_sent", ["phase": state.phase.rawValue])
         markDraftDropped()
         Signals.post(.cancel)
@@ -583,14 +1032,18 @@ final class KeyboardViewController: UIInputViewController {
     // MARK: Typing
 
     private func prepareForManualEdit() {
+        settlePlacing()
+        if !offers.isEmpty, !offerSetAside {
+            offerSetAside = true
+            render()
+        }
         guard state.phase == .recording || state.phase == .transcribing, let start = state.start,
-            let current = currentTarget, start.target.field == current.field else { return }
+            let current = currentTarget, isIn(start) else { return }
         if var edit = manualEdit {
             // After Done, an edit the keyboard did not make leaves the insertion point unknown.
             if state.phase == .transcribing, edit.target(for: start, at: current) == nil, edit.target != nil {
                 edit.target = nil
-                manualEdit = edit
-                Bridge.write(edit, "manual-edit.json")
+                save(edit, for: start)
             }
         } else {
             keepWordsInField(start)
@@ -598,16 +1051,25 @@ final class KeyboardViewController: UIInputViewController {
         showWords()
     }
 
+    private func save(_ edit: ManualEdit, for start: DictationStart) {
+        manualEdit = edit
+        takeField = edit.target?.field ?? takeField
+        guard var ledger = readLedger() else { return }
+        ledger.recordEdit(edit, for: start.id)
+        saveLedger(ledger)
+    }
+
     /// The words shown so far stay in the field as the user's own text, and the rest
     /// of the take lands at the caret when it ends. Nothing the user saw is taken back.
     private func keepWordsInField(_ start: DictationStart) {
         wordsInField = false
         let proxy = textDocumentProxy
-        var kept = ""
+        var kept: String? = ""
         var known = state.phase == .recording
-        if let draft = Bridge.read(Draft.self, "draft.json"), draft.start?.id == start.id {
-            kept = draft.words
-            let placement = draft.placement(at: currentTarget, ownsMark: ownsMark(draft))
+        guard let ledger = readLedger() else { return }
+        if let draft = ledger[start.id]?.draft {
+            let owned = ownsMark(draft)
+            let placement = draft.placement(at: currentTarget, before: proxy.documentContextBeforeInput, ownsMark: owned)
             markedDraft = nil
             if isActive, placement == .marked {
                 // Typed in again as plain text, so the context the next key reads holds them.
@@ -615,19 +1077,17 @@ final class KeyboardViewController: UIInputViewController {
                 proxy.unmarkText()
                 proxy.insertText(draft.text)
                 typist.startNewWord(in: proxy)
-            } else if isActive {
-                // Some hosts already committed them. Others still hold them marked, and the next key would replace them.
+            } else if isActive, owned {
                 proxy.unmarkText()
             }
-            known = known || placement != nil
-            Bridge.remove("draft.json")
+            kept = placement == .committed || placement == .marked
+                ? draft.confirmedWords(at: currentTarget, before: proxy.documentContextBeforeInput) : nil
+            known = known || kept != nil
         } else {
             known = known || start.target.matches(currentTarget)
         }
-        Diagnostics.log("words_kept", ["chars": kept.count, "phase": state.phase.rawValue, "known": known])
-        let edit = ManualEdit(startID: start.id, target: known ? currentTarget : nil, kept: kept)
-        manualEdit = edit
-        Bridge.write(edit, "manual-edit.json")
+        Diagnostics.log("words_kept", ["chars": kept?.count ?? 0, "phase": state.phase.rawValue, "known": known])
+        save(ManualEdit(startID: start.id, target: known ? currentTarget : nil, kept: kept), for: start)
     }
 
     /// While recording, wherever the user leaves the caret in the take's field is where
@@ -635,7 +1095,7 @@ final class KeyboardViewController: UIInputViewController {
     private func rememberEditedField(byHost: Bool = false) {
         guard state.phase == .recording || state.phase == .transcribing, var edit = manualEdit,
             let start = state.start, edit.startID == start.id,
-            let current = currentTarget, current.field == start.target.field else { return }
+            let current = currentTarget, isIn(start) else { return }
         if state.phase == .transcribing {
             guard !byHost, edit.target != nil else { return }
         } else if byHost, !current.hasText {
@@ -643,8 +1103,7 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
         edit.target = current
-        manualEdit = edit
-        Bridge.write(edit, "manual-edit.json")
+        save(edit, for: start)
     }
 
     /// Logs an edit with the text before the caret on both sides of it, so a replay
@@ -752,17 +1211,34 @@ final class KeyboardViewController: UIInputViewController {
     private func render() {
         let phase: SessionState.Phase = looksAlive || !fieldHasSettled ? state.phase : .off
         let talking = phase == .recording || phase == .transcribing
-        let message = hasFullAccess ? note ?? state.problem : "Allow Full Access"
+        // An answer to the last tap comes first. Words waiting to be inserted come before a standing problem.
+        let reply = hasFullAccess ? (askedBeforeModel ? modelNote : nil) ?? note : "Allow Full Access"
+        let offered = talking || reply != nil ? nil : shownOffer
+        let message = reply ?? state.problem
         bar.show(phase)
         let preview = !wordsInField && !liveWords.isEmpty
         let elapsed = max(0, Int(Date().timeIntervalSince(state.since ?? Date())))
-        status.text = talking ? (preview ? liveWords : String(format: "%d:%02d", elapsed / 60, elapsed % 60)) : message
+        if talking {
+            status.text = preview ? liveWords : String(format: "%d:%02d", elapsed / 60, elapsed % 60)
+        } else {
+            status.text = offered?.label ?? message
+        }
         status.font = preview || !talking ? .systemFont(ofSize: 15) : .monospacedDigitSystemFont(ofSize: 15, weight: .medium)
-        statusRow.isHidden = !talking && message == nil
+        status.textColor = offered == nil ? .secondaryLabel : .label
+        // Live words show their newest end. Words to insert show how they begin.
+        status.lineBreakMode = offered == nil ? .byTruncatingHead : .byTruncatingTail
+        offerIcon.isHidden = offered == nil
+        if let offered {
+            offerIcon.image = UIImage(systemName: offered.action == .copy ? "doc.on.doc" : "text.insert")
+            offerButton.accessibilityLabel = offered.action == .copy ? "Copy dictation" : "Insert dictation"
+        }
+        offerButton.isHidden = offered == nil
+        statusRow.isHidden = !talking && message == nil && offered == nil
         completions.isHidden = !statusRow.isHidden
         meter.isHidden = phase != .recording || preview
         if meter.isHidden { meter.stop() } else { meter.start() }
-        cancel.isHidden = phase != .recording
+        cancel.isHidden = phase != .recording && offered == nil
+        cancel.accessibilityLabel = offered == nil ? "Cancel" : "Dismiss dictation"
         keys.isUserInteractionEnabled = !pendingInsert
         keys.accessibilityElementsHidden = pendingInsert
         if !keys.isUserInteractionEnabled { deleteUp() }
@@ -783,8 +1259,18 @@ final class KeyboardViewController: UIInputViewController {
         statusRow.spacing = 8
         status.lineBreakMode = .byTruncatingHead
         status.textColor = .secondaryLabel
+        offerIcon.tintColor = .label
+        offerIcon.preferredSymbolConfiguration = .init(pointSize: 15, weight: .medium)
+        offerIcon.setContentHuggingPriority(.required, for: .horizontal)
+        offerIcon.isHidden = true
         statusRow.addArrangedSubview(meter)
+        statusRow.addArrangedSubview(offerIcon)
         statusRow.addArrangedSubview(status)
+        offerButton.addTarget(self, action: #selector(offerTapped), for: .touchUpInside)
+        offerButton.isAccessibilityElement = true
+        offerButton.accessibilityTraits = .button
+        offerButton.accessibilityLabel = "Insert dictation"
+        offerButton.isHidden = true
         cancel.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
         keys.connectGlobe(to: self)
         keys.moveCursor = { [weak self] offset in
@@ -795,6 +1281,7 @@ final class KeyboardViewController: UIInputViewController {
             self?.updateTypingContext()
         }
         completions.accept = { [weak self] input, candidate in self?.chooseSuggestion(input, candidate) }
+        keys.prepareSwipe = { [weak self] in self?.completions.vocabulary.prepareSwipe() }
         keys.allowsSwipe = { [weak self] in
             guard let self else { return false }
             return WordInput.allowsCorrection(in: self.textDocumentProxy)
@@ -831,7 +1318,7 @@ final class KeyboardViewController: UIInputViewController {
         let cancelWidth = cancel.widthAnchor.constraint(equalToConstant: 44)
         cancelWidth.priority = .defaultHigh
         cancelWidth.isActive = true
-        for child in [completions, statusRow, controls, keys] {
+        for child in [completions, statusRow, offerButton, controls, keys] {
             child.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(child)
         }
@@ -850,18 +1337,15 @@ final class KeyboardViewController: UIInputViewController {
             statusRow.centerYAnchor.constraint(equalTo: controls.centerYAnchor),
             statusRow.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
             statusRow.trailingAnchor.constraint(lessThanOrEqualTo: controls.leadingAnchor, constant: -6),
+            // The whole strip is the target, because the row's own text is only a line high.
+            offerButton.topAnchor.constraint(equalTo: controls.topAnchor),
+            offerButton.bottomAnchor.constraint(equalTo: controls.bottomAnchor),
+            offerButton.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            offerButton.trailingAnchor.constraint(equalTo: controls.leadingAnchor),
             keys.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 11.0 / 6),
             keys.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 11.0 / 3),
             keys.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -11.0 / 3),
             keys.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
-    }
-}
-
-/// What goes between the text already in the field and the new take.
-enum Spacing {
-    static func prefix(before: String?) -> String {
-        guard let last = before?.last else { return "" }
-        return last.isWhitespace || "([{\"'/-\u{201C}\u{2018}".contains(last) ? "" : " "
     }
 }

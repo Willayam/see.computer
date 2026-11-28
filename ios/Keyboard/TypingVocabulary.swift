@@ -62,6 +62,10 @@ struct WordSuggestions {
 @MainActor
 final class TypingVocabulary {
     private nonisolated static let tables = ["en": Lexicon(language: "en"), "sv": Lexicon(language: "sv")].compactMapValues { $0 }
+    private nonisolated static let sentenceStarts = tables.mapValues {
+        rankFollowers(of: $0.sentenceStart, nil, lex: $0)
+    }
+    private var sentenceStarts: [String: [Follower]] = [:]
     private var tables: [String: Lexicon] = [:]
     private var decoders: [String: TapDecoder] = [:]
     private let checker = UITextChecker()
@@ -74,6 +78,7 @@ final class TypingVocabulary {
     private var pendingWord: (word: String, field: UUID, before: String, forget: Bool)?
     private let store: UserDefaults?
     private var neuralGestures = 0
+    private var encoderRequested = false
     var useCanonicalSwipePass = true
     private var residual: Double
     private var count: Double
@@ -206,8 +211,10 @@ final class TypingVocabulary {
     func load(completion: @escaping () -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             let loaded = Self.tables
+            let starts = Self.sentenceStarts
             DispatchQueue.main.async {
                 self.tables = loaded
+                self.sentenceStarts = starts
                 self.decoders = loaded.reduce(into: [:]) { decoders, entry in
                     decoders[entry.key] = TapDecoder(lexicon: entry.value, compounds: entry.key == "sv")
                 }
@@ -279,6 +286,13 @@ final class TypingVocabulary {
                   let center = layout.centers[code] else { return false }
             return hypot(point.x - center.x, point.y - center.y) <= layout.pitch * 0.15
         }
+    }
+
+    func prepareSwipe() {
+        guard !encoderRequested, languages.contains(where: { $0.code == "en" }),
+              store?.object(forKey: TypingLanguages.neuralSwipeKey) as? Bool != false else { return }
+        encoderRequested = true
+        DispatchQueue.global(qos: .userInitiated).async { _ = NeuralSwipe.encoder }
     }
 
     func swipe(_ samples: [SwipeSample], layout: KeyLayout, before: String,
@@ -510,16 +524,51 @@ final class TypingVocabulary {
               input.word.lowercased() == String(trail.taps.map(\.typed)),
               input.word.lowercased().allSatisfy({ Lexicon.codes[$0] != nil }), shortcuts[input.word.lowercased()] == nil
         else { return nil }
-        _ = suggestions(for: input, trail: trail, layout: layout)
+        let word = input.word.lowercased()
+        let codes = word.compactMap { Lexicon.codes[$0] }
+        let taps = tapGeometry(word, codes, trail, layout)
+        let weights = languageWeights(input.previous)
         var prior = Array(repeating: 0.0, count: 31)
         for (i, lang) in languages.enumerated() {
-            decoders[lang.code]?.addPrior(to: &prior, weight: lastWeights[i])
+            guard let decoder = decoders[lang.code], let lex = tables[lang.code] else { continue }
+            let previous = input.sentenceStart ? lex.sentenceStart : input.previous.last.flatMap(lex.node).flatMap(lex.terminal)
+            taps.update(decoder, after: previous)
+            decoder.addPrior(to: &prior, weight: weights[i])
         }
         let sum = prior.reduce(0, +)
         return sum > 0 ? prior.map { $0 / sum } : nil
     }
 
-    private var lastWeights: [Double] = []
+    private struct TapGeometry {
+        let costs: [[Double]]
+        let omissions: [Double]
+        let spaces: [Double]
+        let textOnly: Bool
+        let lostSpace: Double
+        let shifted: Bool
+
+        func update(_ decoder: TapDecoder, after previous: Int?) {
+            decoder.update(costs: costs, omissions: omissions, textOnly: textOnly,
+                           previous: previous, spaces: spaces, lostSpace: lostSpace)
+        }
+    }
+
+    private func tapGeometry(_ word: String, _ codes: [Int], _ trail: TapTrail, _ layout: KeyLayout) -> TapGeometry {
+        let suffix = Array(trail.taps.suffix(codes.count))
+        let matches = word.hasSuffix(String(suffix.map { $0.typed }).replacingOccurrences(of: "’", with: "'"))
+        let offset = codes.count - suffix.count
+        let sigma = spread * layout.pitch
+        func point(_ index: Int) -> CGPoint? {
+            matches && index >= offset ? suffix[index - offset].point : nil
+        }
+        return TapGeometry(
+            costs: codes.enumerated().map { layout.costs(letter: $0.element, point: point($0.offset), spread: spread) },
+            omissions: layout.omissionCosts(spread: spread),
+            spaces: codes.indices.map { layout.spaceCost(point($0), sigma: sigma) },
+            textOnly: suffix.allSatisfy { $0.point == nil },
+            lostSpace: offset == 0 && matches ? layout.lostSpaceCost(sigma: sigma) : .infinity,
+            shifted: matches && offset == 0 && suffix.first?.shifted == true && suffix.allSatisfy { $0.point != nil })
+    }
 
     private struct Follower {
         let text: String
@@ -530,14 +579,20 @@ final class TypingVocabulary {
 
     /// The words the tables have seen after `previous`, or after `before` and `previous`, most likely first.
     private func followers(of previous: Int, _ before: Int?, in language: String, lex: Lexicon) -> [Follower] {
+        if previous == lex.sentenceStart, let starts = sentenceStarts[language] { return starts }
         if let cached = following[language], cached.previous == previous, cached.before == before { return cached.words }
+        let words = Self.rankFollowers(of: previous, before, lex: lex)
+        following[language] = (previous, before, words)
+        return words
+    }
+
+    private nonisolated static func rankFollowers(of previous: Int, _ before: Int?, lex: Lexicon) -> [Follower] {
         var words = lex.followers(previous, before, within: 8).map { id in
             let path = lex.path(id)
             let letters = path.map { Lexicon.alphabet[lex.letter($0)] }
             return Follower(text: String(letters), score: lex.logProbability(id, after: previous, before), path: path)
         }
         words.sort { $0.score == $1.score ? $0.text < $1.text : $0.score > $1.score }
-        following[language] = (previous, before, words)
         return words
     }
 
@@ -590,21 +645,12 @@ final class TypingVocabulary {
         }
         let codes = word.compactMap { Lexicon.codes[$0] }
         guard codes.count == word.count else { return result }
-        let suffix = Array(trail.taps.suffix(codes.count))
-        let matches = word.hasSuffix(String(suffix.map { $0.typed }).replacingOccurrences(of: "’", with: "'"))
-        let offset = codes.count - suffix.count
-        let costs = codes.enumerated().map { i, code in
-            layout.costs(letter: code, point: matches && i >= offset ? suffix[i - offset].point : nil, spread: spread)
-        }
-        let sigma = spread * layout.pitch
-        let spaces = codes.indices.map { i in
-            layout.spaceCost(matches && i >= offset ? suffix[i - offset].point : nil, sigma: sigma)
-        }
+        let taps = tapGeometry(word, codes, trail, layout)
+        let costs = taps.costs
         let literalCost = zip(costs, codes).reduce(0.0) { $0 + $1.0[$1.1] }
         var literal = -Double.infinity, unknown = -Double.infinity
         var candidates: [(String, Double)] = [], completions: [(String, Double)] = []
         let weight = languageWeights(input.previous)
-        lastWeights = weight
         for (index, language) in languages.enumerated() {
             guard let lex = tables[language.code] else { continue }
             let prev =
@@ -631,11 +677,9 @@ final class TypingVocabulary {
             }
             if let id = lex.node(word).flatMap(lex.terminal) { literal = max(literal, score(id)) }
             unknown = max(unknown, context + lex.unknown(word))
-            let readings =
-                decoders[language.code]?.candidates(
-                    costs: costs, omissions: layout.omissionCosts(spread: spread), textOnly: suffix.allSatisfy { $0.point == nil },
-                    previous: prev, spaces: spaces, lostSpace: offset == 0 && matches ? layout.lostSpaceCost(sigma: sigma) : .infinity)
-                ?? [:]
+            guard let decoder = decoders[language.code] else { continue }
+            taps.update(decoder, after: prev)
+            let readings = decoder.readings()
             var ranked = readings.compactMap { reading, cost -> (TapDecoder.Reading, Double)? in
                 if reading.compound {
                     guard word.count >= 7, let first = reading.first,
@@ -685,8 +729,7 @@ final class TypingVocabulary {
                 for id in 0..<3 { completions.append((lex.displayForm(lex.text(id)), weight[index] + lex.unigram(id))) }
             }
         }
-        let shiftedName = !input.sentenceStart && typed.first?.isUppercase == true &&
-            matches && offset == 0 && suffix.first?.shifted == true && suffix.allSatisfy { $0.point != nil }
+        let shiftedName = !input.sentenceStart && typed.first?.isUppercase == true && taps.shifted
         candidates.sort { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }
         let best = candidates.first { text, _ in
             guard shiftedName else { return true }

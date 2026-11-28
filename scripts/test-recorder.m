@@ -9,6 +9,19 @@
 @implementation TestDisplay
 @end
 
+static BOOL hasLiveFragments(NSURL *directory) {
+    NSString *playlist = [NSString stringWithContentsOfURL:[directory URLByAppendingPathComponent:@"index.m3u8"]
+                                                   encoding:NSUTF8StringEncoding error:nil];
+    if (![playlist containsString:@"\nsegment-000.m4s\n"] ||
+        ![playlist containsString:@"\nsegment-001.m4s\n"] ||
+        [playlist containsString:@"#EXT-X-ENDLIST"]) return NO;
+    for (NSString *name in @[@"init.mp4", @"segment-000.m4s", @"segment-001.m4s"]) {
+        NSString *path = [directory URLByAppendingPathComponent:name].path;
+        if ([NSFileManager.defaultManager attributesOfItemAtPath:path error:nil].fileSize == 0) return NO;
+    }
+    return YES;
+}
+
 int main(int argc, const char **argv) {
     @autoreleasepool {
         if (argc < 2 || argc > 3) return 2;
@@ -28,7 +41,10 @@ int main(int argc, const char **argv) {
         }
         recording.hostOrigin = CMClockGetTime(CMClockGetHostTimeClock());
         recording.writer.initialSegmentStartTime = kCMTimeZero;
-        if (![recording.writer startWriting]) return 4;
+        if (![recording.writer startWriting]) {
+            fprintf(stderr, "Could not start the test writer: %s\n", (recording.writer.error.description ?: @"none").UTF8String);
+            return 4;
+        }
         [recording.writer startSessionAtSourceTime:kCMTimeZero];
         recording.acceptingSamples = YES;
         recording.setupPending = NO;
@@ -57,7 +73,11 @@ int main(int argc, const char **argv) {
             kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked, 2, 1, 2, 1, 16, 0 };
         CMAudioFormatDescriptionRef audioFormat = NULL;
         CMAudioFormatDescriptionCreate(NULL, &format, 0, NULL, 0, NULL, NULL, &audioFormat);
-        for (int chunk = 0; chunk < 200; chunk++) {
+        const int chunksPerSecond = 48000 / 960;
+        const int captureSeconds = 4;
+        const int timeoutSeconds = 15;
+        BOOL live = NO;
+        for (int chunk = 0; chunk < timeoutSeconds * chunksPerSecond; chunk++) {
             CMBlockBufferRef block = NULL;
             CMBlockBufferCreateWithMemoryBlock(NULL, NULL, 1920, NULL, NULL, 0, 1920, 0, &block);
             int16_t samples[960];
@@ -73,12 +93,22 @@ int main(int argc, const char **argv) {
             CMTime deadline = CMTimeAdd(recording.hostOrigin, CMTimeMake((chunk + 1) * 960, 48000));
             double wait = CMTimeGetSeconds(CMTimeSubtract(deadline, CMClockGetTime(CMClockGetHostTimeClock())));
             if (wait > 0) usleep((useconds_t)(wait * 1000000));
-            if (chunk == 100 && recording.segmentCount < 1) {
-                fprintf(stderr, "No segment before stop on a static screen\n");
-                return 5;
+            if ((chunk + 1) % 10 == 0) {
+                AVAssetWriterStatus status = recording.writer.status;
+                if (status == AVAssetWriterStatusFailed || status == AVAssetWriterStatusCancelled) break;
+                if (chunk + 1 >= captureSeconds * chunksPerSecond && hasLiveFragments(recording.segmentURL)) {
+                    live = YES;
+                    break;
+                }
             }
         }
         CFRelease(audioFormat);
+        if (!live) {
+            double elapsed = CMTimeGetSeconds(CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()), recording.hostOrigin));
+            fprintf(stderr, "Static screen produced no playable pair of live fragments after %.1fs. Writer status=%ld, error=%s\n",
+                    elapsed, (long)recording.writer.status, (recording.writer.error.description ?: @"none").UTF8String);
+            return 5;
+        }
         if (fail) {
             dispatch_sync(recording.controlQueue, ^{
                 [recording failSetup:SeeError(99, @"Injected recorder failure")];

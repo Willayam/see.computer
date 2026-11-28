@@ -46,17 +46,28 @@ pub fn evicted(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| dataless(&meta))
 }
 
-#[derive(Hash)]
+#[derive(Hash, PartialEq, Eq)]
 pub struct Stamp {
     source: Option<(u64, SystemTime)>,
-    behind: bool,
+    flags: u32,
+    inode: u64,
+    stale_copy: Option<(u64, SystemTime)>,
 }
 
 pub fn stamp(source: &Path) -> Stamp {
     let meta = fs::symlink_metadata(source).ok();
     Stamp {
         source: meta.as_ref().and_then(identity),
-        behind: meta.as_ref().is_some_and(|meta| behind_copy(source, meta)),
+        flags: meta
+            .as_ref()
+            .map_or(0, std::os::darwin::fs::MetadataExt::st_flags),
+        inode: meta.as_ref().map_or(0, std::os::unix::fs::MetadataExt::ino),
+        stale_copy: meta
+            .as_ref()
+            .filter(|m| dataless(m))
+            .and_then(|_| fs::metadata(copy_path(source)).ok())
+            .as_ref()
+            .and_then(identity),
     }
 }
 

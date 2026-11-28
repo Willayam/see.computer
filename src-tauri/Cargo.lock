@@ -3741,6 +3741,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-updater",
+ "tempfile",
  "thiserror 2.0.20",
  "ureq",
  "url",

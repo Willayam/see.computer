@@ -12,6 +12,7 @@ use crate::ledger::{Id, Ledger, Source};
 
 pub struct Watch {
     pub id: Id,
+    pub posted_at: Instant,
     pub pid: i32,
     /// Only for the diagnostic log, which must name an app across restarts.
     pub bundle: String,
@@ -477,11 +478,12 @@ fn log(watch: &Watch, opened: bool, outcome: &str) {
     {
         let _ = writeln!(
             file,
-            "{}\t{}\t{}\t{}",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            "{}\t{}\t{}\t{}\t{}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
             watch.bundle,
             opened,
-            outcome
+            outcome,
+            watch.posted_at.elapsed().as_millis()
         );
     }
 }
@@ -576,6 +578,7 @@ fn run(watch: Watch, ledger: &Ledger, rx: &mpsc::Receiver<Watch>) -> Option<Watc
         log(&watch, opened, "not-found");
         return None;
     };
+    log(&watch, opened, "observed");
     let mut last = Some(watch.pasted.clone());
     let mut misses = 0;
     let mut outcome = "unchanged".to_owned();
@@ -640,6 +643,7 @@ mod tests {
         );
         let watch = Watch {
             id: Id::test("rewrite"),
+            posted_at: Instant::now(),
             pid: 0,
             bundle: String::new(),
             pasted: "we use superbase.".into(),

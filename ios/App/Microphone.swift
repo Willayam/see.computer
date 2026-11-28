@@ -9,13 +9,9 @@ final class Microphone {
     private let target = AVAudioFormat(
         commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
 
-    private struct Tap {
-        var sink: (([Float]) -> Void)?
-        var preroll: [Float] = []
-        var converter: AVAudioConverter?
-    }
-    private let tap = OSAllocatedUnfairLock(initialState: Tap())
-    private static let prerollSamples = 16_000 * 3 / 10
+    private let gate = CaptureGate(keeping: 16_000 * 3 / 10)
+    /// Replaced on the main thread after a route change, read on the audio thread.
+    private let converter = OSAllocatedUnfairLock<AVAudioConverter?>(uncheckedState: nil)
 
     func start() throws {
         if startTestInput() { return }
@@ -37,7 +33,8 @@ final class Microphone {
         guard Microphone.testInput == nil else { return }
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
-        tap.withLock { $0 = Tap() }
+        gate.reset()
+        converter.withLockUnchecked { $0 = nil }
         Bridge.writeLevel(0)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
@@ -58,26 +55,33 @@ final class Microphone {
     }
 
     func beginCapture(_ sink: @escaping ([Float]) -> Void) {
-        Microphone.testInput?.rewind()
-        let preroll = tap.withLock { state -> [Float] in
-            state.sink = sink
-            defer { state.preroll = [] }
-            return Microphone.testInput == nil ? state.preroll : []
+        let take: ([Float]) -> Void = { samples in
+            sink(samples)
+            let energy = samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count)
+            // From -50 dB, a quiet room, to -10 dB, loud speech close to the phone.
+            Bridge.writeLevel((10 * log10(max(energy, 1e-9)) + 50) / 40)
         }
-        if !preroll.isEmpty { sink(preroll) }
+        if let input = Microphone.testInput {
+            testQueue.sync {
+                input.rewind()
+                gate.begin(replayingKept: false, take)
+            }
+        } else {
+            gate.begin(take)
+        }
     }
 
+    /// No block reaches the sink once this returns, so the caller can finish the take.
     func endCapture() {
-        tap.withLock { $0.sink = nil }
-        Bridge.writeLevel(0)
+        gate.end { Bridge.writeLevel(0) }
     }
 
     private func installTap() throws {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw MicrophoneFailure.noInput }
-        let converter = AVAudioConverter(from: format, to: target)
-        tap.withLock { $0.converter = converter }
+        let fresh = AVAudioConverter(from: format, to: target)
+        converter.withLockUnchecked { $0 = fresh }
         input.removeTap(onBus: 0)
         input.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
             self?.receive(buffer)
@@ -85,29 +89,11 @@ final class Microphone {
     }
 
     private func receive(_ buffer: AVAudioPCMBuffer) {
-        deliver(convert(buffer))
-    }
-
-    private func deliver(_ samples: [Float]) {
-        guard !samples.isEmpty else { return }
-        let sink = tap.withLock { state -> (([Float]) -> Void)? in
-            if state.sink == nil {
-                state.preroll.append(contentsOf: samples)
-                if state.preroll.count > Self.prerollSamples {
-                    state.preroll.removeFirst(state.preroll.count - Self.prerollSamples)
-                }
-            }
-            return state.sink
-        }
-        guard let sink else { return }
-        let energy = samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count)
-        // From -50 dB, a quiet room, to -10 dB, loud speech close to the phone.
-        Bridge.writeLevel((10 * log10(max(energy, 1e-9)) + 50) / 40)
-        sink(samples)
+        gate.deliver(convert(buffer))
     }
 
     private func convert(_ buffer: AVAudioPCMBuffer) -> [Float] {
-        guard let converter = tap.withLock({ $0.converter }) else { return [] }
+        guard let converter = converter.withLockUnchecked({ $0 }) else { return [] }
         let capacity = AVAudioFrameCount(
             Double(buffer.frameLength) * target.sampleRate / buffer.format.sampleRate + 64)
         guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else {
@@ -129,9 +115,9 @@ final class Microphone {
     }
 
     /// Debug builds replace the microphone when `Documents/test-input.wav`
-    /// exists, as `SEE_COMPUTER_AUDIO_FILE` does on the Mac. It also keeps the audio
-    /// engine out of the simulator, where the input node goes through the Mac's
-    /// audio service and aborts the app if that does not answer in time.
+    /// exists, as `SEE_COMPUTER_AUDIO_FILE` does on the Mac. It also keeps the input
+    /// node out of the simulator, where it goes through the Mac's audio service and
+    /// aborts the app if that does not answer in time.
     private static let testInput: TestInput? = {
         #if DEBUG
             return TestInput(url: Paths.documents.appendingPathComponent("test-input.wav"))
@@ -140,21 +126,46 @@ final class Microphone {
         #endif
     }()
     private var testTimer: DispatchSourceTimer?
+    private let testQueue = DispatchQueue(label: "computer.see.ios.file-mic", qos: .userInitiated)
+    private let testSilence = AVAudioPlayerNode()
 
     private func startTestInput() -> Bool {
         guard let input = Microphone.testInput else { return false }
         guard testTimer == nil else { return true }
-        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+        let timer = DispatchSource.makeTimerSource(queue: testQueue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(100))
-        timer.setEventHandler { [weak self] in self?.deliver(input.next(count: 1600)) }
+        timer.setEventHandler { [weak self] in self?.gate.deliver(input.next(count: 1600)) }
         timer.resume()
         testTimer = timer
+        playTestSilence()
         return true
     }
 
     private func stopTestInput() {
         testTimer?.cancel()
         testTimer = nil
+        guard Microphone.testInput != nil, engine.isRunning else { return }
+        engine.stop()
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    /// The real microphone keeps the app running behind the host app. A file cannot, so
+    /// silence plays instead, or iOS suspends the app a few seconds into a take.
+    private func playTestSilence() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, options: [.mixWithOthers])
+        try? session.setActive(true)
+        if testSilence.engine !== engine {
+            testSilence.engine?.detach(testSilence)
+            engine.attach(testSilence)
+        }
+        let format = engine.outputNode.inputFormat(forBus: 0)
+        engine.connect(testSilence, to: engine.mainMixerNode, format: format)
+        guard let silence = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4800) else { return }
+        silence.frameLength = 4800
+        try? engine.start()
+        testSilence.scheduleBuffer(silence, at: nil, options: .loops)
+        testSilence.play()
     }
 }
 

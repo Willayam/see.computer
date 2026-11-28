@@ -197,6 +197,35 @@ fn nothing_focused_shows_the_words_instead_of_losing_them() {
     assert_eq!(held.text, "hello world");
     assert_eq!(held.note, None);
     assert_eq!(held.clipboard, "hello world");
+    assert_eq!(held.recovery, crate::pill::Recovery::AwaitingCopy);
+}
+
+#[test]
+fn failed_or_timed_out_paste_keeps_the_words_available_to_copy() {
+    for error in [Some(paste::Error::Clipboard("unavailable".into())), None] {
+        let (mut controller, pill, _dir) = test_controller();
+        let turn = Turn(7);
+        controller.session = Session::Pasting {
+            since: Instant::now() - PASTE_TIMEOUT,
+            turn,
+            held: crate::pill::Held {
+                id: turn.0,
+                text: "another take".into(),
+                clipboard: "another take".into(),
+                ..Default::default()
+            },
+        };
+        if let Some(error) = error {
+            controller.step(Msg::Paste(turn, paste::Outcome(Err(error))));
+        } else {
+            controller.expire();
+        }
+        assert!(matches!(controller.session, Session::Idle));
+        assert!(pill
+            .try_iter()
+            .any(|event| matches!(event, PillEvent::Recovered(held)
+            if held.id == turn.0 && held.clipboard == "another take" && held.recovery == crate::pill::Recovery::AwaitingCopy)));
+    }
 }
 
 #[test]
@@ -565,7 +594,7 @@ fn stale_stream_with_empty_audio_reports_mic_unavailable() {
 fn held_texts(pill: &Receiver<PillEvent>) -> Vec<String> {
     pill.try_iter()
         .filter_map(|event| match event {
-            PillEvent::Held(held) => Some(held.text),
+            PillEvent::Held(held) | PillEvent::Recovered(held) => Some(held.text),
             _ => None,
         })
         .collect()
@@ -595,8 +624,6 @@ fn a_timeout_saves_the_take_and_shows_its_words_when_they_arrive() {
     // The next take goes ahead while the engine catches up.
     controller.step(Msg::MainPressed);
     assert!(matches!(controller.session, Session::Dictating { .. }));
-    controller.step(Msg::Cancel);
-
     controller.step(Msg::Engine(engine::Event::Done(
         job,
         Ok(engine::Transcription {
@@ -606,7 +633,12 @@ fn a_timeout_saves_the_take_and_shows_its_words_when_they_arrive() {
         }),
     )));
     assert_eq!(held_texts(&pill), ["late words"]);
-    assert!(controller.saved.list().is_empty());
+    assert!(matches!(controller.session, Session::Dictating { .. }));
+    assert_eq!(
+        controller.saved.list(),
+        saved,
+        "the other take cannot acknowledge these words"
+    );
     assert!(controller.late.is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -647,7 +679,33 @@ fn a_failed_late_job_keeps_its_audio_and_a_retry_delivers_it() {
         }),
     )));
     assert_eq!(held_texts(&pill), ["hello world"]);
-    assert!(controller.saved.list().is_empty());
+    assert_eq!(
+        controller.saved.list().len(),
+        1,
+        "queued for Copy, still recoverable after restart"
+    );
+    controller.step(Msg::RetrySaved);
+    assert!(
+        controller.late.is_empty(),
+        "the pill already owns this result"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn timeout_reports_an_unwritable_retry_folder_and_keeps_the_live_job() {
+    let (mut controller, pill, dir) = test_controller();
+    std::fs::write(dir.join("saved"), b"not a directory").unwrap();
+    controller.step(Msg::MainPressed);
+    controller.step(Msg::MainReleased);
+    controller.expire();
+    assert!(pill
+        .try_iter()
+        .any(|event| event == PillEvent::Finish(Notice::SaveFailed)));
+    assert!(matches!(
+        controller.late.as_slice(),
+        [LateJob { path: None, .. }]
+    ));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -665,6 +723,46 @@ fn a_take_that_times_out_is_packaged_instead_of_deleted() {
     assert!(matches!(controller.session, Session::PackagingTake { .. }));
     assert_eq!(controller.saved.list().len(), 1);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn queued_completion_wins_its_deadline_and_new_traffic_cannot_starve_expiry() {
+    let (mut controller, pill, _dir) = test_controller();
+    while let Ok(msg) = controller.rx.try_recv() {
+        controller.step(msg)
+    }
+    let turn = Turn(10);
+    let expired = Instant::now() - PASTE_TIMEOUT;
+    let waiting = || Session::Pasting {
+        turn,
+        since: expired,
+        held: Default::default(),
+    };
+    controller.session = waiting();
+    controller.tx.send(Msg::TriggerReady).unwrap();
+    controller
+        .tx
+        .send(Msg::Paste(turn, paste::Outcome(Ok(paste::Landing::Pasted))))
+        .unwrap();
+    for _ in 0..3 {
+        let msg = controller.receive_message().unwrap();
+        controller.step(msg);
+    }
+    assert!(matches!(controller.session, Session::Idle));
+    assert!(!pill
+        .try_iter()
+        .any(|event| event == PillEvent::Finish(Notice::TimedOut("Paste"))));
+    controller.session = waiting();
+    controller.tx.send(Msg::TriggerReady).unwrap();
+    let first = controller.receive_message().unwrap();
+    controller.step(first);
+    controller.tx.send(Msg::TriggerReady).unwrap();
+    let next = controller.receive_message().unwrap();
+    controller.step(next);
+    assert!(matches!(controller.session, Session::Idle));
+    assert!(pill
+        .try_iter()
+        .any(|event| event == PillEvent::Finish(Notice::TimedOut("Paste"))));
 }
 
 #[test]

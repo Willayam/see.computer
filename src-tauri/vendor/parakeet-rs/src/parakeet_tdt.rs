@@ -20,6 +20,11 @@ pub struct ParakeetTDT {
 }
 
 impl ParakeetTDT {
+    /// Attach ONNX run options to both stages of the next inference calls.
+    pub fn set_run_options(&mut self, options: Option<std::sync::Arc<ort::session::RunOptions>>) {
+        self.model.run_options = options;
+    }
+
     /// Load Parakeet TDT model from path with optional configuration.
     ///
     /// # Arguments

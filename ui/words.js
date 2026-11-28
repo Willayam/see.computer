@@ -303,18 +303,31 @@
   }
 
   function reload() {
-    if (loading) { reloadPending = true; return loading; }
-    return (loading ??= tauri.core.invoke("library_words").then((d) => {
+    reloadPending = true;
+    if (!loading) loading = Promise.resolve().then(async () => {
+      try {
+        while (reloadPending) {
+          reloadPending = false;
+          await refresh();
+        }
+      } finally { loading = null; }
+    });
+    return loading;
+  }
+
+  async function refresh() {
+    try {
+      const d = await tauri.core.invoke("library_words");
       state.data = d;
       state.error = "";
       const sub = $("#words-row .row-sub");
       if (sub) sub.textContent = rowSub();
       if (L.current() === WORDS) renderDetail($("#detail"));
-    }, (error) => {
+    } catch (error) {
       state.error = `Words could not load: ${error}`;
       if (L.current() === WORDS && !state.data) renderDetail($("#detail"));
       else L.toast(state.error);
-    }).finally(() => { loading = null; if (reloadPending) { reloadPending = false; reload(); } }));
+    }
   }
 
   window.seeWords = {
@@ -322,5 +335,6 @@
     open() { state.play = true; reload(); },
   };
   tauri.event.listen("library-changed", reload);
+  window.addEventListener("focus", reload);
   reload();
 })();

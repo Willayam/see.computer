@@ -616,8 +616,8 @@ Follow-up still open:
   the see.computer folder, meetings and takes included, for a check that must
   not touch the real one), `SEE_COMPUTER_SHADOW_DIR` (moves the read copies
   out of Application Support), and
-  `SEE_COMPUTER_READBACK_LOG` (one line per watch with the app and outcome,
-  never the text), and `SEE_COMPUTER_PASTE=hold`, which holds the words
+  `SEE_COMPUTER_READBACK_LOG` (records the app, first observation, final
+  outcome and milliseconds since Cmd+V), and `SEE_COMPUTER_PASTE=hold`, which holds the words
   instead of pasting. Use it with the screen locked: the lock screen reports
   an editable field, so a real paste would type into its password box.
 - `see-computer eval` exits 2 when any clip was skipped, so a run that

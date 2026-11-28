@@ -12,6 +12,8 @@ use tauri_plugin_autostart::ManagerExt;
 use crate::config::Config;
 use crate::history::History;
 use crate::ledger::{Learning, Ledger};
+use crate::meeting::controller::Status;
+use crate::meeting::recorder::{Ask, Call};
 use crate::menu::{self, Row};
 use crate::pill::{Notice, PillEvent};
 use crate::recents::{self, Payload};
@@ -253,28 +255,11 @@ impl Panel {
             };
             rows.push(item("saved-retry", &label, false, Some("arrow.clockwise")));
         }
-        let (label, symbol) = match self.meetings.status() {
-            crate::meeting::controller::Status::Idle => {
-                ("Record a meeting".to_owned(), "record.circle")
-            }
-            crate::meeting::controller::Status::Offered(app) => {
-                (format!("Record {} meeting", app.name), "record.circle")
-            }
-            crate::meeting::controller::Status::Recording { started_ms, .. } => {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-                let minutes = now_ms.saturating_sub(started_ms) / 60_000;
-                let duration = if minutes == 0 {
-                    "under 1 min".to_owned()
-                } else {
-                    format!("{minutes} min")
-                };
-                (format!("Stop recording · {duration}"), "stop.circle")
-            }
-        };
-        rows.push(item("meeting", &label, false, Some(symbol)));
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        rows.extend(meeting_rows(&self.meetings.status(), now_ms));
         rows.push(Row::Separator);
 
         let recents = self.recents.lock().unwrap_or_else(PoisonError::into_inner);
@@ -493,6 +478,14 @@ impl Panel {
                 self.meetings.toggle();
                 None
             }
+            "meeting-hear-again" => {
+                self.meetings.hear(Ask::Again);
+                None
+            }
+            "meeting-hear-wider" => {
+                self.meetings.hear(Ask::Wider);
+                None
+            }
             "meeting-autostart" => {
                 self.meeting_autostart.fetch_xor(true, Ordering::Relaxed);
                 self.save_config();
@@ -629,15 +622,152 @@ fn item(id: &'static str, label: &str, checked: bool, symbol: Option<&'static st
     }
 }
 
+/// The meeting row, and under a recording that hears only the microphone,
+/// the ways to bring in the other side. Taking in every app's audio is
+/// always a row the user picks and never something a failed lookup does.
+fn meeting_rows(status: &Status, now_ms: i64) -> Vec<Row> {
+    let (app, started_ms, call) = match status {
+        Status::Idle => {
+            return vec![item(
+                "meeting",
+                "Record a meeting",
+                false,
+                Some("record.circle"),
+            )]
+        }
+        Status::Offered(app) => {
+            return vec![item(
+                "meeting",
+                &format!("Record {} meeting", app.name),
+                false,
+                Some("record.circle"),
+            )]
+        }
+        Status::Recording {
+            app,
+            started_ms,
+            call,
+        } => (app, started_ms, call),
+    };
+    let minutes = now_ms.saturating_sub(*started_ms) / 60_000;
+    let duration = if minutes == 0 {
+        "under 1 min".to_owned()
+    } else {
+        format!("{minutes} min")
+    };
+    let mut rows = vec![item(
+        "meeting",
+        &format!("Stop recording · {duration}"),
+        false,
+        Some("stop.circle"),
+    )];
+    match (call, app) {
+        (Call::Recorded(_), _) => {}
+        (Call::Missing(_), Some(app)) => {
+            rows.push(Row::Hint(format!(
+                "{} audio is not being recorded",
+                app.name
+            )));
+            rows.push(item(
+                "meeting-hear-again",
+                &format!("Retry {} audio", app.name),
+                false,
+                Some("arrow.clockwise"),
+            ));
+            rows.push(item(
+                "meeting-hear-wider",
+                "Record all system audio",
+                false,
+                Some("speaker.wave.2"),
+            ));
+        }
+        (Call::Missing(_), None) => {
+            rows.push(Row::Hint("System audio is not being recorded".to_owned()));
+            rows.push(item(
+                "meeting-hear-again",
+                "Retry system audio",
+                false,
+                Some("arrow.clockwise"),
+            ));
+        }
+    }
+    rows
+}
+
+#[cfg(test)]
+mod meeting_tests {
+    use super::*;
+    use crate::meeting::folder::Scope;
+
+    fn recording(app: Option<&str>, call: Call) -> Status {
+        Status::Recording {
+            app: app.map(|bundle| crate::meeting::app_for(bundle).unwrap()),
+            started_ms: 0,
+            call,
+        }
+    }
+
+    fn ids(rows: &[Row]) -> Vec<&str> {
+        rows.iter()
+            .filter_map(|row| match row {
+                Row::Item { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_recording_without_the_other_side_offers_how_to_get_it() {
+        let whole = meeting_rows(
+            &recording(Some("us.zoom.xos"), Call::Recorded(Scope::App)),
+            125_000,
+        );
+        assert_eq!(
+            whole,
+            [item(
+                "meeting",
+                "Stop recording · 2 min",
+                false,
+                Some("stop.circle")
+            )]
+        );
+
+        let missing = Call::Missing("Zoom has no audio to record yet".into());
+        let alone = meeting_rows(&recording(Some("us.zoom.xos"), missing.clone()), 0);
+        assert_eq!(
+            ids(&alone),
+            ["meeting", "meeting-hear-again", "meeting-hear-wider"]
+        );
+        assert_eq!(
+            alone[1],
+            Row::Hint("Zoom audio is not being recorded".into())
+        );
+        assert_eq!(
+            alone[2],
+            item(
+                "meeting-hear-again",
+                "Retry Zoom audio",
+                false,
+                Some("arrow.clockwise")
+            )
+        );
+
+        let by_hand = meeting_rows(&recording(None, missing), 0);
+        assert_eq!(ids(&by_hand), ["meeting", "meeting-hear-again"]);
+        assert_eq!(
+            by_hand[1],
+            Row::Hint("System audio is not being recorded".into())
+        );
+    }
+}
+
 /// The Library route that opens the newest dictation's line ready to edit.
 fn last_dictation(history: &History) -> Option<String> {
-    use chrono::TimeZone;
     let entry = history.recent(1).into_iter().next()?;
-    let at = chrono::Local.from_local_datetime(&entry.at).earliest()?;
     Some(format!(
         "edit:dictation:{}@{}",
         entry.at.format("%Y-%m-%d"),
-        at.timestamp_millis()
+        entry.start_ms
     ))
 }
 

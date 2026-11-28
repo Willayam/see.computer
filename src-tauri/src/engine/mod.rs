@@ -1,10 +1,12 @@
 //! Speech to text through one worker-owned Parakeet engine.
 
 use std::sync::mpsc::{Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::mic::Audio16k;
 use crate::text::Text;
+use ort::session::RunOptions;
 
 pub mod models;
 pub mod parakeet;
@@ -14,6 +16,7 @@ pub use models::{ModelFiles, Models};
 
 pub trait Engine: Send {
     fn transcribe(&mut self, audio: &Audio16k) -> Result<Transcription, EngineError>;
+    fn set_preview_options(&mut self, _options: Option<Arc<RunOptions>>) {}
     fn set_context(&mut self, _terms: &[crate::context::Term]) {}
     fn context_terms(&self) -> Vec<crate::context::Term> {
         Vec::new()
@@ -25,10 +28,7 @@ const CHUNK_TARGET: usize = 20 * SAMPLE_RATE;
 const CHUNK_MAX: usize = 30 * SAMPLE_RATE;
 const CUT_SEARCH: usize = 5 * SAMPLE_RATE;
 const CUT_WINDOW: usize = SAMPLE_RATE / 5;
-/// A preview waits for this much new audio, or for three times what the last
-/// one cost to decode if that is longer. A long take, whose pending chunk takes
-/// half a second to read, then leaves the engine idle two thirds of the time.
-const PREVIEW_STEP: Duration = Duration::from_millis(400);
+const PREVIEW_STEP: Duration = Duration::from_millis(800);
 /// Less than this and the model has too little to say anything sensible.
 const PREVIEW_MIN: usize = SAMPLE_RATE * 6 / 10;
 
@@ -71,6 +71,10 @@ pub struct Utterance {
     /// Length of `whole` when the last preview ran, and what that preview cost.
     previewed: usize,
     preview_cost: Duration,
+    preview_count: u32,
+    preview_interrupts: u32,
+    preview_total: Duration,
+    last_preview_finished: Option<Instant>,
 }
 
 impl Utterance {
@@ -125,10 +129,10 @@ impl Utterance {
     }
 
     pub fn preview_due(&self) -> bool {
-        let step = PREVIEW_STEP.max(self.preview_cost * 3).as_secs_f64() * SAMPLE_RATE as f64;
+        let step = PREVIEW_STEP.max(self.preview_cost * 5).as_secs_f64() * SAMPLE_RATE as f64;
         !self.chunk_error
             && self.pending.len() >= PREVIEW_MIN
-            && (self.whole.len() - self.previewed) as f64 >= step
+            && (self.preview_count == 0 || (self.whole.len() - self.previewed) as f64 >= step)
     }
 
     /// What the take reads as so far: the chunks already transcribed, then a
@@ -141,6 +145,9 @@ impl Utterance {
             .transcribe(&Audio16k::from_samples(self.pending.clone()))
             .ok();
         self.preview_cost = started.elapsed();
+        self.preview_total += self.preview_cost;
+        self.preview_count += 1;
+        self.last_preview_finished = Some(Instant::now());
         let mut parts = self.texts.clone();
         parts.extend(
             tail.and_then(|tail| tail.text)
@@ -170,6 +177,10 @@ impl Utterance {
         self.chunk_error = false;
         self.previewed = 0;
         self.preview_cost = Duration::ZERO;
+        self.preview_count = 0;
+        self.preview_interrupts = 0;
+        self.preview_total = Duration::ZERO;
+        self.last_preview_finished = None;
     }
 }
 
@@ -250,10 +261,22 @@ pub enum Loader {
     Models(Models),
     #[cfg(test)]
     Canned(String),
+    #[cfg(test)]
+    Fixture(Arc<dyn Fn() -> Box<dyn Engine> + Send + Sync>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JobId(pub u64);
+
+#[derive(Debug)]
+pub struct Timings {
+    pub queued: Duration,
+    pub inference: Duration,
+    pub preview_overlap: Duration,
+    pub preview_total: Duration,
+    pub preview_count: u32,
+    pub preview_interrupts: u32,
+}
 
 pub enum Event {
     Progress(Progress),
@@ -262,6 +285,7 @@ pub enum Event {
     /// utterance `begin_context` numbered, so one still in flight when a take
     /// was cancelled cannot land on the next.
     Preview(u64, String),
+    Timing(JobId, Timings),
     Done(JobId, Result<Transcription, EngineError>),
 }
 
@@ -274,11 +298,12 @@ enum Job {
     Context(u64, std::sync::mpsc::Receiver<Vec<crate::context::Term>>),
     Feed(Audio16k),
     Discard,
-    Transcribe(JobId, Audio16k),
+    Transcribe(JobId, Instant, Audio16k),
 }
 
 pub struct Worker {
     jobs: Sender<Job>,
+    active_preview: Arc<Mutex<Option<Arc<RunOptions>>>>,
     next: u64,
     utterance: u64,
     context_used: std::sync::Arc<std::sync::Mutex<Vec<crate::context::Term>>>,
@@ -286,7 +311,17 @@ pub struct Worker {
 
 impl Worker {
     pub fn spawn<M: From<Event> + Send + 'static>(loader: Loader, reply: Sender<M>) -> Worker {
+        Self::spawn_with_previews(loader, reply, previews_enabled())
+    }
+
+    fn spawn_with_previews<M: From<Event> + Send + 'static>(
+        loader: Loader,
+        reply: Sender<M>,
+        previews: bool,
+    ) -> Worker {
         let (jobs, rx) = std::sync::mpsc::channel();
+        let active_preview = Arc::new(Mutex::new(None));
+        let running = Arc::clone(&active_preview);
         let context_used = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let used = context_used.clone();
         crate::qos::spawn("see-engine", crate::qos::Class::Engine, move || {
@@ -317,6 +352,8 @@ impl Worker {
                 }
                 #[cfg(test)]
                 Loader::Canned(text) => Ok(Box::new(Canned(text))),
+                #[cfg(test)]
+                Loader::Fixture(load) => Ok(load()),
             };
             let mut engine = match loaded {
                 Ok(engine) => {
@@ -330,7 +367,6 @@ impl Worker {
             };
             let mut utterance = Utterance::default();
             let mut context: Option<std::sync::mpsc::Receiver<Vec<crate::context::Term>>> = None;
-            let previews = previews_enabled();
             let mut current = 0;
             let mut queued = None;
             loop {
@@ -370,23 +406,57 @@ impl Worker {
                         engine.set_context(&[]);
                         context = None;
                     }
-                    Job::Transcribe(job, audio) => {
+                    Job::Transcribe(job, submitted, audio) => {
+                        let started = Instant::now();
+                        let preview_overlap = utterance
+                            .last_preview_finished
+                            .map_or(Duration::ZERO, |end| {
+                                end.saturating_duration_since(submitted)
+                            })
+                            .min(utterance.preview_cost);
+                        let preview_total = utterance.preview_total;
+                        let preview_count = utterance.preview_count;
+                        let preview_interrupts = utterance.preview_interrupts;
                         let result = utterance.finish(engine.as_mut(), &audio);
+                        let timings = Timings {
+                            queued: started.saturating_duration_since(submitted),
+                            inference: started.elapsed(),
+                            preview_overlap,
+                            preview_total,
+                            preview_count,
+                            preview_interrupts,
+                        };
                         engine.set_context(&[]);
                         context = None;
+                        let _ = reply.send(Event::Timing(job, timings).into());
                         if reply.send(Event::Done(job, result).into()).is_err() {
                             break;
                         }
                     }
                 }
-                // Only with nothing else waiting, so a release already in the
-                // queue never sits behind a preview. One that arrives during
-                // the pass still waits for it, at most one preview's cost.
                 if previews && utterance.preview_due() {
+                    let mut slot = running
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     match rx.try_recv() {
                         Ok(job) => queued = Some(job),
                         Err(TryRecvError::Empty) => {
-                            if let Some(text) = utterance.preview(engine.as_mut()) {
+                            let Ok(options) = RunOptions::new() else {
+                                continue;
+                            };
+                            let options = Arc::new(options);
+                            *slot = Some(Arc::clone(&options));
+                            drop(slot);
+                            engine.set_preview_options(Some(options));
+                            let text = utterance.preview(engine.as_mut());
+                            engine.set_preview_options(None);
+                            let active = running
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .take();
+                            if active.is_none() {
+                                utterance.preview_interrupts += 1;
+                            } else if let Some(text) = text {
                                 let _ = reply.send(Event::Preview(current, text).into());
                             }
                         }
@@ -397,6 +467,7 @@ impl Worker {
         });
         Worker {
             jobs,
+            active_preview,
             next: 0,
             utterance: 0,
             context_used,
@@ -406,8 +477,7 @@ impl Worker {
     pub fn submit(&mut self, audio: Audio16k) -> Result<JobId, EngineError> {
         self.next = self.next.wrapping_add(1);
         let job = JobId(self.next);
-        self.jobs
-            .send(Job::Transcribe(job, audio))
+        self.interrupt_preview(Job::Transcribe(job, Instant::now(), audio))
             .map_err(|_| EngineError::Inference("transcription worker stopped".to_owned()))?;
         Ok(job)
     }
@@ -424,7 +494,7 @@ impl Worker {
         context: std::sync::mpsc::Receiver<Vec<crate::context::Term>>,
     ) -> u64 {
         self.utterance = self.utterance.wrapping_add(1);
-        let _ = self.jobs.send(Job::Context(self.utterance, context));
+        let _ = self.interrupt_preview(Job::Context(self.utterance, context));
         self.utterance
     }
 
@@ -440,7 +510,19 @@ impl Worker {
     }
 
     pub fn discard(&self) {
-        let _ = self.jobs.send(Job::Discard);
+        let _ = self.interrupt_preview(Job::Discard);
+    }
+
+    fn interrupt_preview(&self, job: Job) -> Result<(), std::sync::mpsc::SendError<Job>> {
+        let mut slot = self
+            .active_preview
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.jobs.send(job)?;
+        if let Some(options) = slot.take() {
+            let _ = options.terminate();
+        }
+        Ok(())
     }
 }
 
@@ -475,6 +557,63 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn release_during_a_preview_keeps_the_final_audio_and_suppresses_stale_words() {
+        use std::sync::mpsc;
+        struct Paused {
+            started: mpsc::Sender<mpsc::Sender<()>>,
+            preview: bool,
+        }
+        impl Engine for Paused {
+            fn set_preview_options(&mut self, options: Option<Arc<RunOptions>>) {
+                self.preview = options.is_some();
+            }
+            fn transcribe(&mut self, audio: &Audio16k) -> Result<Transcription, EngineError> {
+                if self.preview {
+                    let (resume, wait) = mpsc::channel();
+                    self.started.send(resume).unwrap();
+                    wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                Ok(Transcription {
+                    text: Text::parse(format!("{} samples", audio.samples().len())),
+                    ..Transcription::empty()
+                })
+            }
+        }
+        let (started, pause) = mpsc::channel();
+        let loader = Loader::Fixture(Arc::new(move || {
+            Box::new(Paused {
+                started: started.clone(),
+                preview: false,
+            })
+        }));
+        let (reply, events) = mpsc::channel::<Event>();
+        let mut worker = Worker::spawn_with_previews(loader, reply, true);
+        let long_enough = Audio16k::silence(1.0);
+        worker.feed(long_enough);
+        let resume = pause.recv_timeout(Duration::from_secs(5)).unwrap();
+        let job = worker.submit(Audio16k::silence(0.25)).unwrap();
+        resume.send(()).unwrap();
+        let mut interruptions = None;
+        loop {
+            match events.recv_timeout(Duration::from_secs(5)).unwrap() {
+                Event::Preview(..) => panic!("preview arrived after release"),
+                Event::Timing(id, timing) if id == job => {
+                    interruptions = Some(timing.preview_interrupts)
+                }
+                Event::Done(id, result) => {
+                    assert_eq!(id, job);
+                    assert_eq!(interruptions, Some(1));
+                    let result = result.unwrap();
+                    assert_eq!(result.audio.unwrap().samples().len(), 20_000);
+                    assert_eq!(result.text.unwrap().as_str(), "20000 samples");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
     fn warm_does_not_disturb_the_job_queue() {
         let (reply, events) = std::sync::mpsc::channel::<Event>();
         let mut worker = Worker::spawn(Loader::Canned("hello".to_owned()), reply);
@@ -489,7 +628,7 @@ mod tests {
                     break;
                 }
                 Event::Ready(result) => result.expect("ready"),
-                Event::Progress(_) | Event::Preview(..) => {}
+                Event::Progress(_) | Event::Preview(..) | Event::Timing(..) => {}
             }
         }
     }

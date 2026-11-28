@@ -152,12 +152,16 @@ fn run_tap(trigger: Arc<Mutex<Trigger>>, inbox: Sender<Msg>, gesture: Arc<Gestur
         publish_lock(&decoder, &gesture);
         send_message(&inbox, message);
 
+        let poll = Duration::from_millis(50);
+        let wait = decoder
+            .lock()
+            .ok()
+            .and_then(|decoder| decoder.hold_deadline())
+            .map_or(poll, |deadline| {
+                poll.min(deadline.saturating_duration_since(Instant::now()))
+            });
         if matches!(
-            CFRunLoop::run_in_mode(
-                unsafe { kCFRunLoopDefaultMode },
-                Duration::from_millis(50),
-                true,
-            ),
+            CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, wait, true,),
             CFRunLoopRunResult::Finished
         ) {
             return TapExit::Rebuild;

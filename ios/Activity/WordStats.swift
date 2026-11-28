@@ -80,7 +80,7 @@ enum WordTally {
         var total = 0
         var todayWords = 0
         var firstDictationDay: String?
-        let headings = try! NSRegularExpression(pattern: #"(?m)^## ([0-9]{2}):([0-9]{2}):([0-9]{2})\n\n"#)
+        let headings = try! NSRegularExpression(pattern: #"(?m)^## ([0-9]{2}):([0-9]{2}):([0-9]{2})(?: [+-][0-9]{2}:[0-9]{2})?\n\n"#)
         for day in days {
             guard let key = dayName(day.name) else { continue }
             let text = day.text as NSString

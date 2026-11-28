@@ -63,8 +63,16 @@ pub unsafe extern "C" fn see_engine_start(
     Box::into_raw(Box::new(SeeEngine { worker }))
 }
 
+/// # Safety
+/// The handle came from `see_engine_start`. No other call may use it during or after release.
+#[no_mangle]
+pub unsafe extern "C" fn see_engine_release(engine: *mut SeeEngine) {
+    drop(Box::from_raw(engine));
+}
+
 fn forward(sink: Sink, event: Event) {
     match event {
+        Event::Timing(..) => {}
         Event::Progress(progress) => {
             let kind = match progress.phase {
                 Phase::Downloading => PROGRESS_DOWNLOADING,

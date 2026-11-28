@@ -65,7 +65,7 @@ fn file_link(path: &Path) -> String {
 }
 
 pub struct Recent {
-    at: NaiveDateTime,
+    at: DateTime<Local>,
     pub payload: Payload,
 }
 
@@ -79,12 +79,12 @@ impl Recent {
                 summary
                     .text
                     .as_deref()
-                    .map_or_else(|| recording_label(self.at), transcript_label),
+                    .map_or_else(|| recording_label(self.at.naive_local()), transcript_label),
                 CLIP,
             ),
-            Payload::Recording(_) => (recording_label(self.at), CLIP),
+            Payload::Recording(_) => (recording_label(self.at.naive_local()), CLIP),
             Payload::Meeting(meeting) => (
-                meeting_label(&meeting.folder, &meeting.manifest, self.at),
+                meeting_label(&meeting.folder, &meeting.manifest, self.at.naive_local()),
                 MEETING,
             ),
         }
@@ -140,12 +140,14 @@ fn merge_recents(
 ) -> Vec<Recent> {
     let mut recents = transcripts
         .into_iter()
-        .map(|entry| Recent {
-            at: entry.at,
-            payload: Payload::Transcript(entry.text),
+        .filter_map(|entry| {
+            Some(Recent {
+                at: DateTime::from_timestamp_millis(entry.start_ms)?.with_timezone(&Local),
+                payload: Payload::Transcript(entry.text),
+            })
         })
         .chain(recordings.into_iter().map(|(at, path)| Recent {
-            at: at.naive_local(),
+            at,
             payload: recording_payload(path),
         }))
         .collect::<Vec<_>>();
@@ -332,7 +334,7 @@ mod tests {
 
     #[test]
     fn each_kind_of_recent_names_itself() {
-        let at = local("2026-08-20", "14:32:00").naive_local();
+        let at = local("2026-08-20", "14:32:00");
         let dictation = Recent {
             at,
             payload: Payload::Transcript("Hej på dig".to_owned()),
@@ -368,10 +370,12 @@ mod tests {
     fn merges_transcripts_and_recordings_by_timestamp() {
         let transcripts = vec![
             Entry {
+                start_ms: local("2026-08-20", "12:00:00").timestamp_millis(),
                 at: local("2026-08-20", "12:00:00").naive_local(),
                 text: "newest".to_owned(),
             },
             Entry {
+                start_ms: local("2026-08-20", "10:00:00").timestamp_millis(),
                 at: local("2026-08-20", "10:00:00").naive_local(),
                 text: "oldest".to_owned(),
             },

@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef struct {
@@ -186,7 +187,10 @@ void see_tap_stop(void *opaque) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ see_tap_teardown(tap); });
 }
 
-void *see_tap_start(const uint32_t *objects, int32_t count, const char *wav_path, char *error, int32_t error_len) {
+// `started_ms` receives the wall-clock time of the WAV's first sample, in
+// milliseconds since 1970, so a tap that starts late can be placed in the meeting.
+void *see_tap_start(const uint32_t *objects, int32_t count, const char *wav_path, int64_t *started_ms,
+                    char *error, int32_t error_len) {
     if (error && error_len > 0) error[0] = '\0';
     if (@available(macOS 14.4, *)) {
         SeeTap *tap = calloc(1, sizeof(*tap));
@@ -307,6 +311,9 @@ void *see_tap_start(const uint32_t *objects, int32_t count, const char *wav_path
             });
         if (status != noErr) { step = "AudioDeviceCreateIOProcIDWithBlock"; goto fail; }
         tap->start_host = AudioGetCurrentHostTime();
+        struct timespec wall;
+        clock_gettime(CLOCK_REALTIME, &wall);
+        if (started_ms) *started_ms = (int64_t)wall.tv_sec * 1000 + wall.tv_nsec / 1000000;
         status = AudioDeviceStart(tap->device, tap->proc);
         if (status != noErr) { step = "AudioDeviceStart"; goto fail; }
         tap->started = true;

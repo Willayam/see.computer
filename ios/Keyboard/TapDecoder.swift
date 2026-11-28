@@ -242,6 +242,11 @@ final class TapDecoder {
     }
 
     func candidates(costs next: [[Double]], omissions: [Double], textOnly: Bool, previous: Int?, spaces: [Double], lostSpace: Double) -> [Reading: Double] {
+        update(costs: next, omissions: omissions, textOnly: textOnly, previous: previous, spaces: spaces, lostSpace: lostSpace)
+        return readings()
+    }
+
+    func update(costs next: [[Double]], omissions: [Double], textOnly: Bool, previous: Int?, spaces: [Double], lostSpace: Double) {
         // Text without touch geometry keeps the existing preference for collapsing repeats.
         let repeatPenalty = textOnly ? 3.8 : slipCost
         let shared =
@@ -255,6 +260,9 @@ final class TapDecoder {
         costs = next
         self.omissions = omissions
         for i in shared..<next.count { layers.append(advance(i)) }
+    }
+
+    func readings() -> [Reading: Double] {
         var result: [Reading: Double] = [:]
         for state in layers.last! {
             if let id = lexicon.terminal(state.node) {

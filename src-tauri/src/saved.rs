@@ -1,8 +1,5 @@
-//! Dictations whose transcription outran its deadline, kept as audio until the
-//! engine delivers their words or the user asks for another pass.
-//!
-//! A file here means words that have not reached the user yet. The controller
-//! removes it once a transcription of it comes back, with text or without.
+//! Recoverable audio for dictations that timed out. Keep it until history saves the
+//! words or the user copies or dismisses them.
 
 use std::path::{Path, PathBuf};
 
@@ -18,9 +15,17 @@ impl Saved {
 
     pub fn keep(&self, audio: &crate::mic::Audio16k) -> std::io::Result<PathBuf> {
         std::fs::create_dir_all(&self.root)?;
-        let name = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
-        let path = self.root.join(format!("{name}.wav"));
-        crate::ledger::write_audio(&path, audio).map_err(std::io::Error::other)?;
+        let staged = tempfile::NamedTempFile::new_in(&self.root)?;
+        crate::ledger::write_audio(staged.path(), audio).map_err(std::io::Error::other)?;
+        staged.as_file().sync_data()?;
+        let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S-%9f");
+        let unique = staged
+            .path()
+            .file_name()
+            .expect("named temporary file")
+            .to_string_lossy();
+        let path = self.root.join(format!("{stamp}-{unique}.wav"));
+        staged.persist_noclobber(&path)?;
         Ok(path)
     }
 

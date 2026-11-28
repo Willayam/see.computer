@@ -1,5 +1,7 @@
+pub mod chunks;
 pub mod controller;
 pub mod folder;
+pub mod heard;
 pub mod holders;
 pub mod live;
 pub mod notes;

@@ -43,7 +43,7 @@ In version 0.1.1, turn on **Make recordings shareable** in Settings. It applies 
 
 Anyone with the link can view the captures and transcript. The beta allows 10 shares per installation per month, keeps links for 30 days, and limits each share to 256 MiB and 1,500 files. Cancelled takes count toward the allowance. There is no paid plan yet.
 
-Turning sharing off pauses uploads. Connection failures retry automatically, including after an app restart. The paste carries the link alone, even while the upload is still running. If publishing fails, recent items copy the local path. **Remove last shared link** queues deletion of the latest share. Local originals stay in Documents.
+Turning sharing off pauses uploads. Connection failures retry automatically, including after an app restart. When a take finishes, the uploader checks its file count and upload sizes, including the compressed screenshots. A take within the limits can paste its link while the upload continues. If a limit is exceeded, the menu names it and the paste keeps the local path. An older upload with missing size records keeps the local path until the service confirms it fits. **Remove last shared link** queues deletion of the latest share. Local originals stay in Documents.
 
 The service runs on private R2 storage in Cocco Ventures. See [the hosting instructions](services/shares/README.md) for limits and deployment, and [signed updates](docs/updates.md) for the release setup. Public distribution still needs Apple Developer ID signing and notarization.
 
@@ -51,11 +51,21 @@ The service runs on private R2 storage in Cocco Ventures. See [the hosting instr
 
 Transcripts are written to disk as plain text by default, with one markdown file per day in `~/Documents/see.computer/`. If macOS denies Documents access, they go to `~/Library/Application Support/see.computer/history/` instead.
 
+New timestamp headings include the UTC offset, so both occurrences of a repeated clock hour stay distinct. The Library reads older headings using their order in the file. Earlier app versions may skip offset-stamped entries after a downgrade. Their text remains readable in Markdown.
+
 Turn history off with **Save Dictation History** in the tray's **Settings**. Open **see.computer Folder** there to inspect or delete the plain files. There is no auto-pruning.
 
 For learning and accuracy checks, each dictation's audio, captured screen text, and what became of the dictation are also kept in `~/Library/Application Support/see.computer/ledger/`, outside iCloud. The ledger keeps audio and screen text for the newest 500 uncorrected dictations. Corrected dictations form the eval corpus. **Save Dictation History** turns this off too.
 
 Files in Documents can also sync through iCloud Desktop & Documents, if you have enabled it.
+
+## Meeting notes
+
+Choose **Record a meeting** in the Mac menu to record your microphone and system audio. When the menu names a call app, see.computer records that app's audio. If it cannot hear the app, it keeps recording your microphone. Choose **Retry Zoom audio** to try Zoom again, or **Record all system audio** to include other apps.
+
+**Stop recording** closes both inputs. The Library finishes the notes using speech it already transcribed during the call. If an expected audio file is missing, the Library names it. Restore the file and choose **Try again**.
+
+Run `see-computer notes --full <meeting-folder>` to transcribe the audio again. The app carries corrections over when the same words appear at the same time. If it cannot carry a correction, it keeps the earlier transcript in `meeting.previous.md` beside `meeting.md`.
 
 ## Custom vocabulary
 
@@ -113,9 +123,15 @@ Environment variables provide deterministic seams for local checks.
 - `SEE_COMPUTER_STATE_LOG=<path>` overrides the default local trace at `~/Library/Application Support/see.computer/events.tsv`. It records trigger/Shift edges, listener recovery, and controller transitions as `<unix ms>\t<from>\t<message>\t<to>`. It contains no typed characters, audio, or transcripts. The log starts over at 1 MiB.
 - `SEE_COMPUTER_HISTORY_DIR=<directory>` writes dictation history directly to that directory without fallback or healing.
 
+For a Mac dictation, compare the `TriggerUp`, transition to `Pasting`, and `PasteOk` timestamps to time key release through posting Cmd+V. The `EngineTiming` row breaks out time in the queue and in the decoder. With history enabled, `SEE_COMPUTER_READBACK_LOG=1` adds an `observed` row to the local `readback-log.tsv` when Accessibility finds matching words in the target field. Its last column counts milliseconds since Cmd+V. The first read runs after 250 ms. Test with an empty field or a new phrase to get an upper bound on insertion time.
+
+For a shared take, read the `timing` object in its private queue file under `~/Library/Application Support/see.computer/sharing/`. Times are Unix milliseconds. `started_ms` marks capture queueing. `first_playable_ms` marks service acceptance of a live manifest that lists an uploaded clip and its media. `published_ms` marks acceptance of the finished take. Subtract `last_error_ms` from the current time to find the age of the most recent upload failure. Older jobs can have unknown times.
+
 `scripts/launch-for-verification.sh [wav] [trail]` launches the built bundle with both set. `scripts/press-mod.swift` posts the modifier gestures as real keyboard events so a script can drive the app, and `scripts/click-tray.swift` opens the menu panel the same way. `see-computer transcribe <wav>` (the binary inside the bundle) transcribes a file and prints the text without starting the GUI.
 
-`scripts/bench-footprint.sh` is the memory and latency ruler. `scripts/bench-under-load.sh [runs] [hogs] [qos]` runs the same transcription while `scripts/busy.swift` keeps the machine busy, which is where the thread scheduling classes earn their keep. `scripts/bench-cold-recording.sh` evicts the memory-mapped model weights and measures the first recording afterwards, which is where the press-time engine warm earns its keep.
+`scripts/bench-footprint.sh` measures memory and latency. `scripts/bench-under-load.sh [runs] [hogs] [wav]` reports median inference time for a spoken WAV while `scripts/busy.swift` keeps the machine busy. It fails if any trial returns no words or timing. `scripts/bench-cold-recording.sh` evicts the memory-mapped model weights and measures the first recording afterwards.
+
+`see-computer transcribe --timed <wav> [block-phase-ms]` replays a spoken WAV at recording speed through the app’s worker. It prints the final words on standard output and one JSON timing record on standard error. The record includes model readiness, first preview, interrupted previews, queue wait, final inference and time from release to the CLI result. Vary the block phase from 0 through 199 to check whether release collided with a live preview. Set `SEE_COMPUTER_MODELS_DIR` and `SEE_COMPUTER_VOCABULARY` to use a disposable model cache and dictionary.
 
 ```sh
 cd src-tauri && cargo test

@@ -1,4 +1,4 @@
-//! `see-computer transcribe <wav>`, `clip <mov>`, `meetings`, `notes <meeting-folder>`, `words [--days]`, and `tap <seconds> <out.wav> [bundle-id]` are CLI commands.
+//! `see-computer transcribe <wav>`, `clip <mov>`, `meetings`, `notes [--full] <meeting-folder>`, `words [--days]`, and `tap <seconds> <out.wav> [bundle-id]` are CLI commands.
 //! The first two use the same engine and model root as the app.
 
 use std::path::PathBuf;
@@ -7,9 +7,11 @@ use std::time::{Duration, Instant};
 use crate::engine::{EngineError, Transcription};
 
 pub enum Cmd {
+    Usage(&'static str),
     Transcribe(PathBuf),
     TranscribeLive(PathBuf),
     TranscribePreview(PathBuf),
+    TranscribeTimed(PathBuf, String),
     Clip(PathBuf),
     Ocr(Vec<PathBuf>),
     Snapshot,
@@ -20,7 +22,9 @@ pub enum Cmd {
     Words {
         days: bool,
     },
-    Notes(PathBuf),
+    /// `--full` reads every chunk again in place of resuming from what the
+    /// engine already read, for a transcript that looks wrong.
+    Notes(PathBuf, crate::meeting::notes::Mode),
     Tap(u64, PathBuf, Option<String>),
 }
 
@@ -29,9 +33,16 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
         Some("transcribe") => match args.next().as_deref() {
             Some("--live") => args.next().map(PathBuf::from).map(Cmd::TranscribeLive),
             Some("--preview") => args.next().map(PathBuf::from).map(Cmd::TranscribePreview),
+            Some("--timed") => args.next().map(|path| {
+                Cmd::TranscribeTimed(path.into(), args.next().unwrap_or_else(|| "0".into()))
+            }),
             Some(path) => Some(Cmd::Transcribe(PathBuf::from(path))),
             None => None,
-        },
+        }
+        .filter(|_| args.next().is_none())
+        .or(Some(Cmd::Usage(
+            "transcribe [--live|--preview] <wav> or transcribe --timed <wav> [block-phase-ms]",
+        ))),
         Some("ocr") => {
             let paths: Vec<_> = args.map(PathBuf::from).collect();
             (!paths.is_empty()).then_some(Cmd::Ocr(paths))
@@ -47,7 +58,16 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
             _ => None,
         },
         Some("meetings") => Some(Cmd::Meetings),
-        Some("notes") => args.next().map(PathBuf::from).map(Cmd::Notes),
+        Some("notes") => {
+            use crate::meeting::notes::Mode;
+            match args.next().as_deref() {
+                Some("--full") => args
+                    .next()
+                    .map(|folder| Cmd::Notes(folder.into(), Mode::Full)),
+                Some(folder) => Some(Cmd::Notes(folder.into(), Mode::Resume)),
+                None => None,
+            }
+        }
         Some("tap") => {
             let seconds = args.next()?.parse().ok()?;
             let path = PathBuf::from(args.next()?);
@@ -57,18 +77,52 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
     }
 }
 
+#[test]
+fn incomplete_transcription_commands_return_usage_instead_of_starting_the_app() {
+    for args in [
+        &["transcribe"][..],
+        &["transcribe", "--timed"],
+        &["transcribe", "--live"],
+        &["transcribe", "--preview"],
+        &["transcribe", "--timed", "audio.wav", "20", "extra"],
+    ] {
+        assert!(matches!(
+            parse(args.iter().map(|arg| arg.to_string())),
+            Some(Cmd::Usage(_))
+        ));
+    }
+}
+
 pub fn run(cmd: Cmd) -> i32 {
     match cmd {
+        Cmd::Usage(usage) => {
+            eprintln!("Usage: see-computer {usage}");
+            2
+        }
         Cmd::Transcribe(path) => transcribe(path),
         Cmd::TranscribeLive(path) => transcribe_live(path),
         Cmd::TranscribePreview(path) => transcribe_preview(path),
+        Cmd::TranscribeTimed(path, phase) => match transcribe_timed(path, &phase) {
+            Ok(words) => {
+                println!("{words}");
+                0
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                1
+            }
+        },
         Cmd::Ocr(paths) => ocr(paths),
         Cmd::Snapshot => snapshot(),
         Cmd::Clip(path) => clip(path),
         Cmd::Eval(path, terms) => eval(path, terms),
         Cmd::Meetings => meetings(),
         Cmd::Words { days } => words(days),
-        Cmd::Notes(folder) => match crate::meeting::notes::transcribe(&folder) {
+        Cmd::Notes(folder, mode) => match crate::meeting::notes::transcribe(
+            &folder,
+            &mut crate::meeting::notes::Reader::default(),
+            mode,
+        ) {
             Ok(path) => {
                 println!("{}", path.display());
                 0
@@ -135,7 +189,8 @@ fn snapshot() -> i32 {
 }
 
 fn tap(seconds: u64, path: PathBuf, bundle: Option<String>) -> i32 {
-    let objects = if let Some(bundle) = bundle {
+    use crate::meeting::tap::Target;
+    let named = if let Some(bundle) = bundle {
         let processes = match crate::meeting::holders::processes() {
             Ok(processes) => processes,
             Err(error) => {
@@ -159,12 +214,13 @@ fn tap(seconds: u64, path: PathBuf, bundle: Option<String>) -> i32 {
             eprintln!("no audio processes match {bundle}");
             return 1;
         }
-        objects
+        Some(objects)
     } else {
-        Vec::new()
+        None
     };
-    let recording = match crate::meeting::tap::start(&objects, &path) {
-        Ok(recording) => recording,
+    let target = named.as_deref().map_or(Target::System, Target::Processes);
+    let recording = match crate::meeting::tap::start(target, &path) {
+        Ok((recording, _)) => recording,
         Err(error) => {
             eprintln!("{error}");
             return 1;
@@ -315,6 +371,98 @@ fn transcribe_preview(path: PathBuf) -> i32 {
         Err(code) => return code,
     };
     print_text(result)
+}
+
+fn transcribe_timed(path: PathBuf, phase: &str) -> Result<String, Box<dyn std::error::Error>> {
+    use crate::engine::{Event, Loader, Models, Worker};
+    use crate::mic::{Audio16k, RATE};
+    use std::sync::mpsc;
+    let phase: usize = phase.parse()?;
+    if phase >= 200 {
+        return Err("block phase must be 0 to 199 milliseconds".into());
+    }
+    let audio = Audio16k::from_wav(&path)?;
+    let samples = audio.samples();
+    let (reply, events) = mpsc::channel::<Event>();
+    let loading = Instant::now();
+    let mut engine = Worker::spawn(Loader::Models(Models::default_root()), reply);
+    loop {
+        if let Event::Ready(ready) = events.recv_timeout(Duration::from_secs(120))? {
+            ready?;
+            break;
+        }
+    }
+    let cpu_before = process_cpu_ms()?;
+    let ready_ms = loading.elapsed().as_millis();
+    let (terms, context) = mpsc::channel();
+    terms.send(Vec::new())?;
+    let started = Instant::now();
+    let take = engine.begin_context(context);
+    engine.warm();
+    let block = RATE as usize / 5;
+    let mut end = if phase == 0 {
+        block
+    } else {
+        phase * RATE as usize / 1000
+    };
+    let mut sent = 0;
+    let mut first_preview = None;
+    loop {
+        let next =
+            started + Duration::from_secs_f64(end.min(samples.len()) as f64 / f64::from(RATE));
+        match events.recv_timeout(next.saturating_duration_since(Instant::now())) {
+            Ok(Event::Preview(id, words)) if id == take && !words.is_empty() => {
+                first_preview.get_or_insert(started.elapsed().as_millis());
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("speech worker stopped".into()),
+            Err(mpsc::RecvTimeoutError::Timeout) if end >= samples.len() => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                engine.feed(Audio16k::from_samples(samples[sent..end].to_vec()));
+                sent = end;
+                end += block;
+            }
+        }
+    }
+    let released = Instant::now();
+    let job = engine.submit(Audio16k::from_samples(samples[sent..].to_vec()))?;
+    let mut report = None;
+    loop {
+        match events.recv_timeout(Duration::from_secs(60))? {
+            Event::Timing(id, timing) if id == job => report = Some(timing),
+            Event::Done(id, result) if id == job => {
+                let elapsed = released.elapsed();
+                let cpu_ms = process_cpu_ms()? - cpu_before;
+                let result = result?;
+                if result.audio.as_ref().map(Audio16k::samples) != Some(samples) {
+                    return Err("replay changed the captured audio".into());
+                }
+                let words = result.text.ok_or("nothing heard")?;
+                let timing = report.ok_or("missing engine timings")?;
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "ready_ms": ready_ms, "first_preview_ms": first_preview, "previews": timing.preview_count,
+                        "interrupted_previews": timing.preview_interrupts,
+                        "preview_ms": timing.preview_total.as_millis(), "preview_overlap_ms": timing.preview_overlap.as_millis(),
+                        "queue_ms": timing.queued.as_millis(), "final_ms": timing.inference.as_millis(),
+                        "release_to_result_ms": elapsed.as_millis(), "take_cpu_ms": cpu_ms, "samples": samples.len()
+                    })
+                );
+                return Ok(words.as_str().to_owned());
+            }
+            _ => {}
+        }
+    }
+}
+
+fn process_cpu_ms() -> std::io::Result<f64> {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let ms = |t: libc::timeval| t.tv_sec as f64 * 1000.0 + t.tv_usec as f64 / 1000.0;
+    Ok(ms(usage.ru_utime) + ms(usage.ru_stime))
 }
 
 fn replay_live(

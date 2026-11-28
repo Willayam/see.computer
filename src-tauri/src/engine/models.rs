@@ -2,7 +2,8 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::{EngineError, Phase, Progress};
@@ -36,6 +37,73 @@ pub const CATALOG: &[ModelFile] = &[
 /// stay clean, evictable pages instead of dirty heap. Built once by
 /// `parakeet::prepare`; valid once its `ready` marker exists.
 pub const PREPARED_DIR: &str = "int8-prepared";
+const PREPARED_FILES: [&str; 4] = [
+    "encoder-model.int8.onnx",
+    "encoder-model.int8.onnx.data",
+    "decoder_joint-model.int8.onnx",
+    "vocab.txt",
+];
+
+fn prepared_sizes(dir: &Path) -> std::io::Result<[u64; 4]> {
+    let mut sizes = [0; 4];
+    for (size, name) in sizes.iter_mut().zip(PREPARED_FILES) {
+        *size = fs::metadata(dir.join(name))?.len();
+    }
+    Ok(sizes)
+}
+
+pub(super) fn prepared_ready(dir: &Path) -> std::io::Result<bool> {
+    let read = || -> std::io::Result<_> {
+        Ok((fs::read_to_string(dir.join("ready"))?, prepared_sizes(dir)?))
+    };
+    let (marker, sizes) = match read() {
+        Ok(result) => result,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if sizes.contains(&0) || sizes[2] != CATALOG[1].bytes || sizes[3] != CATALOG[2].bytes {
+        return Ok(false);
+    }
+    let legacy_marker = marker.is_empty();
+    Ok(legacy_marker
+        || marker
+            .split_whitespace()
+            .map(str::parse::<u64>)
+            .eq(sizes.map(Ok)))
+}
+
+pub(super) fn mark_prepared(dir: &Path) -> std::io::Result<()> {
+    for name in PREPARED_FILES {
+        fs::File::open(dir.join(name))?.sync_all()?
+    }
+    let mut marker = fs::File::create(dir.join("ready"))?;
+    let [graph, weights, decoder, vocab] = prepared_sizes(dir)?;
+    writeln!(marker, "{graph} {weights} {decoder} {vocab}")?;
+    marker.sync_all()?;
+    fs::File::open(dir)?.sync_all()
+}
+
+pub(super) fn cache_lock(dir: &Path, exclusive: bool) -> std::io::Result<fs::File> {
+    let parent = dir
+        .parent()
+        .ok_or_else(|| std::io::Error::other("model folder has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let file = fs::File::open(parent)?;
+    let mode = if exclusive {
+        libc::LOCK_EX
+    } else {
+        libc::LOCK_SH
+    };
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), mode) } == 0 {
+            return Ok(file);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Models {
@@ -51,15 +119,23 @@ impl Models {
 
     /// The prepared model, if it is already on disk. Never downloads.
     pub fn ready(&self) -> Option<ModelFiles> {
+        self.prepared().ok().flatten()
+    }
+
+    fn prepared(&self) -> std::io::Result<Option<ModelFiles>> {
         let prepared = self.root.with_file_name(PREPARED_DIR);
-        prepared.join("ready").exists().then_some(ModelFiles {
+        Ok(prepared_ready(&prepared)?.then_some(ModelFiles {
             dir: prepared,
             prepared: true,
-        })
+        }))
     }
 
     pub fn ensure(&self, on: &mut dyn FnMut(Progress)) -> Result<ModelFiles, EngineError> {
-        if let Some(files) = self.ready() {
+        if let Some(files) = self.prepared().map_err(download_error)? {
+            return Ok(files);
+        }
+        let _writer = cache_lock(&self.root, true).map_err(download_error)?;
+        if let Some(files) = self.prepared().map_err(download_error)? {
             return Ok(files);
         }
         fs::create_dir_all(&self.root).map_err(download_error)?;
@@ -139,7 +215,7 @@ impl Models {
                 written += count as u64;
                 report(done + written, false);
             }
-            output.flush().map_err(download_error)?;
+            output.sync_all().map_err(download_error)?;
             if written != model.bytes {
                 return Err(EngineError::Download(format!(
                     "{}: expected {} bytes, got {written}",

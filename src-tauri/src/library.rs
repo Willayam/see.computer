@@ -1,4 +1,6 @@
 use crate::shadow::{self, evicted, Text};
+use std::collections::BTreeMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -10,7 +12,7 @@ use crate::history::History;
 use crate::ledger::Ledger;
 use crate::meeting::folder;
 
-#[derive(Serialize)]
+#[derive(Serialize, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
     id: String,
@@ -28,7 +30,7 @@ pub struct Item {
     share: Option<Share>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Hash)]
 #[serde(rename_all = "camelCase")]
 struct Line {
     start_ms: i64,
@@ -37,7 +39,7 @@ struct Line {
     text: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Hash)]
 #[serde(rename_all = "camelCase")]
 struct Media {
     kind: &'static str,
@@ -49,13 +51,13 @@ struct Media {
     cloud: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Hash)]
 struct Files {
     folder: String,
     markdown: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Hash)]
 struct Share {
     url: String,
 }
@@ -168,14 +170,34 @@ fn set_active(app: &AppHandle, active: bool) {
     });
 }
 
+#[derive(Serialize)]
+pub struct Changes {
+    versions: BTreeMap<String, String>,
+    changed: Vec<Item>,
+}
+
+fn version(value: impl Hash) -> String {
+    let mut hash = DefaultHasher::new();
+    value.hash(&mut hash);
+    format!("{:x}", hash.finish())
+}
+
 /// Async so the file reads run off the main thread, which also draws the panel.
 #[tauri::command]
-pub async fn library_items(history: State<'_, History>) -> Result<Vec<Item>, String> {
+pub async fn library_items(
+    history: State<'_, History>,
+    known: BTreeMap<String, String>,
+) -> Result<Changes, String> {
     let root = history.root();
-    request(&read_by_items(&root, &crate::paths::documents()));
-    let result = items(&root);
-    shadow::prune();
-    Ok(result)
+    let documents = crate::paths::documents();
+    tauri::async_runtime::spawn_blocking(move || {
+        request(&read_by_items(&root, &documents));
+        let result = changes(&root, &documents, &known);
+        shadow::prune();
+        result
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -409,15 +431,10 @@ pub async fn library_fix(
                         .to_owned(),
                 );
             }
-            let at = Local
-                .timestamp_millis_opt(start_ms)
-                .single()
-                .ok_or("That dictation has no valid time.")?
-                .naive_local();
             history
                 .replace(crate::history::Fix {
                     file: file.to_owned(),
-                    at,
+                    start_ms,
                     original: original.clone(),
                     edited: edited.to_owned(),
                 })
@@ -431,29 +448,37 @@ pub async fn library_fix(
                 return Err("Keep a meeting line on one line.".to_owned());
             }
             let folder = crate::paths::documents().join(name);
-            let manifest =
-                folder::read(&folder).ok_or("That meeting is no longer in the Library.")?;
-            if manifest.state != folder::State::Done {
-                return Err("Wait until the meeting has finished transcribing.".to_owned());
-            }
-            let path = folder.join(folder::MARKDOWN);
-            let failed = |error: std::io::Error| format!("Unable to save: {error}.");
-            let before = std::fs::read_to_string(&path).map_err(failed)?;
-            let after = fixed_meeting(&before, start_ms, &original, edited)
-                .ok_or("That line changed on disk, so the Library has been reloaded.")?;
-            let temp = path.with_extension("md.tmp");
-            std::fs::write(&temp, after).map_err(failed)?;
-            if std::fs::read_to_string(&path).ok().as_deref() != Some(before.as_str()) {
-                let _ = std::fs::remove_file(&temp);
-                return Err("The meeting changed while saving. Try again.".to_owned());
-            }
-            std::fs::rename(temp, &path).map_err(failed)?;
+            let at = save_meeting_line(&folder, start_ms, &original, edited)?;
             changed();
-            ledger.fixed(manifest.started_ms + start_ms, &original, edited);
+            ledger.fixed(at, &original, edited);
             Ok(())
         }
         _ => Err("Only dictations and meetings can be fixed here.".to_owned()),
     }
+}
+
+fn save_meeting_line(
+    folder: &Path,
+    start_ms: i64,
+    original: &str,
+    edited: &str,
+) -> Result<i64, String> {
+    let failed = |error: std::io::Error| format!("Unable to save: {error}.");
+    let _editing = folder::lock_transcript(folder).map_err(failed)?;
+    let manifest = folder::read(folder).ok_or("That meeting is no longer in the Library.")?;
+    if manifest.state != folder::State::Done {
+        return Err("Wait until the meeting has finished transcribing.".to_owned());
+    }
+    let path = folder.join(folder::MARKDOWN);
+    let before = std::fs::read_to_string(&path).map_err(failed)?;
+    let after = fixed_meeting(&before, start_ms, original, edited)
+        .ok_or("That line changed on disk, so the Library has been reloaded.")?;
+    let staged = folder::stage(folder, after.as_bytes()).map_err(failed)?;
+    if std::fs::read_to_string(&path).map_err(failed)? != before {
+        return Err("The meeting changed while saving. Try again.".to_owned());
+    }
+    staged.persist(path).map_err(|error| failed(error.error))?;
+    Ok(manifest.started_ms + start_ms)
 }
 
 fn path_string(path: &Path) -> String {
@@ -465,7 +490,7 @@ fn local_ms(date: &str, time: &str) -> Option<i64> {
         NaiveDateTime::parse_from_str(&format!("{date} {time}"), "%Y-%m-%d %H:%M:%S").ok()?;
     Local
         .from_local_datetime(&naive)
-        .single()
+        .earliest()
         .map(|at| at.timestamp_millis())
 }
 
@@ -485,39 +510,15 @@ fn day(path: &Path) -> Option<Item> {
         ));
     }
     let content = content.text()?;
-    let mut lines = Vec::new();
-    let mut time = None;
-    let mut body = String::new();
-    for line in content.lines() {
-        if let Some(next) = line
-            .strip_prefix("## ")
-            .and_then(|value| local_ms(&date, value))
-        {
-            if let Some(at) = time.take() {
-                lines.push(Line {
-                    start_ms: at,
-                    end_ms: None,
-                    speaker: None,
-                    text: body.trim().to_owned(),
-                });
-            }
-            time = Some(next);
-            body.clear();
-        } else if time.is_some() {
-            if !body.is_empty() {
-                body.push('\n');
-            }
-            body.push_str(line);
-        }
-    }
-    if let Some(at) = time {
-        lines.push(Line {
-            start_ms: at,
+    let lines: Vec<_> = crate::history::day_entries(crate::history::day_file_date(file)?, &content)
+        .into_iter()
+        .map(|entry| Line {
+            start_ms: entry.start_ms,
             end_ms: None,
             speaker: None,
-            text: body.trim().to_owned(),
-        });
-    }
+            text: entry.text.trim().to_owned(),
+        })
+        .collect();
     let at = lines.first()?.start_ms;
     let paste = lines
         .iter()
@@ -800,17 +801,10 @@ fn take(path: &Path) -> Option<Item> {
     }
     media.sort_by_key(|entry| entry.at_ms);
     let markdown_path = markdown.as_ref().map(|path| path_string(path));
-    let share = shadow::read(&path.join("share.json"))
-        .text()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|value| {
-            value
-                .get("url")
-                .and_then(serde_json::Value::as_str)
-                .map(|url| Share {
-                    url: url.to_owned(),
-                })
-        });
+    let share = match shadow::read(&path.join("share.json")) {
+        Text::Current(text) => crate::sharing::eligible_url(&text).map(|url| Share { url }),
+        Text::Stale(_) | Text::Waiting | Text::Missing => None,
+    };
     let title = full_text
         .split_whitespace()
         .take(7)
@@ -884,23 +878,19 @@ fn bare_movie(path: &Path) -> Option<Item> {
     })
 }
 
-fn items(history_root: &Path) -> Vec<Item> {
-    items_in(history_root, &crate::paths::documents())
-}
-
-fn items_in(history_root: &Path, documents: &Path) -> Vec<Item> {
-    let mut result = Vec::new();
-    for path in std::fs::read_dir(history_root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-    {
-        if path.extension().is_some_and(|extension| extension == "md") {
-            if let Some(item) = day(&path) {
-                result.push(item);
-            }
+fn changes(history_root: &Path, documents: &Path, known: &BTreeMap<String, String>) -> Changes {
+    let mut result = Changes {
+        versions: BTreeMap::new(),
+        changed: Vec::new(),
+    };
+    for (_, path) in crate::history::day_files(history_root) {
+        let id = format!("dictation:{}", path.file_stem().unwrap().to_string_lossy());
+        let stamp = version((&path, shadow::stamp(&path)));
+        if known.get(&id) != Some(&stamp) {
+            let Some(item) = day(&path) else { continue };
+            result.changed.push(item);
         }
+        result.versions.insert(id, stamp);
     }
     for path in std::fs::read_dir(documents)
         .into_iter()
@@ -908,43 +898,37 @@ fn items_in(history_root: &Path, documents: &Path) -> Vec<Item> {
         .flatten()
         .map(|entry| entry.path())
     {
-        if path.is_dir() {
-            if let Some(item) = meeting(&path).or_else(|| take(&path)) {
-                result.push(item);
-            }
+        let item = if path.is_dir() {
+            meeting(&path).or_else(|| take(&path))
         } else if path.extension().is_some_and(|extension| extension == "mov")
             && !path.with_extension("").is_dir()
         {
-            if let Some(item) = bare_movie(&path) {
-                result.push(item);
+            bare_movie(&path)
+        } else {
+            None
+        };
+        if let Some(item) = item {
+            let stamp = version(&item);
+            result.versions.insert(item.id.clone(), stamp.clone());
+            if known.get(&item.id) != Some(&stamp) {
+                result.changed.push(item);
             }
         }
     }
-    result.sort_by_key(|item| std::cmp::Reverse(item.at));
+    result
+        .changed
+        .sort_by_key(|item| std::cmp::Reverse(item.at));
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_dir() -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "see-library-test-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        path
-    }
 
     #[test]
     fn dictation_day_has_first_epoch_and_paste() {
-        let root = temp_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         let path = root.join("2026-10-07.md");
         std::fs::write(&path, "## 09:00:00\n\nFirst.\n\n## 10:00:00\n\nSecond.\n\n").unwrap();
         let item = day(&path).unwrap();
@@ -956,19 +940,36 @@ mod tests {
             local_ms("2026-10-07", "10:00:00").unwrap()
         );
         assert_eq!(item.paste, "First.\n\nSecond.");
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn conflict_copy_has_its_own_library_item() {
-        let root = temp_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         let path = root.join("2026-10-13 2.md");
         std::fs::write(&path, "## 10:00:00\n\nSecond\n\n").unwrap();
         let item = day(&path).unwrap();
         assert_eq!(item.id, "dictation:2026-10-13 2");
         assert_eq!(item.lines[0].text, "Second");
         assert_eq!(item.files.markdown.as_deref(), Some(path.to_str().unwrap()));
-        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refresh_transfers_only_changed_days_and_drops_deleted_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let doc = root.join("documents");
+        let day = root.join("2026-10-25.md");
+        std::fs::write(&day, "## 02:15:00 +02:00\n\nfirst\n\n").unwrap();
+        let first = changes(root, &doc, &BTreeMap::new());
+        assert_eq!(first.changed[0].paste, "first");
+        assert!(changes(root, &doc, &first.versions).changed.is_empty());
+        std::fs::write(&day, "## 02:15:00 +01:00\n\nsecond\n\n").unwrap();
+        let next = changes(root, &doc, &first.versions);
+        assert_eq!(next.changed[0].paste, "second");
+        std::fs::remove_file(&day).unwrap();
+        let removed = changes(root, &doc, &next.versions);
+        assert!(removed.versions.is_empty() && removed.changed.is_empty());
     }
 
     #[test]
@@ -997,8 +998,34 @@ mod tests {
     }
 
     #[test]
+    fn simultaneous_library_edits_keep_both_lines() {
+        let root = tempfile::tempdir().unwrap();
+        let meeting = folder::create(root.path(), None, 0).unwrap();
+        let mut manifest = folder::read(&meeting).unwrap();
+        manifest.state = folder::State::Done;
+        folder::write(&meeting, &manifest).unwrap();
+        let path = meeting.join(folder::MARKDOWN);
+        std::fs::write(&path, "[00:01] You: One.\n[00:02] Them: Two.\n").unwrap();
+        let gate = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for (at, original, edited) in [(1000, "One.", "First."), (2000, "Two.", "Second.")] {
+                let (meeting, gate) = (&meeting, &gate);
+                scope.spawn(move || {
+                    gate.wait();
+                    assert_eq!(save_meeting_line(meeting, at, original, edited), Ok(at));
+                });
+            }
+        });
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "[00:01] You: First.\n[00:02] Them: Second.\n"
+        );
+    }
+
+    #[test]
     fn take_uses_real_capture_schema_and_sorts() {
-        let root = temp_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         let history = root.join("history");
         let documents = root.join("documents");
         std::fs::create_dir_all(&history).unwrap();
@@ -1008,7 +1035,7 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join("take.md"), "# Screen take").unwrap();
         std::fs::write(path.join("transcript.json"), r#"{"type":"see-computer.session","version":1,"durationMs":25000,"fullText":"Look at the button","segments":[{"startMs":1000,"endMs":2000,"text":"Look at the button"}],"captures":[{"type":"shot","atMs":3000,"file":"shots/001.png"},{"type":"clip","startMs":4000,"durationMs":5000,"video":"clips/001/clip.mov","frames":[{"atMs":4500,"file":"clips/001/frames/0004500.jpg"}]}]}"#).unwrap();
-        let found = items_in(&history, &documents);
+        let found = changes(&history, &documents, &BTreeMap::new()).changed;
         assert_eq!(
             found
                 .iter()
@@ -1030,7 +1057,6 @@ mod tests {
             found[0].media[1].poster.as_deref(),
             Some(path.join("clips/001/frames/0004500.jpg").to_str().unwrap())
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

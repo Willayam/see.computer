@@ -51,7 +51,9 @@ The Worker also accepts chunked request bodies. It counts the bytes read and sto
 
 The coordinator reserves a replacement's byte delta and file-count delta before writing R2. It commits the reservation after R2 accepts the object. An R2 error rolls it back. If the request stops between those steps, the next mutation for that share compares the private R2 content hash with the reservation and either commits or rolls back. Public reads require the same hash as the committed SQLite row, so an unfinished replacement stays hidden.
 
-Allowed extensions are `png`, `jpg`, `mp4`, `mov`, `m4s`, `m3u8`, `json`, and `md`. The `mov` type supports existing packaged takes and is served as `video/quicktime`. New recordings should upload HLS under `clips/001/index.m3u8` or a fragmented `fullclip.mp4`. Safari plays HLS natively. Chrome and other Media Source browsers use the self-hosted hls.js 1.7.2 light player. Its npm archive integrity is verified when vendoring; its license is included in public/hls-LICENSE.
+Storage calls for one share run in the order they arrive. A slow R2 write holds back only its own share. Creating a share never waits on R2. If the share is canceled or expires while a write is in flight, the coordinator refuses that write and releases its reservation.
+
+Allowed extensions are `png`, `jpg`, `mp4`, `mov`, `m4s`, `m3u8`, `json`, and `md`. The `mov` type supports existing packaged takes and is served as `video/quicktime`. New recordings should upload HLS under `clips/001/index.m3u8` or a fragmented `fullclip.mp4`. Safari plays HLS natively. Chrome and other Media Source browsers use the self-hosted hls.js 1.7.2 light player. The page fetches the player only for an HLS clip that the browser cannot play itself. That includes a browser that reports HLS support and then fails to parse the clip, as Chrome 158 does with a take that is still recording. Its npm archive integrity is verified when vendoring; its license is included in public/hls-LICENSE.
 
 During recording, upload `live.json` with this shape:
 
@@ -62,7 +64,7 @@ During recording, upload `live.json` with this shape:
 }
 ```
 
-The public page polls `status.json` and `live.json`. Uploaded paths pass through the same extension and path allowlist before the page creates an element. Transcript and manifest text enter the document through `textContent`.
+The public page polls `status.json` and `live.json`. A capture that stays listed keeps its element, so a clip keeps playing while screenshots arrive. Uploaded paths pass through the same extension and path allowlist before the page creates an element. Transcript and manifest text enter the document through `textContent`.
 
 After `transcript.json` and `take.md` exist, mark the share ready with an empty body.
 
@@ -71,14 +73,14 @@ POST /api/shares/<id>/complete
 Authorization: Bearer <installation secret>
 ```
 
-Cancel with an authenticated delete. The coordinator writes a tombstone before it lists and deletes every R2 object. A second delete by the same owner is safe. A canceled ID cannot be recreated.
+Cancel with an authenticated delete. The coordinator writes a tombstone at once, so public reads stop even while a write for that share is in flight. It lists and deletes every R2 object after that write settles. A second delete by the same owner is safe. A canceled ID cannot be recreated.
 
 ```http
 DELETE /api/shares/<id>
 Authorization: Bearer <installation secret>
 ```
 
-Public files support `GET`, `HEAD`, one byte range, `ETag`, and `If-None-Match`. `take.md?absolute=1` rewrites allowlisted relative Markdown file links to this share's absolute public URLs. It does not render uploaded Markdown as HTML.
+Public files support `GET`, `HEAD`, one byte range, `ETag`, and `If-None-Match`. A response takes its validator, its length and its bytes from one R2 read, so a file replaced during the request is served as one version. `take.md?absolute=1` rewrites allowlisted relative Markdown file links to this share's absolute public URLs. It does not render uploaded Markdown as HTML.
 
 ## Test
 
@@ -88,7 +90,7 @@ Run the unit suite from this directory.
 bun test worker.test.mjs
 ```
 
-The tests use the production request handler with in-memory metadata and R2 adapters. They do not contact Cloudflare.
+The tests run the production request handler and its SQL against an in-memory SQLite database and an in-memory R2 adapter. They run the page's own script against a small stand-in for the DOM. They do not contact Cloudflare.
 
 ## Create and deploy
 
