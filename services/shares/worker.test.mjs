@@ -43,16 +43,16 @@ class MemoryR2 {
     this.holds = [];
   }
 
-  hold(operation, key, { after = false } = {}) {
-    const hold = { operation, key, after };
+  hold(operation, key, phase = "before") {
+    const hold = { operation, key, phase };
     hold.reached = new Promise((resolve) => { hold.arrive = resolve; });
     hold.released = new Promise((resolve) => { hold.release = resolve; });
     this.holds.push(hold);
     return hold;
   }
 
-  async stall(operation, key, after = false) {
-    const index = this.holds.findIndex((hold) => hold.operation === operation && hold.key === key && hold.after === after);
+  async stall(operation, key, phase = "before") {
+    const index = this.holds.findIndex((hold) => hold.operation === operation && hold.key === key && hold.phase === phase);
     if (index < 0) return;
     const [hold] = this.holds.splice(index, 1);
     hold.arrive();
@@ -72,7 +72,7 @@ class MemoryR2 {
       customMetadata: { ...options.customMetadata },
       httpMetadata: { ...options.httpMetadata },
     });
-    await this.stall("put", key, true);
+    await this.stall("put", key, "after");
   }
 
   describe(value) {
@@ -88,7 +88,7 @@ class MemoryR2 {
   async get(key, options = {}) {
     await this.stall("get", key);
     const value = this.objects.get(key);
-    await this.stall("get", key, true);
+    await this.stall("get", key, "after");
     if (!value) return null;
     const offset = options.range?.offset ?? 0;
     const bytes = value.bytes.slice(offset, offset + (options.range?.length ?? value.size));
@@ -438,7 +438,7 @@ describe("a coordinator restarted over stored state", () => {
     await earlier.service.fetch(internalRequest(`/api/shares/${ready}/complete`, { method: "POST" }));
     await upload(earlier.service, canceled, "take.md", "# Take");
     await earlier.service.fetch(internalRequest(`/api/shares/${canceled}`, { method: "DELETE" }));
-    const kept = earlier.bucket.hold("put", `${landed}/shots/001.jpg`, { after: true });
+    const kept = earlier.bucket.hold("put", `${landed}/shots/001.jpg`, "after");
     const dropped = earlier.bucket.hold("put", `${lost}/shots/001.jpg`);
     upload(earlier.service, landed, "shots/001.jpg", "image");
     upload(earlier.service, lost, "shots/001.jpg", "image");
@@ -464,6 +464,23 @@ describe("a coordinator restarted over stored state", () => {
 });
 
 describe("completion, cancellation, and expiry", () => {
+  test("a restart during cancel-before-create cannot leave an open share", async () => {
+    const database = new Database(":memory:");
+    const { service, metadata, bucket } = fixture(database);
+    const shareId = id(219);
+    const commit = metadata.storage.transactionSync.bind(metadata.storage);
+    metadata.storage.transactionSync = (operation) => {
+      const result = commit(operation);
+      if (metadata.getShare(shareId)) throw new Error("Interrupted after committing the share");
+      return result;
+    };
+    await expect(service.fetch(internalRequest(`/api/shares/${shareId}`, { method: "DELETE" })))
+      .rejects.toThrow("Interrupted after committing the share");
+    const restarted = fixture(database, bucket);
+    expect((await create(restarted.service, shareId)).status).toBe(409);
+    expect((await restarted.service.fetch(new Request(`${origin}/s/${shareId}/status.json`))).status).toBe(404);
+  });
+
   test("cancel arriving before create reserves an owner tombstone", async () => {
     const { service } = fixture();
     const shareId = id(200);
@@ -602,7 +619,7 @@ describe("public reads", () => {
       const shareId = id(16);
       await create(service, shareId);
       await upload(service, shareId, "live.json", older);
-      const reading = bucket.hold("get", `${shareId}/live.json`, { after: readFirst });
+      const reading = bucket.hold("get", `${shareId}/live.json`, readFirst ? "after" : "before");
       const pending = service.fetch(new Request(`${origin}/s/${shareId}/live.json`));
       await reading.reached;
       expect((await upload(service, shareId, "live.json", newer)).status).toBe(201);
@@ -649,7 +666,7 @@ describe("public reads", () => {
     const shareId = id(18);
     await create(service, shareId);
     await upload(service, shareId, "take.md", "# Take");
-    const reading = bucket.hold("get", `${shareId}/take.md`, { after: true });
+    const reading = bucket.hold("get", `${shareId}/take.md`, "after");
     const pending = service.fetch(new Request(`${origin}/s/${shareId}/take.md`));
     await reading.reached;
     const deleting = service.fetch(internalRequest(`/api/shares/${shareId}`, { method: "DELETE" }));
@@ -758,6 +775,10 @@ class PageNode {
     return this.children[0] ?? null;
   }
 
+  get parentNode() {
+    return this.parent;
+  }
+
   get nextSibling() {
     return this.parent.children[this.parent.children.indexOf(this) + 1] ?? null;
   }
@@ -843,6 +864,7 @@ async function openViewer({ responses, nativeHls = false, playerLoads = true }) 
   }
   const context = vm.createContext({
     URL,
+    MediaError: { MEDIA_ERR_DECODE: 3, MEDIA_ERR_SRC_NOT_SUPPORTED: 4 },
     location: { href: viewerRoot },
     document: {
       head: page.head,
@@ -935,7 +957,9 @@ describe("viewer page", () => {
         "fullclip.mp4": new Promise((resolve) => { answer = resolve; }),
       };
       const page = await openViewer({ responses });
-      const [clip] = page.captures.children;
+      responses["live.json"] = { clips: [{ playlist }], shots: [{ file: "shots/001.jpg" }] };
+      await page.poll();
+      const [, clip] = page.captures.children;
       responses["status.json"] = { ...uploading, state: "ready" };
       await page.poll();
       const finished = ["Video clip, 12 seconds", "Video frame at 00:04", "Screenshot at 00:14"];

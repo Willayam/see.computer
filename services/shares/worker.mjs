@@ -237,7 +237,7 @@ export class SqliteMetadata {
     return this.sql.exec("SELECT * FROM files WHERE share_id = ? AND pending_sha IS NOT NULL", id).toArray();
   }
 
-  createShare(input) {
+  createShare(input, initialState = "open") {
     return this.storage.transactionSync(() => {
       const existing = this.getShare(input.id);
       if (existing) return { kind: "existing", share: existing };
@@ -248,8 +248,8 @@ export class SqliteMetadata {
       const ipCount = this.one("SELECT COUNT(*) AS count FROM shares WHERE ip_hash = ? AND created_at >= ?", input.ipHash, input.dayStart).count;
       if (ipCount >= LIMITS.ipDay) return { kind: "quota", quota: "ip_day" };
       this.sql.exec(
-        "INSERT INTO shares (id, owner_hash, ip_hash, url, expires_at, created_at, state) VALUES (?, ?, ?, ?, ?, ?, 'open')",
-        input.id, input.ownerHash, input.ipHash, input.url, input.expiresAt, input.now,
+        "INSERT INTO shares (id, owner_hash, ip_hash, url, expires_at, created_at, state) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        input.id, input.ownerHash, input.ipHash, input.url, input.expiresAt, input.now, initialState,
       );
       return { kind: "created", share: this.getShare(input.id) };
     });
@@ -340,7 +340,7 @@ export class ShareCoordinatorService {
     this.tails = new Map();
   }
 
-  serialize(id, operation) {
+  queueShareMutation(id, operation) {
     const result = (this.tails.get(id) ?? Promise.resolve()).then(operation);
     const tail = result.catch(() => {});
     this.tails.set(id, tail);
@@ -434,7 +434,7 @@ export class ShareCoordinatorService {
     if (!body.ok) return apiError(body.status, "invalid_body", body.message);
     if (request.signal.aborted) return apiError(499, "request_canceled", "Request was canceled before upload");
     const sha = await sha256Hex(body.bytes);
-    return this.serialize(id, async () => {
+    return this.queueShareMutation(id, async () => {
       const queued = this.uploadRefusal(id, ownerHash);
       if (queued) return queued;
       try {
@@ -479,7 +479,7 @@ export class ShareCoordinatorService {
     const ownerHash = this.owner(request);
     if (!ownerHash) return apiError(401, "unauthorized", "A valid installation secret is required");
     if (!(await requireEmptyBody(request))) return apiError(400, "invalid_body", "Completion request body must be empty");
-    return this.serialize(id, async () => {
+    return this.queueShareMutation(id, async () => {
       let share = this.metadata.getShare(id);
       const now = this.now();
       if (!share) return apiError(404, "not_found", "Share not found");
@@ -523,22 +523,29 @@ export class ShareCoordinatorService {
     });
   }
 
-  async remove(request, id) {
-    const ownerHash = this.owner(request);
-    if (!ownerHash) return apiError(401, "unauthorized", "A valid installation secret is required");
+  reserveTombstone(request, id, ownerHash) {
     if (!this.metadata.getShare(id)) {
       const now = this.now();
       const ipHash = request.headers.get("X-Share-IP");
       if (!/^[a-f0-9]{64}$/.test(ipHash ?? "")) return apiError(401, "unauthorized", "Missing client identity");
       const reserved = this.metadata.createShare({ id, ownerHash, ipHash,
         url: `${this.publicOrigin}/s/${id}/`, expiresAt: now + LIMITS.retentionMs,
-        now, ...dayAndMonthStarts(now) });
+        now, ...dayAndMonthStarts(now) }, "deleted");
       if (reserved.kind === "quota") return notFound();
+      if (reserved.kind === "created") return null;
     }
     const result = this.metadata.markDeleted(id, ownerHash);
     if (result.kind === "missing") return apiError(404, "not_found", "Share not found");
     if (result.kind === "owner") return apiError(403, "forbidden", "This installation does not own the share");
-    return this.serialize(id, async () => {
+    return null;
+  }
+
+  async remove(request, id) {
+    const ownerHash = this.owner(request);
+    if (!ownerHash) return apiError(401, "unauthorized", "A valid installation secret is required");
+    const refusal = this.reserveTombstone(request, id, ownerHash);
+    if (refusal) return refusal;
+    return this.queueShareMutation(id, async () => {
       try {
         const keys = [];
         let cursor;
@@ -585,22 +592,30 @@ export class ShareCoordinatorService {
     const valid = validateRelativePath(rawPath);
     if (!valid) return notFound();
     const absolute = valid.path === "take.md" && new URL(request.url).searchParams.get("absolute") === "1";
-    const key = `${id}/${valid.path}`;
+    const version = await this.readCommittedVersion(request, id, valid.path, absolute);
+    if (!version) return notFound();
+    return absolute
+      ? this.absoluteMarkdown(request, id, version.object)
+      : this.stored(request, valid, version.object, version.range);
+  }
+
+  async readCommittedVersion(request, id, path, absolute) {
+    const key = `${id}/${path}`;
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const file = this.publicFile(id, valid.path);
-      if (!file) return notFound();
+      const file = this.publicFile(id, path);
+      if (!file) return null;
       const range = absolute ? null : parseByteRange(request.headers.get("Range"), file.committed_size);
       const object = absolute || (request.method === "GET" && range !== false)
         ? await this.bucket.get(key, range ? { range: { offset: range.offset, length: range.length } } : undefined)
         : await this.bucket.head(key);
-      const latest = this.publicFile(id, valid.path);
+      const latest = this.publicFile(id, path);
       if (latest && object?.size === file.committed_size && object.customMetadata?.sha256 === file.committed_sha) {
-        return absolute ? this.absoluteMarkdown(request, id, object) : this.stored(request, valid, object, range);
+        return { object, range };
       }
       await object?.body?.cancel();
-      if (!latest || latest.committed_sha === file.committed_sha) return notFound();
+      if (!latest || latest.committed_sha === file.committed_sha) return null;
     }
-    return notFound();
+    return null;
   }
 
   async stored(request, valid, object, range) {

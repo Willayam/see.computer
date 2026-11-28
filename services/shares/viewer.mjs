@@ -133,7 +133,8 @@ export function viewerHtml(nonce) {
         video.addEventListener("play", () => { pressed = true; });
         video.addEventListener("pause", () => { pressed = false; });
         const handOver = () => {
-          if (video.error.code < 3) return;
+          const code = video.error?.code;
+          if (code !== MediaError.MEDIA_ERR_DECODE && code !== MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) return;
           video.removeEventListener("error", handOver);
           playWithHls(pressed);
         };
@@ -172,13 +173,22 @@ export function viewerHtml(nonce) {
         entry.figure.remove();
         mounted.delete(key);
       }
-      let position = capturesNode.firstChild;
+      const figures = [];
       for (const [key, item] of listed) {
         let entry = mounted.get(key);
         if (entry) entry.update(item.label, item.live);
         else mounted.set(key, entry = item.mount());
-        if (entry.figure === position) position = position.nextSibling;
-        else capturesNode.insertBefore(entry.figure, position);
+        figures.push(entry.figure);
+      }
+      let next = null;
+      for (let index = figures.length - 1; index >= 0; index -= 1) {
+        const figure = figures[index];
+        if (figure.parentNode !== capturesNode) capturesNode.insertBefore(figure, next);
+        else if (figure.nextSibling !== next) {
+          if (capturesNode.moveBefore) capturesNode.moveBefore(figure, next);
+          else capturesNode.insertBefore(figure, next);
+        }
+        next = figure;
       }
     }
 
