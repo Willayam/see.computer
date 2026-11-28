@@ -89,7 +89,9 @@ fn server(reply: impl Fn(&str) -> u16 + Send + 'static) -> Server {
             let head = String::from_utf8_lossy(&bytes[..body]).into_owned();
             let mut words = head.split(' ');
             let (method, path) = (words.next().unwrap(), words.next().unwrap());
-            let line = format!("{method} /{}", path[19..].trim_start_matches('/'));
+            let share = path.strip_prefix("/api/shares/").unwrap();
+            let (_, resource) = share.split_once('/').unwrap_or((share, ""));
+            let line = format!("{method} /{resource}");
             let status = reply(&line);
             seen.lock().unwrap().push((line, bytes[body..].to_vec()));
             write!(
@@ -106,7 +108,7 @@ fn run(service: &Sharing) {
     let client = agent();
     while service
         .due()
-        .iter()
+        .into_iter()
         .fold(false, |worked, job| service.step(&client, job) | worked)
     {}
 }
@@ -245,7 +247,7 @@ fn off_never_creates_a_job_or_credential_and_pauses_existing_jobs() {
     service.set_enabled(true);
     service.begin(&dir);
     service.set_enabled(false);
-    assert!(!service.tick(&agent(), &job(&service)).unwrap());
+    assert!(!service.tick(&agent(), &mut job(&service)).unwrap());
     assert!(!service.0.root.join("installation.key").exists());
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
@@ -337,7 +339,7 @@ fn failed_put_keeps_chunk_pending_and_successful_retry_commits_it() {
     let segments = dir.join("live/one.segments");
     std::fs::create_dir_all(&segments).unwrap();
     std::fs::write(segments.join("init.mp4"), "init fixture").unwrap();
-    let error = service.tick(&agent(), &job(&service)).unwrap_err();
+    let error = service.tick(&agent(), &mut job(&service)).unwrap_err();
     assert!(!error.permanent);
     assert!(job(&service).sent.is_empty());
     assert_eq!(server.requests(), ["PUT /live/one.segments/init.mp4"]);
@@ -349,7 +351,7 @@ fn failed_put_keeps_chunk_pending_and_successful_retry_commits_it() {
         !job(&service).finalized,
         "chunk is sent while recording is still live"
     );
-    assert!(service.tick(&agent(), &job(&service)).unwrap());
+    assert!(service.tick(&agent(), &mut job(&service)).unwrap());
     assert!(job(&service)
         .sent
         .contains_key("live/one.segments/init.mp4"));
@@ -363,7 +365,7 @@ fn cancel_revokes_even_when_create_response_was_lost_and_sharing_is_paused() {
     service.begin(&dir);
     service.cancel(Some(&dir));
     service.set_enabled(false);
-    assert!(service.tick(&agent(), &job(&service)).unwrap());
+    assert!(service.tick(&agent(), &mut job(&service)).unwrap());
     assert_eq!(server.requests(), ["DELETE /"]);
     assert!(service.0.state.lock().unwrap().jobs.is_empty());
     assert_eq!(link(&dir).state, "removed");
@@ -379,8 +381,8 @@ fn a_finished_backlog_uploads_in_one_turn_and_publishes() {
     package(&dir);
     service.finalize(&dir);
     let client = agent();
-    assert!(service.step(&client, &job(&service)));
-    assert!(service.step(&client, &job(&service)));
+    assert!(service.step(&client, job(&service)));
+    assert!(service.step(&client, job(&service)));
 
     let mut expected = vec!["POST /".to_owned()];
     expected.extend(clip(12));
@@ -500,6 +502,75 @@ fn a_crash_between_an_upload_and_its_saved_progress_sends_it_again_and_publishes
     assert_eq!(again.last().unwrap(), "POST /complete");
     assert_eq!(server.bodies(), first);
     std::fs::remove_dir_all(crashed).unwrap();
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn completion_checkpoint_survives_a_client_restart() {
+    let crashed = tempfile::tempdir().unwrap();
+    let original = Arc::new(Mutex::new(PathBuf::new()));
+    let queue = original.clone();
+    let copy = crashed.path().to_owned();
+    let published = AtomicBool::new(false);
+    let server = server(move |request| {
+        if request == "POST /complete" && !published.swap(true, Ordering::SeqCst) {
+            for entry in std::fs::read_dir(&*queue.lock().unwrap()).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_file() {
+                    std::fs::copy(entry.path(), copy.join(entry.file_name())).unwrap();
+                }
+            }
+        }
+        if published.load(Ordering::SeqCst) && request.starts_with("PUT ") {
+            return 409;
+        }
+        201
+    });
+    let (service, dir) = setup_at(&server.host, true);
+    original.lock().unwrap().clone_from(&service.0.root);
+    service.begin(&dir);
+    record(&dir, 3, 3);
+    package(&dir);
+    service.finalize(&dir);
+    run(&service);
+    assert!(job(&service).ready);
+    let finished = server.requests().len();
+
+    let resumed = Sharing::load(crashed.path().to_owned(), &server.host, true);
+    run(&resumed);
+    assert_eq!(&server.requests()[finished..], ["POST /complete"]);
+    assert!(job(&resumed).ready);
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn completion_checkpoint_failure_keeps_publication_retryable() {
+    let original = Arc::new(Mutex::new(PathBuf::new()));
+    let queue = original.clone();
+    let published = AtomicBool::new(false);
+    let server = server(move |request| {
+        if request == "POST /complete" && !published.swap(true, Ordering::SeqCst) {
+            let file = queue.lock().unwrap();
+            std::fs::remove_file(&*file).unwrap();
+            std::fs::create_dir(&*file).unwrap();
+        }
+        201
+    });
+    let (service, dir) = setup_at(&server.host, true);
+    service.begin(&dir);
+    let queue_file = service.0.root.join(format!("{}.json", job(&service).id));
+    original.lock().unwrap().clone_from(&queue_file);
+    record(&dir, 1, 1);
+    package(&dir);
+    service.finalize(&dir);
+    run(&service);
+    assert!(!job(&service).ready);
+    let finished = server.requests().len();
+    std::fs::remove_dir(&queue_file).unwrap();
+    service.retry();
+    run(&service);
+    assert_eq!(&server.requests()[finished..], ["POST /complete"]);
+    assert_eq!(link(&dir).state, "ready");
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
 
@@ -633,7 +704,7 @@ fn missing_media_cannot_be_marked_complete() {
     )
     .unwrap();
     std::fs::write(dir.join("take.md"), "[Shot](shots/001.png)").unwrap();
-    let incomplete = |sent: &Sent| Folder::finished(&dir, sent).is_err();
+    let incomplete = |sent: &UploadedStamps| Folder::finished(&dir, sent).is_err();
     let mut sent = BTreeMap::new();
     assert!(incomplete(&sent));
     sent.insert("shots/001.jpg".into(), "hash".into());
@@ -782,7 +853,7 @@ fn live_r2_synthetic_recording() {
     let client = agent();
     let mut first_upload = None;
     while recorder.try_wait().unwrap().is_none() {
-        service.tick(&client, &job(&service)).unwrap();
+        service.tick(&client, &mut job(&service)).unwrap();
         if first_upload.is_none() && job(&service).sent.keys().any(|key| key.ends_with(".m4s")) {
             first_upload = Some(started.elapsed());
         }
@@ -802,7 +873,7 @@ fn live_r2_synthetic_recording() {
     service.finalize(&dir);
     while !job(&service).ready {
         assert!(started.elapsed() < Duration::from_secs(45));
-        service.tick(&client, &job(&service)).unwrap();
+        service.tick(&client, &mut job(&service)).unwrap();
     }
     let current = job(&service);
     let url = format!("{HOST}/s/{}/", current.id);

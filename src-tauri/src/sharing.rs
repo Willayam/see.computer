@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -16,10 +17,11 @@ const MAX_SHARE_FILES: usize = 1500;
 const FILE_LIMIT: &str = "Share exceeds 1,500 files. Local recording saved.";
 const BYTE_LIMIT: &str = "Share exceeds 256 MiB. Local recording saved.";
 const OBJECT_LIMIT: &str = "A recording file exceeds 8 MiB. Local recording saved.";
-const TURN: Duration = Duration::from_secs(1);
+const UPLOAD_TURN: Duration = Duration::from_secs(1);
+const FULL_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 const MISSING: &str = "A recording file is missing. The share is incomplete.";
 
-type Sent = BTreeMap<String, String>;
+type UploadedStamps = BTreeMap<String, String>;
 
 #[derive(Clone)]
 pub struct Sharing(Arc<Shared>);
@@ -49,7 +51,7 @@ struct Job {
     cancelled: bool,
     ready: bool,
     error: Option<String>,
-    sent: Sent,
+    sent: UploadedStamps,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     uploaded_bytes: BTreeMap<String, u64>,
     #[serde(default)]
@@ -130,7 +132,7 @@ impl LiveInventory {
 
     fn unchanged(&self) -> bool {
         // Renaming a fragment changes its directory stamp. An in-place external edit does not.
-        self.scanned.elapsed() < Duration::from_secs(5)
+        self.scanned.elapsed() < FULL_SCAN_INTERVAL
             && self
                 .paths
                 .iter()
@@ -150,7 +152,12 @@ struct Documents {
 
 struct Turn {
     started: Instant,
-    worked: bool,
+    uploaded: bool,
+}
+
+enum Batch {
+    Pending,
+    ReadyToPublish,
 }
 
 impl Sharing {
@@ -456,7 +463,7 @@ impl Sharing {
                 if !job.dir.is_dir() {
                     job.cancelled = true;
                 }
-                progress |= self.step(&agent, &job);
+                progress |= self.step(&agent, job);
             }
             if !progress {
                 let state = self.0.state.lock().unwrap();
@@ -502,8 +509,8 @@ impl Sharing {
             .collect()
     }
 
-    fn step(&self, agent: &ureq::Agent, job: &Job) -> bool {
-        let error = match self.tick(agent, job) {
+    fn step(&self, agent: &ureq::Agent, mut job: Job) -> bool {
+        let error = match self.tick(agent, &mut job) {
             Ok(worked) => return worked,
             Err(error) => error,
         };
@@ -531,7 +538,7 @@ impl Sharing {
                 .is_some_and(|j| !j.cancelled && j.error.is_none())
     }
 
-    fn tick(&self, agent: &ureq::Agent, job: &Job) -> Result<bool, UploadError> {
+    fn tick(&self, agent: &ureq::Agent, job: &mut Job) -> Result<bool, UploadError> {
         if job.cancelled {
             // DELETE is retried even while sharing is off. It never uploads content.
             // Always send it: a create response may have been lost before local persistence.
@@ -556,25 +563,40 @@ impl Sharing {
             self.update(&job.id, |j| j.created = true)?;
             return Ok(true);
         }
-        let mut sent = Cow::Borrowed(&job.sent);
-        let outcome = self.upload(agent, job, &mut sent);
-        let saved = match sent {
-            Cow::Owned(_) => self.persist(&job.id),
-            Cow::Borrowed(_) => Ok(()),
+        let mut turn = Turn {
+            started: Instant::now(),
+            uploaded: false,
         };
-        let worked = outcome?;
-        saved?;
-        Ok(worked)
+        let batch = self.upload(agent, job, &mut turn);
+        // Once the service accepts completion, it refuses further PUTs. A restarted
+        // client needs the acknowledged stamps on disk before making that request.
+        let checkpoint = if turn.uploaded || matches!(batch, Ok(Batch::ReadyToPublish)) {
+            self.persist(&job.id)
+        } else {
+            Ok(())
+        };
+        let batch = batch?;
+        checkpoint?;
+        if matches!(batch, Batch::ReadyToPublish) && self.allowed(&job.id) {
+            self.request(agent, "POST", job, "complete", &[])?;
+            if let Err(error) = self.update(&job.id, |j| j.ready = true) {
+                self.change(&job.id, |j| j.ready = false);
+                return Err(error.into());
+            }
+            let _ = std::fs::remove_dir_all(self.0.root.join(&job.id));
+            return Ok(true);
+        }
+        Ok(turn.uploaded)
     }
 
     fn upload(
         &self,
         agent: &ureq::Agent,
-        job: &Job,
-        sent: &mut Cow<Sent>,
-    ) -> Result<bool, UploadError> {
+        job: &mut Job,
+        turn: &mut Turn,
+    ) -> Result<Batch, UploadError> {
         let (folder, documents) = if job.finalized {
-            let (folder, documents) = Folder::finished(&job.dir, sent)?;
+            let (folder, documents) = Folder::finished(&job.dir, &job.sent)?;
             if job.quota == Quota::Unchecked {
                 let quota = self.quota(job, &folder, &documents)?;
                 self.update(&job.id, |job| job.quota = quota)?;
@@ -583,27 +605,23 @@ impl Sharing {
         } else {
             (Folder::read(&job.dir, false)?, None)
         };
-        let mut turn = Turn {
-            started: Instant::now(),
-            worked: false,
-        };
         for (name, path) in &folder.media {
-            let asset = self.media(job, name, path, sent)?;
-            if !self.send(agent, job, &asset, sent, &mut turn)? {
-                return Ok(turn.worked);
+            let asset = self.media(job, name, path)?;
+            if self.send(agent, job, &asset, turn)?.is_break() {
+                return Ok(Batch::Pending);
             }
         }
         for playlist in &folder.playlists {
             // A playlist can only refer to segments that have reached R2.
-            if playlist.lists_only(|part| sent.contains_key(part))
-                && !self.send(agent, job, &playlist.asset, sent, &mut turn)?
+            if playlist.lists_only(|part| job.sent.contains_key(part))
+                && self.send(agent, job, &playlist.asset, turn)?.is_break()
             {
-                return Ok(turn.worked);
+                return Ok(Batch::Pending);
             }
         }
-        let live = folder.live_manifest(|name| sent.contains_key(name))?;
-        if !self.send(agent, job, &live, sent, &mut turn)? {
-            return Ok(turn.worked);
+        let live = folder.live_manifest(|name| job.sent.contains_key(name))?;
+        if self.send(agent, job, &live, turn)?.is_break() {
+            return Ok(Batch::Pending);
         }
         let Some(documents) = documents else {
             if let Some(inventory) = folder.live {
@@ -616,50 +634,42 @@ impl Sharing {
                     state.idle.insert(job.id.clone(), Arc::new(inventory));
                 }
             }
-            return Ok(turn.worked);
+            return Ok(Batch::Pending);
         };
         for asset in &documents.assets {
-            if !self.send(agent, job, asset, sent, &mut turn)? {
-                return Ok(turn.worked);
+            if self.send(agent, job, asset, turn)?.is_break() {
+                return Ok(Batch::Pending);
             }
         }
-        if !self.allowed(&job.id) {
-            return Ok(turn.worked);
-        }
-        self.request(agent, "POST", job, "complete", &[])?;
-        self.update(&job.id, |j| j.ready = true)?;
-        let _ = std::fs::remove_dir_all(self.0.root.join(&job.id));
-        Ok(true)
+        Ok(Batch::ReadyToPublish)
     }
 
     fn send(
         &self,
         agent: &ureq::Agent,
-        job: &Job,
+        job: &mut Job,
         asset: &Asset,
-        sent: &mut Cow<Sent>,
         turn: &mut Turn,
-    ) -> Result<bool, UploadError> {
-        if sent.get(&asset.name) == Some(&asset.stamp) {
-            return Ok(true);
+    ) -> Result<ControlFlow<()>, UploadError> {
+        if job.sent.get(&asset.name) == Some(&asset.stamp) {
+            return Ok(ControlFlow::Continue(()));
         }
-        if (turn.worked && turn.started.elapsed() >= TURN) || !self.allowed(&job.id) {
-            return Ok(false);
+        if (turn.uploaded && turn.started.elapsed() >= UPLOAD_TURN) || !self.allowed(&job.id) {
+            return Ok(ControlFlow::Break(()));
         }
         let bytes = match &asset.source {
             Source::Bytes(bytes) => Cow::Borrowed(bytes.as_slice()),
             Source::File(path) => Cow::Owned(read_bounded(path)?),
         };
         self.request(agent, "PUT", job, &asset.name, &bytes)?;
-        sent.to_mut()
-            .insert(asset.name.clone(), asset.stamp.clone());
+        job.sent.insert(asset.name.clone(), asset.stamp.clone());
         self.change(&job.id, |j| {
             j.sent.insert(asset.name.clone(), asset.stamp.clone());
             j.uploaded_bytes
                 .insert(asset.name.clone(), bytes.len() as u64);
         });
-        turn.worked = true;
-        Ok(true)
+        turn.uploaded = true;
+        Ok(ControlFlow::Continue(()))
     }
 
     fn update(&self, id: &str, change: impl FnOnce(&mut Job)) -> io::Result<()> {
@@ -775,7 +785,7 @@ impl Sharing {
             return Err(UploadError::permanent(FILE_LIMIT));
         }
         for (name, path) in &folder.media {
-            let asset = self.media(job, name, path, &job.sent)?;
+            let asset = self.media(job, name, path)?;
             let uploaded = job.sent.get(name) == Some(&asset.stamp);
             if uploaded && job.uploaded_bytes.contains_key(name) {
                 continue;
@@ -789,27 +799,29 @@ impl Sharing {
             }
         }
         let mut bytes = 0_u64;
-        let mut unknown = 0;
+        let mut legacy_objects_without_sizes = 0;
         for size in sizes.into_values() {
             match size {
                 Some(size) if size > MAX_OBJECT => {
                     return Err(UploadError::permanent(OBJECT_LIMIT))
                 }
                 Some(size) => bytes = bytes.saturating_add(size),
-                None => unknown += 1,
+                None => legacy_objects_without_sizes += 1,
             }
         }
         if bytes > MAX_SHARE_BYTES {
             return Err(UploadError::permanent(BYTE_LIMIT));
         }
-        Ok(if bytes + unknown * MAX_OBJECT <= MAX_SHARE_BYTES {
-            Quota::WithinLimits
-        } else {
-            Quota::AwaitingServer
-        })
+        Ok(
+            if bytes + legacy_objects_without_sizes * MAX_OBJECT <= MAX_SHARE_BYTES {
+                Quota::WithinLimits
+            } else {
+                Quota::AwaitingServer
+            },
+        )
     }
 
-    fn media(&self, job: &Job, name: &str, path: &Path, sent: &Sent) -> Result<Asset, UploadError> {
+    fn media(&self, job: &Job, name: &str, path: &Path) -> Result<Asset, UploadError> {
         let stamp = file_stamp(path)?;
         if path.extension().is_none_or(|extension| extension != "png") {
             return Ok(Asset {
@@ -824,7 +836,7 @@ impl Sharing {
             .join(&job.id)
             .join(Path::new(name).with_extension(""));
         let cache = cache_dir.join(format!("{stamp}.jpg"));
-        if sent.get(name) != Some(&stamp) && !cache.is_file() {
+        if job.sent.get(name) != Some(&stamp) && !cache.is_file() {
             std::fs::create_dir_all(&cache_dir)?;
             let stage = tempfile::Builder::new()
                 .suffix(".jpg")
@@ -949,7 +961,7 @@ impl Folder {
         Ok(folder)
     }
 
-    fn finished(dir: &Path, sent: &Sent) -> Result<(Self, Documents), UploadError> {
+    fn finished(dir: &Path, sent: &UploadedStamps) -> Result<(Self, Documents), UploadError> {
         let folder = Folder::read(dir, true)?;
         let documents = documents(dir)?;
         let here: HashSet<&str> = folder.media.iter().map(|(name, _)| name.as_str()).collect();
