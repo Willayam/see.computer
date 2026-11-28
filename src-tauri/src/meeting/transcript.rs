@@ -1,16 +1,43 @@
 use chrono::{Local, TimeZone};
 
 use crate::engine::Segment;
-use crate::meeting::folder::Manifest;
+use crate::meeting::folder::{Manifest, THEM, YOU};
 
 const ECHO_SLACK_MS: u64 = 750;
 const ECHO_WORD_PERCENT: usize = 60;
 const JOIN_GAP_MS: u64 = 1_500;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Speaker {
     You,
     Them,
+}
+
+impl Speaker {
+    pub fn wav(self) -> &'static str {
+        match self {
+            Speaker::You => YOU,
+            Speaker::Them => THEM,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Speaker::You => "You",
+            Speaker::Them => "Them",
+        }
+    }
+}
+
+/// Segments timed from the start of their track, moved to where the track
+/// sits in the meeting.
+pub fn shifted(mut segments: Vec<Segment>, by_ms: u64) -> Vec<Segment> {
+    for segment in &mut segments {
+        segment.start_ms += by_ms;
+        segment.end_ms += by_ms;
+    }
+    segments
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,7 +112,7 @@ pub fn merge(you: &[Segment], them: &[Segment]) -> Vec<Line> {
     joined
 }
 
-fn timestamp(ms: u64) -> String {
+pub(super) fn timestamp(ms: u64) -> String {
     let seconds = ms / 1_000;
     if seconds >= 3_600 {
         format!(
@@ -134,18 +161,70 @@ pub fn render(manifest: &Manifest, lines: &[Line]) -> String {
             if index > 0 {
                 output.push('\n');
             }
-            let speaker = match line.speaker {
-                Speaker::You => "You",
-                Speaker::Them => "Them",
-            };
             output.push_str(&format!(
-                "[{}] {speaker}: {}\n",
+                "[{}] {}: {}\n",
                 timestamp(line.start_ms),
+                line.speaker.label(),
                 line.text
             ));
         }
     }
     output
+}
+
+/// A transcript line as where its words begin, or `None` for any other line.
+fn words_at(line: &str) -> Option<usize> {
+    let (clock, rest) = line.strip_prefix('[')?.split_once("] ")?;
+    [Speaker::You, Speaker::Them]
+        .into_iter()
+        .find_map(|speaker| {
+            rest.strip_prefix(speaker.label())?.strip_prefix(": ")?;
+            Some(clock.len() + 3 + speaker.label().len() + 2)
+        })
+}
+
+/// A line's time and speaker, and how many lines before it share them.
+fn keyed(text: &str) -> Vec<((&str, usize), &str)> {
+    let mut seen = std::collections::HashMap::new();
+    text.lines()
+        .filter_map(|line| {
+            let (key, words) = line.split_at(words_at(line)?);
+            let nth = seen.entry(key).or_insert(0_usize);
+            *nth += 1;
+            Some(((key, *nth), words))
+        })
+        .collect()
+}
+
+/// `fresh` with the user's corrections put back. `written` is what the app
+/// last wrote and `current` is that file as it reads now, so a line that
+/// differs between them was corrected by hand. A correction carries over only
+/// when the engine heard the same words at the same time again, since a line
+/// the engine now reads differently is no longer the line that was corrected.
+pub fn carry_corrections(written: &str, current: &str, fresh: &str) -> String {
+    let written: std::collections::HashMap<_, _> = keyed(written).into_iter().collect();
+    let corrected: std::collections::HashMap<_, _> = keyed(current)
+        .into_iter()
+        .filter(|(key, words)| written.get(key).is_some_and(|before| before != words))
+        .collect();
+    let mut keys = keyed(fresh).into_iter();
+    let mut out = String::with_capacity(fresh.len());
+    for line in fresh.split_inclusive('\n') {
+        let body = line.trim_end_matches('\n');
+        let kept = words_at(body).and_then(|at| {
+            let (key, words) = keys.next()?;
+            let theirs = corrected.get(&key)?;
+            (written.get(&key) == Some(&words)).then(|| format!("{}{theirs}", &body[..at]))
+        });
+        match kept {
+            Some(kept) => {
+                out.push_str(&kept);
+                out.push_str(&line[body.len()..]);
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -196,6 +275,24 @@ mod tests {
     }
 
     #[test]
+    fn corrections_survive_a_pass_that_hears_the_same_words() {
+        let written = "# Zoom meeting\n\nHeader.\n\n[00:01] You: Helo there.\n\n[00:04] Them: Fine thanks.\n\n[00:04] Them: And you.\n\n[00:09] You: Good by.\n";
+        let current = written
+            .replace("Helo there.", "Hello there.")
+            .replace("And you.", "And you?")
+            .replace("Good by.", "Goodbye.");
+        assert_eq!(carry_corrections(written, &current, written), current);
+
+        let fresh = written.replace("Good by.", "Good buy.");
+        assert_eq!(
+            carry_corrections(written, &current, &fresh),
+            current.replace("Goodbye.", "Good buy."),
+            "a line the engine now reads differently takes the new reading"
+        );
+        assert_eq!(carry_corrections(written, written, &fresh), fresh);
+    }
+
+    #[test]
     fn renders_header_body_and_hour_timestamp() {
         let manifest = Manifest {
             app: Some("Zoom".to_owned()),
@@ -203,6 +300,7 @@ mod tests {
             ended_ms: Some(1_781_002_520_000),
             state: State::Done,
             error: None,
+            tracks: None,
         };
         let date = Local
             .timestamp_millis_opt(manifest.started_ms)

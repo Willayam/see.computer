@@ -1,4 +1,4 @@
-//! `see-computer transcribe <wav>`, `clip <mov>`, `meetings`, `notes <meeting-folder>`, `words [--days]`, and `tap <seconds> <out.wav> [bundle-id]` are CLI commands.
+//! `see-computer transcribe <wav>`, `clip <mov>`, `meetings`, `notes [--full] <meeting-folder>`, `words [--days]`, and `tap <seconds> <out.wav> [bundle-id]` are CLI commands.
 //! The first two use the same engine and model root as the app.
 
 use std::path::PathBuf;
@@ -22,7 +22,9 @@ pub enum Cmd {
     Words {
         days: bool,
     },
-    Notes(PathBuf),
+    /// `--full` reads every chunk again in place of resuming from what the
+    /// engine already read, for a transcript that looks wrong.
+    Notes(PathBuf, crate::meeting::notes::Mode),
     Tap(u64, PathBuf, Option<String>),
 }
 
@@ -56,7 +58,16 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Option<Cmd> {
             _ => None,
         },
         Some("meetings") => Some(Cmd::Meetings),
-        Some("notes") => args.next().map(PathBuf::from).map(Cmd::Notes),
+        Some("notes") => {
+            use crate::meeting::notes::Mode;
+            match args.next().as_deref() {
+                Some("--full") => args
+                    .next()
+                    .map(|folder| Cmd::Notes(folder.into(), Mode::Full)),
+                Some(folder) => Some(Cmd::Notes(folder.into(), Mode::Resume)),
+                None => None,
+            }
+        }
         Some("tap") => {
             let seconds = args.next()?.parse().ok()?;
             let path = PathBuf::from(args.next()?);
@@ -107,7 +118,11 @@ pub fn run(cmd: Cmd) -> i32 {
         Cmd::Eval(path, terms) => eval(path, terms),
         Cmd::Meetings => meetings(),
         Cmd::Words { days } => words(days),
-        Cmd::Notes(folder) => match crate::meeting::notes::transcribe(&folder) {
+        Cmd::Notes(folder, mode) => match crate::meeting::notes::transcribe(
+            &folder,
+            &mut crate::meeting::notes::Reader::default(),
+            mode,
+        ) {
             Ok(path) => {
                 println!("{}", path.display());
                 0
@@ -174,7 +189,8 @@ fn snapshot() -> i32 {
 }
 
 fn tap(seconds: u64, path: PathBuf, bundle: Option<String>) -> i32 {
-    let objects = if let Some(bundle) = bundle {
+    use crate::meeting::tap::Target;
+    let named = if let Some(bundle) = bundle {
         let processes = match crate::meeting::holders::processes() {
             Ok(processes) => processes,
             Err(error) => {
@@ -198,12 +214,13 @@ fn tap(seconds: u64, path: PathBuf, bundle: Option<String>) -> i32 {
             eprintln!("no audio processes match {bundle}");
             return 1;
         }
-        objects
+        Some(objects)
     } else {
-        Vec::new()
+        None
     };
-    let recording = match crate::meeting::tap::start(&objects, &path) {
-        Ok(recording) => recording,
+    let target = named.as_deref().map_or(Target::System, Target::Processes);
+    let recording = match crate::meeting::tap::start(target, &path) {
+        Ok((recording, _)) => recording,
         Err(error) => {
             eprintln!("{error}");
             return 1;

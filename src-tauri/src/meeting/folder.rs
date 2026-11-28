@@ -4,10 +4,19 @@ use std::path::{Path, PathBuf};
 
 use chrono::{Local, TimeZone};
 
+use super::transcript::Speaker;
+
 pub const MANIFEST: &str = "meeting.json";
 pub const MARKDOWN: &str = "meeting.md";
 pub const YOU: &str = "you.wav";
 pub const THEM: &str = "them.wav";
+/// What the engine has read of the tracks so far. See `heard.rs`.
+pub const HEARD: &str = ".heard.jsonl";
+/// The transcript as the app last wrote it, to tell the user's corrections
+/// in `meeting.md` from the app's own words.
+pub const WRITTEN: &str = ".meeting.written.md";
+/// A corrected transcript that a later pass could not carry over in full.
+pub const PREVIOUS: &str = "meeting.previous.md";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -16,6 +25,40 @@ pub enum State {
     Transcribing,
     Done,
     Failed,
+}
+
+/// Whose audio the call track holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Scope {
+    /// The meeting app's own processes.
+    App,
+    /// Everything this Mac plays, apart from see.computer.
+    System,
+}
+
+/// The tracks a recording started, and when each one's first sample was heard,
+/// counted from `started_ms`. The tap can start minutes after the microphone.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tracks {
+    pub you: Microphone,
+    /// `None` when only the microphone recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub them: Option<CallAudio>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Microphone {
+    pub offset_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallAudio {
+    pub scope: Scope,
+    pub offset_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -27,12 +70,37 @@ pub struct Manifest {
     pub state: State,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Absent in older manifests, which did not say what they recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracks: Option<Tracks>,
 }
 
 impl Manifest {
     pub fn duration_ms(&self) -> Option<u64> {
         self.ended_ms
             .map(|end| end.saturating_sub(self.started_ms) as u64)
+    }
+
+    /// How long after the start this speaker's track begins.
+    pub fn offset_ms(&self, speaker: Speaker) -> u64 {
+        let Some(tracks) = &self.tracks else {
+            return 0;
+        };
+        match speaker {
+            Speaker::You => tracks.you.offset_ms,
+            Speaker::Them => tracks.them.as_ref().map_or(0, |them| them.offset_ms),
+        }
+    }
+
+    /// Whether a meeting without this speaker's track is missing audio. An
+    /// older manifest cannot say whether the tap ever started, and the
+    /// microphone track was created with every recording.
+    pub fn expects(&self, speaker: Speaker) -> bool {
+        match (speaker, &self.tracks) {
+            (Speaker::You, _) => true,
+            (Speaker::Them, Some(tracks)) => tracks.them.is_some(),
+            (Speaker::Them, None) => false,
+        }
     }
 }
 
@@ -89,6 +157,7 @@ pub fn create(root: &Path, app: Option<&str>, started_ms: i64) -> io::Result<Pat
                     ended_ms: None,
                     state: State::Recording,
                     error: None,
+                    tracks: None,
                 };
                 write(&folder, &manifest)?;
                 return Ok(folder);
@@ -106,9 +175,15 @@ pub fn read(folder: &Path) -> Option<Manifest> {
 
 pub fn write(folder: &Path, manifest: &Manifest) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(manifest).map_err(io::Error::other)?;
-    let temp = folder.join(format!(".{MANIFEST}.{}.tmp", std::process::id()));
-    fs::write(&temp, bytes)?;
-    if let Err(error) = fs::rename(&temp, folder.join(MANIFEST)) {
+    replace(&folder.join(MANIFEST), &bytes)
+}
+
+/// Swaps in a file's whole content at once, so nothing reads half of it.
+pub fn replace(path: &Path, content: &[u8]) -> io::Result<()> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let temp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    fs::write(&temp, content)?;
+    if let Err(error) = fs::rename(&temp, path) {
         let _ = fs::remove_file(temp);
         return Err(error);
     }
@@ -136,6 +211,7 @@ mod tests {
             ended_ms: None,
             state: State::Done,
             error: None,
+            tracks: None,
         };
         fs::write(
             root.join(MARKDOWN),
