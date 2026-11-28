@@ -62,6 +62,16 @@ struct Job {
     retry_at: u64,
     #[serde(default)]
     created_at: u64,
+    #[serde(default)]
+    timing: UploadTiming,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct UploadTiming {
+    started_ms: Option<u64>,
+    first_playable_ms: Option<u64>,
+    published_ms: Option<u64>,
+    last_error_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -143,6 +153,11 @@ impl LiveInventory {
 struct Playlist {
     asset: Asset,
     parts: Option<Vec<String>>,
+}
+
+struct LiveManifest {
+    asset: Asset,
+    lists_clip: bool,
 }
 
 struct Documents {
@@ -279,6 +294,7 @@ impl Sharing {
             }
         }
         let result = (|| -> io::Result<Job> {
+            let started_ms = epoch_millis();
             let job = Job {
                 id: random_id()?,
                 dir: dir.to_owned(),
@@ -292,7 +308,11 @@ impl Sharing {
                 quota: Quota::Unchecked,
                 attempts: 0,
                 retry_at: 0,
-                created_at: epoch(),
+                created_at: started_ms / 1000,
+                timing: UploadTiming {
+                    started_ms: Some(started_ms),
+                    ..Default::default()
+                },
             };
             self.write(&mut links, &job)?;
             Ok(job)
@@ -321,6 +341,7 @@ impl Sharing {
         let Some(job) = job else { return local_paste };
         let checked = Folder::finished(dir, &job.sent)
             .and_then(|(folder, documents)| self.quota(&job, &folder, &documents));
+        let check_failed = checked.is_err();
         let (quota, failure) = match checked {
             Ok(quota) => (quota, None),
             Err(error) if error.permanent => (Quota::Unchecked, Some(error.message)),
@@ -333,6 +354,9 @@ impl Sharing {
         let saved = self.change_dir(dir, |job| {
             job.finalized = true;
             job.quota = quota;
+            if check_failed {
+                job.timing.last_error_ms = Some(epoch_millis());
+            }
             job.error = job.error.take().or(failure);
             eligible = !job.cancelled && job.error.is_none() && job.quota == Quota::WithinLimits;
         });
@@ -525,6 +549,7 @@ impl Sharing {
             let mut state = self.0.state.lock().unwrap();
             state.message.clone_from(&error.message);
             if let Some(current) = state.jobs.get_mut(&job.id) {
+                current.timing.last_error_ms = Some(epoch_millis());
                 current.attempts = current.attempts.saturating_add(1);
                 current.retry_at = epoch() + (1_u64 << current.attempts.min(5));
                 if error.permanent && !current.cancelled {
@@ -586,7 +611,10 @@ impl Sharing {
         checkpoint?;
         if matches!(batch, Batch::ReadyToPublish) && self.allowed(&job.id) {
             self.request(agent, "POST", job, "complete", &[])?;
-            if let Err(error) = self.update(&job.id, |j| j.ready = true) {
+            if let Err(error) = self.update(&job.id, |j| {
+                j.ready = true;
+                j.timing.published_ms.get_or_insert_with(epoch_millis);
+            }) {
                 self.change(&job.id, |j| j.ready = false);
                 return Err(error.into());
             }
@@ -627,8 +655,16 @@ impl Sharing {
             }
         }
         let live = folder.live_manifest(|name| job.sent.contains_key(name))?;
-        if self.send(agent, job, &live, turn)?.is_break() {
+        if self.send(agent, job, &live.asset, turn)?.is_break() {
             return Ok(Batch::Pending);
+        }
+        if live.lists_clip
+            && job.timing.started_ms.is_some()
+            && job.timing.first_playable_ms.is_none()
+        {
+            self.change(&job.id, |j| {
+                j.timing.first_playable_ms.get_or_insert_with(epoch_millis);
+            });
         }
         let Some(documents) = documents else {
             if let Some(inventory) = folder.live {
@@ -785,7 +821,7 @@ impl Sharing {
             }
         }
         let live = folder.live_manifest(|name| sizes.contains_key(name))?;
-        for asset in documents.assets.iter().chain(std::iter::once(&live)) {
+        for asset in documents.assets.iter().chain(std::iter::once(&live.asset)) {
             sizes.insert(&asset.name, Some(asset.len()?));
         }
         if sizes.len() > MAX_SHARE_FILES {
@@ -988,7 +1024,7 @@ impl Folder {
         Ok((folder, documents))
     }
 
-    fn live_manifest(&self, uploaded: impl Fn(&str) -> bool) -> serde_json::Result<Asset> {
+    fn live_manifest(&self, uploaded: impl Fn(&str) -> bool) -> serde_json::Result<LiveManifest> {
         let clips: Vec<_> = self
             .playlists
             .iter()
@@ -1001,10 +1037,13 @@ impl Folder {
             .filter(|(name, _)| name.starts_with("shots/") && uploaded(name))
             .map(|(name, _)| serde_json::json!({"file": name}))
             .collect();
-        Ok(bytes_asset(
-            "live.json",
-            serde_json::to_vec(&serde_json::json!({"clips": clips, "shots": shots}))?,
-        ))
+        Ok(LiveManifest {
+            lists_clip: !clips.is_empty(),
+            asset: bytes_asset(
+                "live.json",
+                serde_json::to_vec(&serde_json::json!({"clips": clips, "shots": shots}))?,
+            ),
+        })
     }
 }
 
@@ -1177,24 +1216,33 @@ fn collect_files(
 }
 
 fn playlist_parts(name: &str, bytes: &[u8]) -> Option<Vec<String>> {
-    if !bytes.windows(8).any(|part| part == b"#EXTINF:") {
-        return None;
-    }
     let (parent, _) = name.rsplit_once('/')?;
-    let parts = String::from_utf8_lossy(bytes)
-        .lines()
-        .filter_map(|line| {
-            if let Some(map) = line.strip_prefix("#EXT-X-MAP:URI=\"") {
-                map.split('"').next()
-            } else if !line.starts_with('#') && !line.is_empty() {
-                Some(line)
-            } else {
-                None
+    let mut parts = Vec::new();
+    let mut needs_uri = false;
+    let mut has_media = false;
+    for line in std::str::from_utf8(bytes).ok()?.lines().map(str::trim) {
+        if line.starts_with("#EXTINF:") {
+            if needs_uri {
+                return None;
             }
-        })
-        .map(|file| format!("{parent}/{file}"))
-        .collect();
-    Some(parts)
+            needs_uri = true;
+        } else if let Some(map) = line.strip_prefix("#EXT-X-MAP:") {
+            let (_, uri) = map.split_once("URI=\"")?;
+            let (file, _) = uri.split_once('"')?;
+            if file.is_empty() {
+                return None;
+            }
+            parts.push(format!("{parent}/{file}"));
+        } else if !line.starts_with('#') && !line.is_empty() {
+            if !needs_uri {
+                return None;
+            }
+            needs_uri = false;
+            has_media = true;
+            parts.push(format!("{parent}/{line}"));
+        }
+    }
+    (has_media && !needs_uri).then_some(parts)
 }
 
 fn bytes_asset(name: &str, bytes: Vec<u8>) -> Asset {
@@ -1290,10 +1338,16 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 fn epoch() -> u64 {
+    epoch_millis() / 1000
+}
+
+fn epoch_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 #[derive(Debug)]

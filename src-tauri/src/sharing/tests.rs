@@ -35,6 +35,12 @@ fn finalize(service: &Sharing, dir: &Path) -> String {
     service.finalize_paste(&markdown, markdown.display().to_string())
 }
 
+fn saved_timing(service: &Sharing) -> serde_json::Value {
+    let queue = service.0.root.join(format!("{}.json", job(service).id));
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(queue).unwrap()).unwrap();
+    saved["timing"].clone()
+}
+
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
@@ -414,6 +420,7 @@ fn a_finished_take_missing_a_fragment_fails_at_once_and_publishes_when_it_return
     finalize(&service, &dir);
     assert_eq!(job(&service).error.as_deref(), Some(MISSING));
     assert_eq!(service.status(), MISSING);
+    let error = saved_timing(&service)["last_error_ms"].as_u64().unwrap();
     assert_eq!(link(&dir).state, "failed");
     let local = format!("Capture: {}", dir.join("take.md").display());
     assert_eq!(paste_link(&dir.join("take.md"), local.clone()), local);
@@ -428,6 +435,15 @@ fn a_finished_take_missing_a_fragment_fails_at_once_and_publishes_when_it_return
     service.retry();
     run(&service);
     assert!(job(&service).ready);
+    let timing = saved_timing(&service);
+    assert!(timing["started_ms"].as_u64().unwrap() <= error);
+    assert!(error <= timing["last_error_ms"].as_u64().unwrap());
+    assert!(timing["last_error_ms"].as_u64().unwrap() <= timing["published_ms"].as_u64().unwrap());
+    assert!(
+        timing["first_playable_ms"].as_u64().unwrap() <= timing["published_ms"].as_u64().unwrap()
+    );
+    let restarted = Sharing::load(service.0.root.clone(), &server.host, true);
+    assert_eq!(saved_timing(&restarted), timing);
     assert_eq!(server.requests().last().unwrap(), "POST /complete");
     assert_eq!(link(&dir).state, "ready");
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
@@ -452,6 +468,7 @@ fn a_playlist_waits_without_failing_while_its_fragment_is_still_arriving() {
         server.bodies()["PUT /live.json"],
         br#"{"clips":[],"shots":[]}"#
     );
+    assert!(saved_timing(&service)["first_playable_ms"].is_null());
     assert!(job(&service).error.is_none());
     assert_eq!(link(&dir).state, "uploading");
 
@@ -469,6 +486,7 @@ fn a_playlist_waits_without_failing_while_its_fragment_is_still_arriving() {
         server.bodies()["PUT /live.json"],
         br#"{"clips":[{"playlist":"live/clip.segments/index.m3u8"}],"shots":[]}"#
     );
+    assert!(saved_timing(&service)["first_playable_ms"].is_u64());
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
 
@@ -701,6 +719,11 @@ fn playlist_waits_for_init_and_every_referenced_chunk() {
     assert!(playlist.lists_only(|part| sent.contains_key(part)));
     let empty = b"#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n";
     assert_eq!(playlist_parts(name, empty), None);
+    let truncated = b"#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n#EXT-X-ENDLIST\n";
+    assert_eq!(playlist_parts(name, truncated), None);
+    let missing_second =
+        b"#EXTM3U\n#EXTINF:1,\nsegment-000.m4s\n#EXTINF:1,\n#EXTINF:1,\nsegment-002.m4s\n";
+    assert_eq!(playlist_parts(name, missing_second), None);
 }
 
 #[test]
