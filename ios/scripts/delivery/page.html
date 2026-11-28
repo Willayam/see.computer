@@ -1,0 +1,29 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>delivery</title>
+<style>
+  body { font: 15px -apple-system; margin: 10px; }
+  input, textarea, [contenteditable] { display: block; width: 95%; margin: 6px 0; font: 15px -apple-system; border: 1px solid #888; border-radius: 6px; padding: 6px; min-height: 22px; }
+  pre { font: 10px ui-monospace; white-space: pre-wrap; }
+</style>
+<input id="input" placeholder="input">
+<textarea id="textarea" rows="2" placeholder="textarea"></textarea>
+<div id="editable" contenteditable="true"></div>
+<input id="controlled" placeholder="set again from state on every input event">
+<pre id="out"></pre>
+<script>
+  // What each field holds, as text a check can read from the page.
+  const field = id => document.getElementById(id);
+  const value = id => id === 'editable' ? field(id).textContent : field(id).value;
+  const show = () => {
+    field('out').textContent = ['input', 'textarea', 'editable', 'controlled'].map(id => `${id}[${value(id).length}]=${value(id)}`).join('\n');
+  };
+  // A framework that renders an input from its state writes the value back after every event.
+  let state = '';
+  field('controlled').addEventListener('input', () => {
+    state = field('controlled').value;
+    requestAnimationFrame(() => { field('controlled').value = state; });
+  });
+  setInterval(show, 300);
+  show();
+</script>
