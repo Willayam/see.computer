@@ -1299,13 +1299,20 @@ impl Controller {
             let empty = captured.is_empty();
             let result = clip::package_take(take.dir, duration_ms, &transcription, captured)
                 .map(|packaged| {
-                    if empty {
+                    let paste = if empty {
                         sharing.cancel(take_dir.as_deref());
-                    } else if let Some(dir) = packaged.markdown.parent() {
-                        sharing.finalize(dir);
-                    }
+                        packaged.paste
+                    } else if packaged
+                        .markdown
+                        .parent()
+                        .is_some_and(|dir| sharing.finalize(dir))
+                    {
+                        crate::sharing::paste_link(&packaged.markdown, packaged.paste)
+                    } else {
+                        packaged.paste
+                    };
                     Packaged {
-                        paste: crate::sharing::paste_link(&packaged.markdown, packaged.paste),
+                        paste,
                         spoken: packaged.spoken,
                         note: packaged.note,
                     }

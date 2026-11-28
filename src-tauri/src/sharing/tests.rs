@@ -162,6 +162,90 @@ fn clip(fragments: usize) -> Vec<String> {
 }
 
 #[test]
+fn finalized_take_reports_the_limiting_quota_before_paste() {
+    for (parts, part_bytes, limit) in [
+        (1496, 0, "1,500 files"),
+        (32, 8 * 1024 * 1024, "256 MiB"),
+        (1, 8 * 1024 * 1024 + 1, "8 MiB"),
+    ] {
+        let (service, dir) = setup(true);
+        service.begin(&dir);
+        record(&dir, parts, parts);
+        package(&dir);
+        if part_bytes > 0 {
+            for index in 0..parts {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(dir.join(format!("live/clip.segments/segment-{index:03}.m4s")))
+                    .unwrap()
+                    .set_len(part_bytes)
+                    .unwrap();
+            }
+        }
+        service.finalize(&dir);
+        let local = dir.join("take.md").display().to_string();
+        assert_eq!(paste_link(&dir.join("take.md"), local.clone()), local);
+        assert!(service.status().contains(limit), "{}", service.status());
+        let restarted = Sharing::load(service.0.root.clone(), HOST, true);
+        assert!(restarted.status().contains(limit));
+        service.retry();
+        assert_eq!(paste_link(&dir.join("take.md"), local.clone()), local);
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn a_legacy_upload_with_unknown_sizes_waits_for_confirmation_only_if_it_might_exceed_quota() {
+    let (service, dir) = setup(true);
+    service.begin(&dir);
+    record(&dir, 1, 1);
+    package(&dir);
+    let id = job(&service).id;
+    service
+        .update(&id, |j| {
+            for index in 0..32 {
+                j.sent
+                    .insert(format!("live/previous-{index}.m4s"), "old-stamp".into());
+            }
+        })
+        .unwrap();
+    service.finalize(&dir);
+    assert_eq!(link(&dir).state, "checking");
+    service
+        .update(&id, |j| {
+            j.uploaded_bytes.insert("live/previous-0.m4s".into(), 100);
+        })
+        .unwrap();
+    service.finalize(&dir);
+    assert_eq!(link(&dir).state, "uploading");
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_take_at_the_file_limit_can_share_while_uploading() {
+    let (service, dir) = setup(true);
+    service.begin(&dir);
+    record(&dir, 1495, 1495);
+    package(&dir);
+    assert!(service.finalize(&dir));
+    assert_eq!(link(&dir).state, "uploading");
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_failed_checkpoint_keeps_an_old_link_out_of_the_initial_paste() {
+    let (service, dir) = setup(true);
+    service.begin(&dir);
+    record(&dir, 1, 1);
+    package(&dir);
+    let queue_file = service.0.root.join(format!("{}.json", job(&service).id));
+    std::fs::remove_file(&queue_file).unwrap();
+    std::fs::create_dir(&queue_file).unwrap();
+    assert!(!service.finalize(&dir));
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn off_never_creates_a_job_or_credential_and_pauses_existing_jobs() {
     let (service, dir) = setup(false);
     service.begin(&dir);
@@ -531,7 +615,7 @@ fn finalized_manifest_uses_remote_media_and_keeps_local_originals() {
     std::fs::create_dir_all(dir.join("shots")).unwrap();
     std::fs::write(
         dir.join("shots/001.png"),
-        [0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130],
+        include_bytes!("../../icons/tray.png"),
     )
     .unwrap();
     let source = r#"{"captures":[{"type":"clip","video":"clips/001/clip.mov","playlist":"live/clip.segments/index.m3u8"},{"type":"shot","file":"shots/001.png"}],"fullText":"Swedish och English"}"#;

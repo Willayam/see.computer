@@ -11,6 +11,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HOST: &str = "https://see.computer";
 const MAX_OBJECT: u64 = 8 * 1024 * 1024;
+const MAX_SHARE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_SHARE_FILES: usize = 1500;
+const FILE_LIMIT: &str = "Share exceeds 1,500 files. Local recording saved.";
+const BYTE_LIMIT: &str = "Share exceeds 256 MiB. Local recording saved.";
+const OBJECT_LIMIT: &str = "A recording file exceeds 8 MiB. Local recording saved.";
 /// How long one job uploads before it saves its progress and another job gets a turn.
 const TURN: Duration = Duration::from_secs(1);
 const MISSING: &str = "A recording file is missing. The share is incomplete.";
@@ -49,12 +54,25 @@ struct Job {
     ready: bool,
     error: Option<String>,
     sent: Sent,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    uploaded_bytes: BTreeMap<String, u64>,
+    #[serde(default)]
+    quota: Quota,
     #[serde(default)]
     attempts: u32,
     #[serde(default)]
     retry_at: u64,
     #[serde(default)]
     created_at: u64,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Quota {
+    #[default]
+    Unchecked,
+    WithinLimits,
+    AwaitingServer,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -137,7 +155,18 @@ impl Sharing {
                 jobs.insert(job.id.clone(), job);
             }
         }
-        Self(Arc::new(Shared {
+        let unchecked: Vec<_> = jobs
+            .values()
+            .filter(|job| {
+                job.finalized
+                    && !job.cancelled
+                    && !job.ready
+                    && job.error.is_none()
+                    && job.quota == Quota::Unchecked
+            })
+            .map(|job| job.id.clone())
+            .collect();
+        let sharing = Self(Arc::new(Shared {
             root,
             host: host.to_owned(),
             state: Mutex::new(State {
@@ -147,7 +176,11 @@ impl Sharing {
             }),
             wake: Condvar::new(),
             disk: Mutex::new(BTreeMap::new()),
-        }))
+        }));
+        for id in unchecked {
+            let _ = sharing.persist(&id);
+        }
+        sharing
     }
 
     #[cfg(test)]
@@ -168,6 +201,15 @@ impl Sharing {
         let state = self.0.state.lock().unwrap();
         if !state.message.is_empty() {
             return state.message.clone();
+        }
+        if let Some((_, error)) = state
+            .jobs
+            .values()
+            .filter(|job| !job.cancelled && !job.ready)
+            .filter_map(|job| job.error.as_ref().map(|error| (job.created_at, error)))
+            .max_by_key(|(at, _)| *at)
+        {
+            return error.clone();
         }
         let pending = state
             .jobs
@@ -204,6 +246,8 @@ impl Sharing {
                 ready: false,
                 error: None,
                 sent: BTreeMap::new(),
+                uploaded_bytes: BTreeMap::new(),
+                quota: Quota::Unchecked,
                 attempts: 0,
                 retry_at: 0,
                 created_at: epoch(),
@@ -223,27 +267,32 @@ impl Sharing {
         self.0.wake.notify_one();
     }
 
-    /// Marks the take finished. A take that refers to a file it does not have
-    /// fails here, before the paste reads the link, so the paste keeps the
-    /// local path.
-    pub fn finalize(&self, dir: &Path) {
-        let sent = {
+    /// The initial paste may use a link only after the finished inventory fits
+    /// and its state was saved. Otherwise the caller keeps the local path.
+    pub fn finalize(&self, dir: &Path) -> bool {
+        let job = {
             let state = self.0.state.lock().unwrap();
-            let job = state.jobs.values().find(|job| job.dir == dir);
-            job.map(|job| job.sent.clone())
+            state.jobs.values().find(|job| job.dir == dir).cloned()
         };
-        let Some(sent) = sent else { return };
-        let failure = Folder::finished(dir, &sent)
-            .err()
-            .filter(|error| error.permanent)
-            .map(|error| error.message);
+        let Some(job) = job else { return false };
+        let checked = Folder::finished(dir, &job.sent)
+            .and_then(|(folder, documents)| self.quota(&job, &folder, &documents));
+        let (quota, failure) = match checked {
+            Ok(quota) => (quota, None),
+            Err(error) if error.permanent => (Quota::Unchecked, Some(error.message)),
+            Err(_) => (Quota::Unchecked, None),
+        };
         if let Some(message) = &failure {
             self.0.state.lock().unwrap().message.clone_from(message);
         }
-        self.change_dir(dir, |job| {
+        let mut eligible = false;
+        let saved = self.change_dir(dir, |job| {
             job.finalized = true;
+            job.quota = quota;
             job.error = job.error.take().or(failure);
+            eligible = !job.cancelled && job.error.is_none() && job.quota == Quota::WithinLimits;
         });
+        eligible && saved
     }
 
     pub fn cancel(&self, dir: Option<&Path>) {
@@ -262,6 +311,9 @@ impl Sharing {
             let waiting = state.jobs.values_mut().filter(|j| !j.ready && !j.cancelled);
             waiting
                 .map(|job| {
+                    if job.error.is_some() {
+                        job.quota = Quota::Unchecked;
+                    }
                     job.error = None;
                     job.retry_at = 0;
                     job.attempts = 0;
@@ -295,7 +347,7 @@ impl Sharing {
         self.0.wake.notify_one();
     }
 
-    fn change_dir(&self, dir: &Path, change: impl FnOnce(&mut Job)) {
+    fn change_dir(&self, dir: &Path, change: impl FnOnce(&mut Job)) -> bool {
         let changed = {
             let mut state = self.0.state.lock().unwrap();
             let job = state.jobs.values_mut().find(|job| job.dir == dir);
@@ -304,10 +356,9 @@ impl Sharing {
                 job.id.clone()
             })
         };
-        if let Some(id) = changed {
-            let _ = self.persist(&id);
-        }
+        let saved = changed.is_some_and(|id| self.persist(&id).is_ok());
         self.0.wake.notify_one();
+        saved
     }
 
     /// Saves the job as it is now. Each save reads the job after it has the
@@ -323,21 +374,26 @@ impl Sharing {
 
     /// Writes the queue file, and the link file when its state changed.
     fn write(&self, links: &mut BTreeMap<String, &'static str>, job: &Job) -> io::Result<()> {
-        write_private(
+        let saved = write_private(
             &self.0.root.join(format!("{}.json", job.id)),
             &serde_json::to_vec(job)?,
-        )?;
+        );
         let state = if job.cancelled {
             "removed"
         } else if job.error.is_some() {
             "failed"
         } else if job.ready {
             "ready"
+        } else if job.finalized && job.quota != Quota::WithinLimits {
+            "checking"
         } else {
             "uploading"
         };
-        if links.get(&job.id) == Some(&state) || !job.dir.is_dir() {
-            return Ok(());
+        if (saved.is_err() && matches!(state, "ready" | "uploading"))
+            || links.get(&job.id) == Some(&state)
+            || !job.dir.is_dir()
+        {
+            return saved;
         }
         write_private(
             &job.dir.join("share.json"),
@@ -348,7 +404,7 @@ impl Sharing {
             })?,
         )?;
         links.insert(job.id.clone(), state);
-        Ok(())
+        saved
     }
 
     fn run(&self) {
@@ -466,6 +522,10 @@ impl Sharing {
         // a file it refers to and does not have will never come.
         let (folder, documents) = if job.finalized {
             let (folder, documents) = Folder::finished(&job.dir, sent)?;
+            if job.quota == Quota::Unchecked {
+                let quota = self.quota(job, &folder, &documents)?;
+                self.update(&job.id, |job| job.quota = quota)?;
+            }
             (folder, Some(documents))
         } else {
             (Folder::read(&job.dir, false)?, None)
@@ -488,7 +548,7 @@ impl Sharing {
                 return Ok(turn.worked);
             }
         }
-        let live = folder.live_manifest(sent)?;
+        let live = folder.live_manifest(|name| sent.contains_key(name))?;
         if !self.send(agent, job, &live, sent, &mut turn)? {
             return Ok(turn.worked);
         }
@@ -534,6 +594,8 @@ impl Sharing {
             .insert(asset.name.clone(), asset.stamp.clone());
         self.change(&job.id, |j| {
             j.sent.insert(asset.name.clone(), asset.stamp.clone());
+            j.uploaded_bytes
+                .insert(asset.name.clone(), bytes.len() as u64);
         });
         turn.worked = true;
         Ok(true)
@@ -572,7 +634,7 @@ impl Sharing {
             path
         );
         let auth = format!("Bearer {token}");
-        let response = match method {
+        let mut response = match method {
             "POST" => agent.post(&url).header("Authorization", &auth).send(bytes),
             "DELETE" => agent.delete(&url).header("Authorization", &auth).call(),
             _ => agent.put(&url).header("Authorization", &auth).send(bytes),
@@ -586,12 +648,25 @@ impl Sharing {
             401 | 403 => {
                 UploadError::permanent("Sharing credential was rejected. Local recording saved.")
             }
-            413 => {
-                UploadError::permanent("Share exceeds the beta size limit. Local recording saved.")
+            413 | 429 => {
+                let detail: serde_json::Value =
+                    serde_json::from_reader(response.body_mut().as_reader().take(4096))
+                        .unwrap_or_default();
+                let message = match (status, detail["error"].as_str()) {
+                    (413, Some("share_files")) => FILE_LIMIT,
+                    (413, Some("share_bytes")) => BYTE_LIMIT,
+                    (413, Some("invalid_body")) => OBJECT_LIMIT,
+                    (429, Some("installation_month")) => {
+                        "Monthly allowance of 10 shares reached. Local recording saved."
+                    }
+                    (429, Some("ip_day" | "global_day")) => {
+                        "Daily sharing allowance reached. Local recording saved. Retry tomorrow."
+                    }
+                    (429, _) => "Sharing allowance reached. Local recording saved. Retry later.",
+                    _ => "Share exceeds the beta storage limit. Local recording saved.",
+                };
+                UploadError::permanent(message)
             }
-            429 => UploadError::permanent(
-                "Sharing allowance reached. Local recording saved. Retry later.",
-            ),
             400 | 404 | 409 | 410 | 415 => {
                 UploadError::permanent("Could not publish this share. Local recording saved.")
             }
@@ -613,7 +688,72 @@ impl Sharing {
         }
     }
 
-    /// The upload for one media file. A screenshot goes up as a JPEG, converted once.
+    /// Checks the bytes the viewer will receive, including previously uploaded
+    /// objects that have since disappeared from the take folder.
+    fn quota(
+        &self,
+        job: &Job,
+        folder: &Folder,
+        documents: &Documents,
+    ) -> Result<Quota, UploadError> {
+        let mut sizes: BTreeMap<&str, Option<u64>> = job
+            .sent
+            .keys()
+            .map(|name| (name.as_str(), job.uploaded_bytes.get(name).copied()))
+            .collect();
+        for (name, _) in &folder.media {
+            sizes.entry(name).or_default();
+        }
+        for playlist in &folder.playlists {
+            if playlist.lists_only(|part| sizes.contains_key(part)) {
+                sizes.insert(&playlist.asset.name, Some(playlist.asset.len()?));
+            }
+        }
+        let live = folder.live_manifest(|name| sizes.contains_key(name))?;
+        for asset in documents.assets.iter().chain(std::iter::once(&live)) {
+            sizes.insert(&asset.name, Some(asset.len()?));
+        }
+        if sizes.len() > MAX_SHARE_FILES {
+            return Err(UploadError::permanent(FILE_LIMIT));
+        }
+        for (name, path) in &folder.media {
+            let asset = self.media(job, name, path, &job.sent)?;
+            let uploaded = job.sent.get(name) == Some(&asset.stamp);
+            if uploaded && job.uploaded_bytes.contains_key(name) {
+                continue;
+            }
+            match asset.len() {
+                Ok(bytes) => {
+                    sizes.insert(name, Some(bytes));
+                }
+                Err(error) if uploaded && error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let mut bytes = 0_u64;
+        let mut unknown = 0;
+        for size in sizes.into_values() {
+            match size {
+                Some(size) if size > MAX_OBJECT => {
+                    return Err(UploadError::permanent(OBJECT_LIMIT))
+                }
+                Some(size) => bytes = bytes.saturating_add(size),
+                None => unknown += 1,
+            }
+        }
+        if bytes > MAX_SHARE_BYTES {
+            return Err(UploadError::permanent(BYTE_LIMIT));
+        }
+        // Older queue files recorded stamps only. The server already accepted
+        // each missing object under its per-file limit.
+        Ok(if bytes + unknown * MAX_OBJECT <= MAX_SHARE_BYTES {
+            Quota::WithinLimits
+        } else {
+            Quota::AwaitingServer
+        })
+    }
+
+    /// The upload for one media file. A screenshot goes up as a JPEG.
     fn media(&self, job: &Job, name: &str, path: &Path, sent: &Sent) -> Result<Asset, UploadError> {
         let stamp = file_stamp(path)?;
         if path.extension().is_none_or(|extension| extension != "png") {
@@ -623,9 +763,17 @@ impl Sharing {
                 stamp,
             });
         }
-        let cache = self.0.root.join(&job.id).join(format!("{stamp}.jpg"));
+        let cache_dir = self
+            .0
+            .root
+            .join(&job.id)
+            .join(Path::new(name).with_extension(""));
+        let cache = cache_dir.join(format!("{stamp}.jpg"));
         if sent.get(name) != Some(&stamp) && !cache.is_file() {
-            std::fs::create_dir_all(cache.parent().unwrap())?;
+            std::fs::create_dir_all(&cache_dir)?;
+            let stage = tempfile::Builder::new()
+                .suffix(".jpg")
+                .tempfile_in(&cache_dir)?;
             let status = std::process::Command::new("/usr/bin/sips")
                 .args([
                     "-Z",
@@ -639,7 +787,7 @@ impl Sharing {
                 ])
                 .arg(path)
                 .arg("--out")
-                .arg(&cache)
+                .arg(stage.path())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()?;
@@ -648,12 +796,22 @@ impl Sharing {
                     "Could not compress screenshot. Retrying.",
                 ));
             }
+            stage.persist(&cache).map_err(|error| error.error)?;
         }
         Ok(Asset {
             name: name.to_owned(),
             source: Source::File(cache),
             stamp,
         })
+    }
+}
+
+impl Asset {
+    fn len(&self) -> io::Result<u64> {
+        match &self.source {
+            Source::Bytes(bytes) => Ok(bytes.len() as u64),
+            Source::File(path) => Ok(path.metadata()?.len()),
+        }
     }
 }
 
@@ -725,17 +883,17 @@ impl Folder {
     }
 
     /// What the share page shows while the take records.
-    fn live_manifest(&self, sent: &Sent) -> serde_json::Result<Asset> {
+    fn live_manifest(&self, uploaded: impl Fn(&str) -> bool) -> serde_json::Result<Asset> {
         let clips: Vec<_> = self
             .playlists
             .iter()
-            .filter(|playlist| sent.contains_key(&playlist.asset.name))
+            .filter(|playlist| uploaded(&playlist.asset.name))
             .map(|playlist| serde_json::json!({"playlist": playlist.asset.name}))
             .collect();
         let shots: Vec<_> = self
             .media
             .iter()
-            .filter(|(name, _)| name.starts_with("shots/") && sent.contains_key(name))
+            .filter(|(name, _)| name.starts_with("shots/") && uploaded(name))
             .map(|(name, _)| serde_json::json!({"file": name}))
             .collect();
         Ok(bytes_asset(
