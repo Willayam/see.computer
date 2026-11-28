@@ -1,7 +1,9 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import worker, {
   LIMITS,
   ShareCoordinatorService,
+  SqliteMetadata,
   parseByteRange,
   rewriteMarkdownPaths,
   sha256Hex,
@@ -14,145 +16,54 @@ const initialNow = Date.UTC(2026, 8, 9, 12, 0, 0);
 const ownerA = "a".repeat(64);
 const ownerB = "b".repeat(64);
 const ipA = "1".repeat(64);
+const ipB = "2".repeat(64);
 
-class MemoryMetadata {
-  constructor() {
-    this.shares = new Map();
-    this.files = new Map();
-  }
-
-  fileKey(id, path) {
-    return `${id}\n${path}`;
-  }
-
-  getShare(id) {
-    return this.shares.get(id) ?? null;
-  }
-
-  getFile(id, path) {
-    return this.files.get(this.fileKey(id, path)) ?? null;
-  }
-
-  pendingFiles(id) {
-    return [...this.files.values()].filter((file) => file.share_id === id && file.pending_sha !== null);
-  }
-
-  createShare(input) {
-    const existing = this.getShare(input.id);
-    if (existing) return { kind: "existing", share: existing };
-    const shares = [...this.shares.values()];
-    if (shares.filter((share) => share.owner_hash === input.ownerHash && share.created_at >= input.monthStart).length >= LIMITS.installationMonth) {
-      return { kind: "quota", quota: "installation_month" };
-    }
-    if (shares.filter((share) => share.created_at >= input.dayStart).length >= LIMITS.globalDay) return { kind: "quota", quota: "global_day" };
-    if (shares.filter((share) => share.ip_hash === input.ipHash && share.created_at >= input.dayStart).length >= LIMITS.ipDay) {
-      return { kind: "quota", quota: "ip_day" };
-    }
-    const share = {
-      id: input.id,
-      owner_hash: input.ownerHash,
-      ip_hash: input.ipHash,
-      url: input.url,
-      expires_at: input.expiresAt,
-      created_at: input.now,
-      state: "open",
-      total_bytes: 0,
-      file_count: 0,
-    };
-    this.shares.set(input.id, share);
-    return { kind: "created", share };
-  }
-
-  reserveUpload(id, path, size, sha, now) {
-    const share = this.getShare(id);
-    if (!share) return { kind: "missing" };
-    if (share.state !== "open") return { kind: "state", state: share.state };
-    if (share.expires_at <= now) return { kind: "expired" };
-    const key = this.fileKey(id, path);
-    const file = this.files.get(key);
-    if (file?.pending_sha) return { kind: "pending", file };
-    const oldSize = file?.committed_size ?? 0;
-    const delta = size - oldSize;
-    const isNew = !file || file.committed_size === null;
-    if (share.total_bytes + delta > LIMITS.shareBytes) return { kind: "quota", quota: "share_bytes" };
-    if (share.file_count + (isNew ? 1 : 0) > LIMITS.shareFiles) return { kind: "quota", quota: "share_files" };
-    share.total_bytes += delta;
-    if (isNew) share.file_count += 1;
-    if (file) {
-      file.pending_size = size;
-      file.pending_sha = sha;
-    } else {
-      this.files.set(key, {
-        share_id: id,
-        path,
-        committed_size: null,
-        committed_sha: null,
-        pending_size: size,
-        pending_sha: sha,
-      });
-    }
-    return { kind: "reserved" };
-  }
-
-  finalizeUpload(id, path, sha) {
-    const file = this.getFile(id, path);
-    if (!file || file.pending_sha !== sha) return false;
-    file.committed_size = file.pending_size;
-    file.committed_sha = file.pending_sha;
-    file.pending_size = null;
-    file.pending_sha = null;
-    return true;
-  }
-
-  rollbackUpload(id, path, sha) {
-    const key = this.fileKey(id, path);
-    const file = this.files.get(key);
-    if (!file || file.pending_sha !== sha) return false;
-    const share = this.getShare(id);
-    share.total_bytes -= file.pending_size - (file.committed_size ?? 0);
-    if (file.committed_size === null) {
-      share.file_count -= 1;
-      this.files.delete(key);
-    } else {
-      file.pending_size = null;
-      file.pending_sha = null;
-    }
-    return true;
-  }
-
-  markReady(id, ownerHash, now) {
-    const share = this.getShare(id);
-    if (!share) return { kind: "missing" };
-    if (share.owner_hash !== ownerHash) return { kind: "owner" };
-    if (share.state === "deleted") return { kind: "state", state: "deleted" };
-    if (share.expires_at <= now) return { kind: "expired" };
-    if (share.state === "ready") return { kind: "ready", share };
-    if (!this.getFile(id, "transcript.json")?.committed_sha || !this.getFile(id, "take.md")?.committed_sha) return { kind: "incomplete" };
-    share.state = "ready";
-    return { kind: "ready", share };
-  }
-
-  markDeleted(id, ownerHash) {
-    const share = this.getShare(id);
-    if (!share) return { kind: "missing" };
-    if (share.owner_hash !== ownerHash) return { kind: "owner" };
-    share.state = "deleted";
-    return { kind: "deleted" };
-  }
+// The Durable Object storage API over SQLite, so the tests run the production SQL.
+function storage(database) {
+  return {
+    sql: {
+      exec(query, ...bindings) {
+        if (/^\s*CREATE/.test(query)) {
+          database.exec(query);
+          return { toArray: () => [] };
+        }
+        const rows = database.query(query).all(...bindings);
+        return { toArray: () => rows };
+      },
+    },
+    transactionSync: (operation) => database.transaction(operation)(),
+  };
 }
 
 class MemoryR2 {
   constructor() {
     this.objects = new Map();
     this.pageSize = 1000;
-    this.putGate = null;
-    this.onPutStarted = null;
     this.failPut = false;
+    this.holds = [];
+  }
+
+  // Stalls the next matching call until release(): before it touches the
+  // object, or once it has with `after`. release(error) makes the call fail.
+  hold(operation, key, { after = false } = {}) {
+    const hold = { operation, key, after };
+    hold.reached = new Promise((resolve) => { hold.arrive = resolve; });
+    hold.released = new Promise((resolve) => { hold.release = resolve; });
+    this.holds.push(hold);
+    return hold;
+  }
+
+  async stall(operation, key, after = false) {
+    const index = this.holds.findIndex((hold) => hold.operation === operation && hold.key === key && hold.after === after);
+    if (index < 0) return;
+    const [hold] = this.holds.splice(index, 1);
+    hold.arrive();
+    const error = await hold.released;
+    if (error) throw error;
   }
 
   async put(key, value, options = {}) {
-    if (this.onPutStarted) this.onPutStarted();
-    if (this.putGate) await this.putGate;
+    await this.stall("put", key);
     if (this.failPut) throw new Error("R2 failure");
     const bytes = value instanceof Uint8Array ? value.slice() : new Uint8Array(value);
     const sha = options.customMetadata?.sha256 ?? await sha256Hex(bytes);
@@ -163,18 +74,27 @@ class MemoryR2 {
       customMetadata: { ...options.customMetadata },
       httpMetadata: { ...options.httpMetadata },
     });
+    await this.stall("put", key, true);
+  }
+
+  describe(value) {
+    return { size: value.size, httpEtag: value.httpEtag, customMetadata: value.customMetadata, httpMetadata: value.httpMetadata };
   }
 
   async head(key) {
+    await this.stall("head", key);
     const value = this.objects.get(key);
-    return value ? { size: value.size, httpEtag: value.httpEtag, customMetadata: value.customMetadata, httpMetadata: value.httpMetadata } : null;
+    return value ? this.describe(value) : null;
   }
 
   async get(key, options = {}) {
+    await this.stall("get", key);
     const value = this.objects.get(key);
+    await this.stall("get", key, true);
     if (!value) return null;
-    const range = options.range;
-    return { body: range ? value.bytes.slice(range.offset, range.offset + range.length) : value.bytes.slice() };
+    const offset = options.range?.offset ?? 0;
+    const bytes = value.bytes.slice(offset, offset + (options.range?.length ?? value.size));
+    return { ...this.describe(value), range: { offset, length: bytes.byteLength }, body: new Blob([bytes]).stream() };
   }
 
   async list(options) {
@@ -194,12 +114,25 @@ class MemoryR2 {
   }
 }
 
-function fixture() {
+// A new coordinator instance. Pass the database and bucket of an earlier one
+// to restart it over the same stored state.
+function fixture(database = new Database(":memory:"), bucket = new MemoryR2()) {
   let now = initialNow;
-  const metadata = new MemoryMetadata();
-  const bucket = new MemoryR2();
+  const metadata = new SqliteMetadata(storage(database));
   const service = new ShareCoordinatorService(metadata, bucket, { now: () => now, publicOrigin: origin });
-  return { metadata, bucket, service, setNow(value) { now = value; } };
+  return { database, metadata, bucket, service, setNow(value) { now = value; } };
+}
+
+function shareRows(metadata) {
+  return metadata.sql.exec("SELECT * FROM shares").toArray();
+}
+
+// Whether the promise settles once requests that are free to run have run.
+async function settled(promise) {
+  let done = false;
+  promise.then(() => { done = true; }, () => { done = true; });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  return done;
 }
 
 function id(number) {
@@ -255,7 +188,7 @@ describe("authentication and ownership", () => {
     }), { COORDINATOR: namespace });
     expect(valid.status).toBe(201);
     expect(state.metadata.getShare(shareId).owner_hash).toBe(await sha256Hex(secret));
-    expect(JSON.stringify([...state.metadata.shares.values()])).not.toContain(secret);
+    expect(JSON.stringify(shareRows(state.metadata))).not.toContain(secret);
     expect(state.metadata.getShare(shareId).ip_hash).toBe(await sha256Hex("192.0.2.1"));
   });
 
@@ -289,7 +222,7 @@ describe("creation quotas", () => {
     const shareId = id(3);
     expect((await create(service, shareId)).status).toBe(201);
     expect((await create(service, shareId)).status).toBe(200);
-    expect(metadata.shares.size).toBe(1);
+    expect(shareRows(metadata)).toHaveLength(1);
     expect((await create(service, shareId, { owner: ownerB })).status).toBe(409);
   });
 
@@ -297,7 +230,7 @@ describe("creation quotas", () => {
     const first = fixture();
     for (let index = 0; index < 10; index += 1) expect((await create(first.service, id(100 + index), { ip: index.toString(16).padStart(64, "0") })).status).toBe(201);
     expect((await create(first.service, id(111), { ip: "f".repeat(64) })).status).toBe(429);
-    expect(first.metadata.shares.size).toBe(10);
+    expect(shareRows(first.metadata)).toHaveLength(10);
 
     const second = fixture();
     for (let index = 0; index < 20; index += 1) {
@@ -317,7 +250,7 @@ describe("creation quotas", () => {
     })));
     expect(responses.filter((response) => response.status === 201)).toHaveLength(100);
     expect(responses.filter((response) => response.status === 429)).toHaveLength(12);
-    expect(metadata.shares.size).toBe(100);
+    expect(shareRows(metadata)).toHaveLength(100);
   });
 });
 
@@ -365,7 +298,7 @@ describe("uploads", () => {
     const first = fixture();
     const byteLimitedId = id(52);
     await create(first.service, byteLimitedId);
-    first.metadata.getShare(byteLimitedId).total_bytes = LIMITS.shareBytes;
+    first.metadata.sql.exec("UPDATE shares SET total_bytes = ? WHERE id = ?", LIMITS.shareBytes, byteLimitedId);
     const byteResponse = await upload(first.service, byteLimitedId, "extra.json", "{}");
     expect(byteResponse.status).toBe(413);
     expect((await byteResponse.json()).error).toBe("share_bytes");
@@ -374,7 +307,7 @@ describe("uploads", () => {
     const second = fixture();
     const fileLimitedId = id(53);
     await create(second.service, fileLimitedId);
-    second.metadata.getShare(fileLimitedId).file_count = LIMITS.shareFiles;
+    second.metadata.sql.exec("UPDATE shares SET file_count = ? WHERE id = ?", LIMITS.shareFiles, fileLimitedId);
     const fileResponse = await upload(second.service, fileLimitedId, "extra.json", "{}");
     expect(fileResponse.status).toBe(413);
     expect((await fileResponse.json()).error).toBe("share_files");
@@ -404,6 +337,135 @@ describe("uploads", () => {
     }
     expect(validateRelativePath("live/001/index.m3u8")).toMatchObject({ contentType: "application/vnd.apple.mpegurl" });
     expect(validateRelativePath("clips/001/clip.mov")).toMatchObject({ contentType: "video/quicktime" });
+  });
+});
+
+describe("concurrent shares", () => {
+  test("a stalled storage write leaves another owner free to create, upload, publish and read", async () => {
+    const { service, bucket, metadata } = fixture();
+    const [slowShare, otherShare] = [id(300), id(301)];
+    await create(service, slowShare);
+    const stalled = bucket.hold("put", `${slowShare}/shots/001.jpg`);
+    const slow = upload(service, slowShare, "shots/001.jpg", "slow");
+    await stalled.reached;
+
+    expect((await create(service, otherShare, { owner: ownerB, ip: ipB })).status).toBe(201);
+    expect((await upload(service, otherShare, "transcript.json", "{}", ownerB)).status).toBe(201);
+    expect((await upload(service, otherShare, "take.md", "# Take", ownerB)).status).toBe(201);
+    expect((await service.fetch(internalRequest(`/api/shares/${otherShare}/complete`, { method: "POST", owner: ownerB }))).status).toBe(200);
+    expect(await (await service.fetch(new Request(`${origin}/s/${otherShare}/take.md`))).text()).toBe("# Take");
+    expect(await settled(slow)).toBe(false);
+
+    stalled.release();
+    expect((await slow).status).toBe(201);
+    expect(metadata.getShare(slowShare)).toMatchObject({ state: "open", total_bytes: 4, file_count: 1 });
+    expect(metadata.getShare(otherShare)).toMatchObject({ state: "ready", total_bytes: 8, file_count: 2 });
+  });
+
+  test("creation limits hold while another share's write is stalled", async () => {
+    const { service, bucket, metadata } = fixture();
+    await create(service, id(310));
+    const stalled = bucket.hold("put", `${id(310)}/take.md`);
+    const slow = upload(service, id(310), "take.md", "text");
+    await stalled.reached;
+    const responses = await Promise.all(Array.from({ length: 12 }, (_, index) => create(service, id(320 + index), {
+      ip: (index + 2).toString(16).padStart(64, "0"),
+    })));
+    expect(responses.filter((response) => response.status === 201)).toHaveLength(LIMITS.installationMonth - 1);
+    expect(responses.filter((response) => response.status === 429)).toHaveLength(3);
+    stalled.release();
+    expect((await slow).status).toBe(201);
+    expect(shareRows(metadata)).toHaveLength(LIMITS.installationMonth);
+  });
+
+  test("writes to one share keep their order and count each byte once", async () => {
+    const { service, bucket, metadata } = fixture();
+    const shareId = id(302);
+    await create(service, shareId);
+    const [older, newer] = ['{"shots":[]}', '{"shots":[{"file":"shots/001.jpg"}]}'];
+    const stalled = bucket.hold("put", `${shareId}/live.json`);
+    const first = upload(service, shareId, "live.json", older);
+    await stalled.reached;
+    const retry = upload(service, shareId, "live.json", older);
+    const replacement = upload(service, shareId, "live.json", newer);
+    const sibling = upload(service, shareId, "shots/001.jpg", "image");
+    expect(await settled(Promise.race([retry, replacement, sibling]))).toBe(false);
+
+    stalled.release();
+    const responses = await Promise.all([first, retry, replacement, sibling]);
+    expect(responses.map((response) => response.status)).toEqual([201, 201, 201, 201]);
+    expect(metadata.getShare(shareId)).toMatchObject({ total_bytes: newer.length + 5, file_count: 2 });
+    expect(await (await service.fetch(new Request(`${origin}/s/${shareId}/live.json`))).text()).toBe(newer);
+  });
+
+  test("queued writes cannot take a share past its byte limit", async () => {
+    const { service, bucket, metadata } = fixture();
+    const shareId = id(303);
+    await create(service, shareId);
+    metadata.sql.exec("UPDATE shares SET total_bytes = ? WHERE id = ?", LIMITS.shareBytes - 5, shareId);
+    const stalled = bucket.hold("put", `${shareId}/a.json`);
+    const first = upload(service, shareId, "a.json", "1234");
+    await stalled.reached;
+    const second = upload(service, shareId, "b.json", "1234");
+    stalled.release();
+    expect((await first).status).toBe(201);
+    const rejected = await second;
+    expect(rejected.status).toBe(413);
+    expect((await rejected.json()).error).toBe("share_bytes");
+    expect(metadata.getShare(shareId)).toMatchObject({ total_bytes: LIMITS.shareBytes - 1, file_count: 1 });
+    expect(bucket.objects.has(`${shareId}/b.json`)).toBe(false);
+  });
+
+  test("a failed write gives its reserved room to the next queued write", async () => {
+    const { service, bucket, metadata } = fixture();
+    const shareId = id(304);
+    await create(service, shareId);
+    metadata.sql.exec("UPDATE shares SET total_bytes = ? WHERE id = ?", LIMITS.shareBytes - 5, shareId);
+    const stalled = bucket.hold("put", `${shareId}/a.json`);
+    const first = upload(service, shareId, "a.json", "1234");
+    await stalled.reached;
+    const second = upload(service, shareId, "b.json", "1234");
+    stalled.release(new Error("R2 failure"));
+    expect((await first).status).toBe(502);
+    expect((await second).status).toBe(201);
+    expect(metadata.getShare(shareId)).toMatchObject({ total_bytes: LIMITS.shareBytes - 1, file_count: 1 });
+    expect(metadata.getFile(shareId, "a.json")).toBeNull();
+  });
+});
+
+describe("a coordinator restarted over stored state", () => {
+  test("keeps its shares, creation counts and unfinished reservations", async () => {
+    const earlier = fixture();
+    const [ready, canceled, landed, lost] = ["0123456789abcdef0123456789abcdef", id(500), id(501), id(502)];
+    for (const shareId of [ready, canceled, landed, lost]) await create(earlier.service, shareId);
+    await upload(earlier.service, ready, "transcript.json", "{}");
+    await upload(earlier.service, ready, "take.md", "# Take");
+    await earlier.service.fetch(internalRequest(`/api/shares/${ready}/complete`, { method: "POST" }));
+    await upload(earlier.service, canceled, "take.md", "# Take");
+    await earlier.service.fetch(internalRequest(`/api/shares/${canceled}`, { method: "DELETE" }));
+    // The instance stops during two writes. Storage kept the first one.
+    const kept = earlier.bucket.hold("put", `${landed}/shots/001.jpg`, { after: true });
+    const dropped = earlier.bucket.hold("put", `${lost}/shots/001.jpg`);
+    upload(earlier.service, landed, "shots/001.jpg", "image");
+    upload(earlier.service, lost, "shots/001.jpg", "image");
+    await Promise.all([kept.reached, dropped.reached]);
+
+    const { service, metadata } = fixture(earlier.database, earlier.bucket);
+    expect(await (await service.fetch(new Request(`${origin}/s/${ready}/take.md`))).text()).toBe("# Take");
+    expect((await upload(service, ready, "extra.json", "{}")).status).toBe(409);
+    expect((await service.fetch(new Request(`${origin}/s/${canceled}/`))).status).toBe(404);
+    expect((await create(service, canceled)).status).toBe(409);
+
+    expect((await upload(service, landed, "live.json", "{}")).status).toBe(201);
+    expect(metadata.getShare(landed)).toMatchObject({ total_bytes: 7, file_count: 2 });
+    expect(await (await service.fetch(new Request(`${origin}/s/${landed}/shots/001.jpg`))).text()).toBe("image");
+    expect((await upload(service, lost, "live.json", "{}")).status).toBe(201);
+    expect(metadata.getShare(lost)).toMatchObject({ total_bytes: 2, file_count: 1 });
+    expect((await service.fetch(new Request(`${origin}/s/${lost}/shots/001.jpg`))).status).toBe(404);
+
+    const created = [];
+    for (let index = 0; index < LIMITS.installationMonth - 3; index += 1) created.push((await create(service, id(510 + index))).status);
+    expect(created).toEqual([...Array(LIMITS.installationMonth - 4).fill(201), 429]);
   });
 });
 
@@ -448,22 +510,55 @@ describe("completion, cancellation, and expiry", () => {
     expect((await service.fetch(internalRequest(`/api/shares/${shareId}`, { method: "DELETE" }))).status).toBe(204);
   });
 
-  test("delete waits behind an in-flight upload and removes its object", async () => {
-    const { service, bucket } = fixture();
+  test("a cancel during a stalled write takes the link down at once and leaves no object", async () => {
+    const { service, bucket, metadata } = fixture();
     const shareId = id(9);
     await create(service, shareId);
-    let release;
-    let started;
-    const putStarted = new Promise((resolve) => { started = resolve; });
-    bucket.onPutStarted = started;
-    bucket.putGate = new Promise((resolve) => { release = resolve; });
+    await upload(service, shareId, "take.md", "# Take");
+    const stalled = bucket.hold("put", `${shareId}/shots/001.jpg`);
     const putting = upload(service, shareId, "shots/001.jpg", "image");
-    await putStarted;
+    await stalled.reached;
     const deleting = service.fetch(internalRequest(`/api/shares/${shareId}`, { method: "DELETE" }));
-    release();
-    expect((await putting).status).toBe(201);
+    expect((await service.fetch(new Request(`${origin}/s/${shareId}/`))).status).toBe(404);
+    expect((await service.fetch(new Request(`${origin}/s/${shareId}/take.md`))).status).toBe(404);
+    expect((await upload(service, shareId, "shots/002.jpg", "image")).status).toBe(409);
+    stalled.release();
+    const late = await putting;
+    expect(late.status).toBe(409);
+    expect((await late.json()).error).toBe("share_deleted");
     expect((await deleting).status).toBe(204);
-    expect(bucket.objects.has(`${shareId}/shots/001.jpg`)).toBe(false);
+    expect([...bucket.objects.keys()].filter((key) => key.startsWith(`${shareId}/`))).toHaveLength(0);
+    expect(metadata.getFile(shareId, "shots/001.jpg")).toBeNull();
+  });
+
+  test("a write that lands after the share expired is refused and not counted", async () => {
+    const state = fixture();
+    const shareId = id(14);
+    await create(state.service, shareId, { expiresAt: new Date(initialNow + 1000).toISOString() });
+    const stalled = state.bucket.hold("put", `${shareId}/take.md`);
+    const putting = upload(state.service, shareId, "take.md", "text");
+    await stalled.reached;
+    state.setNow(initialNow + 1001);
+    stalled.release();
+    expect((await putting).status).toBe(410);
+    expect(state.metadata.getShare(shareId)).toMatchObject({ total_bytes: 0, file_count: 0 });
+    expect(state.metadata.getFile(shareId, "take.md")).toBeNull();
+  });
+
+  test("completion waits for a write still in flight on its own share", async () => {
+    const { service, bucket, metadata } = fixture();
+    const shareId = id(15);
+    await create(service, shareId);
+    await upload(service, shareId, "transcript.json", "{}");
+    const stalled = bucket.hold("put", `${shareId}/take.md`);
+    const putting = upload(service, shareId, "take.md", "# Take");
+    await stalled.reached;
+    const completing = service.fetch(internalRequest(`/api/shares/${shareId}/complete`, { method: "POST" }));
+    expect(await settled(completing)).toBe(false);
+    stalled.release();
+    expect((await putting).status).toBe(201);
+    expect((await completing).status).toBe(200);
+    expect(metadata.getShare(shareId).state).toBe("ready");
   });
 
   test("expired shares are private and reject further writes", async () => {

@@ -337,12 +337,18 @@ export class ShareCoordinatorService {
     this.bucket = bucket;
     this.now = options.now ?? (() => Date.now());
     this.publicOrigin = options.publicOrigin ?? "https://see.computer";
-    this.mutationTail = Promise.resolve();
+    this.tails = new Map();
   }
 
-  mutate(operation) {
-    const result = this.mutationTail.then(operation, operation);
-    this.mutationTail = result.catch(() => {});
+  // Storage calls for one share run in arrival order, so a reservation always
+  // belongs to the request that holds the turn. Other shares do not wait.
+  serialize(id, operation) {
+    const result = (this.tails.get(id) ?? Promise.resolve()).then(operation);
+    const tail = result.catch(() => {});
+    this.tails.set(id, tail);
+    tail.then(() => {
+      if (this.tails.get(id) === tail) this.tails.delete(id);
+    });
     return result;
   }
 
@@ -379,19 +385,16 @@ export class ShareCoordinatorService {
     if ((!empty && parsed.value?.url !== expectedUrl) || !Number.isFinite(expiresAt) || expiresAt <= now || expiresAt > now + LIMITS.retentionMs) {
       return apiError(400, "invalid_share", "url must match this share and expiresAt must be within 30 days");
     }
-    const starts = dayAndMonthStarts(now);
-    return this.mutate(async () => {
-      const result = this.metadata.createShare({ id, ownerHash, ipHash, url: expectedUrl, expiresAt, now, ...starts });
-      if (result.kind === "existing") {
-        const share = result.share;
-        if (share.owner_hash !== ownerHash) return apiError(409, "share_id_unavailable", "Share ID is already in use");
-        if (share.state === "deleted") return apiError(409, "share_deleted", "A canceled share cannot be recreated");
-        if (share.url !== expectedUrl || (!empty && share.expires_at !== expiresAt)) return apiError(409, "share_conflict", "Share already exists with different values");
-        return this.shareJson(share, 200);
-      }
-      if (result.kind === "quota") return apiError(429, result.quota, "Share creation limit reached", { "Retry-After": "3600" });
-      return this.shareJson(result.share, 201);
-    });
+    const result = this.metadata.createShare({ id, ownerHash, ipHash, url: expectedUrl, expiresAt, now, ...dayAndMonthStarts(now) });
+    if (result.kind === "existing") {
+      const share = result.share;
+      if (share.owner_hash !== ownerHash) return apiError(409, "share_id_unavailable", "Share ID is already in use");
+      if (share.state === "deleted") return apiError(409, "share_deleted", "A canceled share cannot be recreated");
+      if (share.url !== expectedUrl || (!empty && share.expires_at !== expiresAt)) return apiError(409, "share_conflict", "Share already exists with different values");
+      return this.shareJson(share, 200);
+    }
+    if (result.kind === "quota") return apiError(429, result.quota, "Share creation limit reached", { "Retry-After": "3600" });
+    return this.shareJson(result.share, 201);
   }
 
   shareJson(share, status) {
@@ -412,66 +415,65 @@ export class ShareCoordinatorService {
     }
   }
 
+  uploadRefusal(id, ownerHash) {
+    const share = this.metadata.getShare(id);
+    if (!share) return apiError(404, "not_found", "Share not found");
+    if (share.owner_hash !== ownerHash) return apiError(403, "forbidden", "This installation does not own the share");
+    if (share.state === "deleted") return apiError(409, "share_deleted", "Canceled shares cannot accept uploads");
+    if (share.state !== "open") return apiError(409, "share_ready", "Completed shares cannot accept uploads");
+    if (share.expires_at <= this.now()) return apiError(410, "share_expired", "Share has expired");
+    return null;
+  }
+
   async upload(request, id, rawPath) {
     const ownerHash = this.owner(request);
     if (!ownerHash) return apiError(401, "unauthorized", "A valid installation secret is required");
     const valid = validateRelativePath(rawPath);
     if (!valid) return apiError(400, "invalid_path", "Upload path or file type is not allowed");
-    const preliminary = this.metadata.getShare(id);
-    const preliminaryNow = this.now();
-    if (!preliminary) return apiError(404, "not_found", "Share not found");
-    if (preliminary.owner_hash !== ownerHash) return apiError(403, "forbidden", "This installation does not own the share");
-    if (preliminary.state === "deleted") return apiError(409, "share_deleted", "Canceled shares cannot accept uploads");
-    if (preliminary.state !== "open") return apiError(409, "share_ready", "Completed shares cannot accept uploads");
-    if (preliminary.expires_at <= preliminaryNow) return apiError(410, "share_expired", "Share has expired");
+    const early = this.uploadRefusal(id, ownerHash);
+    if (early) return early;
     const body = await readBoundedBody(request);
     if (!body.ok) return apiError(body.status, "invalid_body", body.message);
     if (request.signal.aborted) return apiError(499, "request_canceled", "Request was canceled before upload");
     const sha = await sha256Hex(body.bytes);
-    return this.mutate(async () => {
-      let share = this.metadata.getShare(id);
-      const now = this.now();
-      if (!share) return apiError(404, "not_found", "Share not found");
-      if (share.owner_hash !== ownerHash) return apiError(403, "forbidden", "This installation does not own the share");
-      if (share.state === "deleted") return apiError(409, "share_deleted", "Canceled shares cannot accept uploads");
-      if (share.state !== "open") return apiError(409, "share_ready", "Completed shares cannot accept uploads");
-      if (share.expires_at <= now) return apiError(410, "share_expired", "Share has expired");
+    return this.serialize(id, async () => {
+      const queued = this.uploadRefusal(id, ownerHash);
+      if (queued) return queued;
       try {
         await this.reconcilePending(id);
       } catch {
         return apiError(502, "storage_error", "Object storage could not reconcile an earlier upload");
       }
-      share = this.metadata.getShare(id);
-      if (!share || share.state !== "open" || share.expires_at <= now) return apiError(409, "share_changed", "Share state changed before upload");
+      const reconciled = this.uploadRefusal(id, ownerHash);
+      if (reconciled) return reconciled;
       const existing = this.metadata.getFile(id, valid.path);
       const key = `${id}/${valid.path}`;
-      if (existing?.committed_sha === sha && existing.committed_size === body.bytes.byteLength) {
-        try {
-          const object = await this.bucket.head(key);
-          if (!object || object.size !== body.bytes.byteLength || object.customMetadata?.sha256 !== sha) {
-            await this.bucket.put(key, body.bytes, {
-              httpMetadata: { contentType: valid.contentType, cacheControl: "no-store" },
-              customMetadata: { sha256: sha },
-            });
-          }
-        } catch {
-          return apiError(502, "storage_error", "Object storage rejected the upload");
-        }
-        return response(null, 201, { "Cache-Control": "no-store" });
+      const size = body.bytes.byteLength;
+      const committed = existing?.committed_sha === sha && existing.committed_size === size;
+      if (!committed) {
+        const reservation = this.metadata.reserveUpload(id, valid.path, size, sha, this.now());
+        if (reservation.kind === "quota") return apiError(413, reservation.quota, "Share storage limit reached");
+        if (reservation.kind !== "reserved") return apiError(409, "share_changed", "Share state changed before upload");
       }
-      const reservation = this.metadata.reserveUpload(id, valid.path, body.bytes.byteLength, sha, now);
-      if (reservation.kind === "quota") return apiError(413, reservation.quota, "Share storage limit reached");
-      if (reservation.kind !== "reserved") return apiError(409, "share_changed", "Share state changed before upload");
       try {
-        await this.bucket.put(key, body.bytes, {
-          httpMetadata: { contentType: valid.contentType, cacheControl: "no-store" },
-          customMetadata: { sha256: sha },
-        });
+        const stored = committed ? await this.bucket.head(key) : null;
+        if (!stored || stored.size !== size || stored.customMetadata?.sha256 !== sha) {
+          await this.bucket.put(key, body.bytes, {
+            httpMetadata: { contentType: valid.contentType, cacheControl: "no-store" },
+            customMetadata: { sha256: sha },
+          });
+        }
       } catch {
-        this.metadata.rollbackUpload(id, valid.path, sha);
+        if (!committed) this.metadata.rollbackUpload(id, valid.path, sha);
         return apiError(502, "storage_error", "Object storage rejected the upload");
       }
-      if (!this.metadata.finalizeUpload(id, valid.path, sha)) return apiError(500, "metadata_error", "Upload metadata could not be committed");
+      // A cancel or the expiry can arrive while storage is writing.
+      const late = this.uploadRefusal(id, ownerHash);
+      if (late) {
+        if (!committed) this.metadata.rollbackUpload(id, valid.path, sha);
+        return late;
+      }
+      if (!committed && !this.metadata.finalizeUpload(id, valid.path, sha)) return apiError(500, "metadata_error", "Upload metadata could not be committed");
       return response(null, 201, { "Cache-Control": "no-store" });
     });
   }
@@ -480,7 +482,7 @@ export class ShareCoordinatorService {
     const ownerHash = this.owner(request);
     if (!ownerHash) return apiError(401, "unauthorized", "A valid installation secret is required");
     if (!(await requireEmptyBody(request))) return apiError(400, "invalid_body", "Completion request body must be empty");
-    return this.mutate(async () => {
+    return this.serialize(id, async () => {
       let share = this.metadata.getShare(id);
       const now = this.now();
       if (!share) return apiError(404, "not_found", "Share not found");
@@ -514,7 +516,7 @@ export class ShareCoordinatorService {
         transcript.size !== transcriptFile.committed_size || transcript.customMetadata?.sha256 !== transcriptFile.committed_sha ||
         take.size !== takeFile.committed_size || take.customMetadata?.sha256 !== takeFile.committed_sha
       ) return apiError(409, "missing_required_files", "transcript.json and take.md must exist in object storage");
-      const result = this.metadata.markReady(id, ownerHash, now);
+      const result = this.metadata.markReady(id, ownerHash, this.now());
       if (result.kind === "missing") return apiError(404, "not_found", "Share not found");
       if (result.kind === "owner") return apiError(403, "forbidden", "This installation does not own the share");
       if (result.kind === "expired") return apiError(410, "share_expired", "Share has expired");
@@ -527,21 +529,23 @@ export class ShareCoordinatorService {
   async remove(request, id) {
     const ownerHash = this.owner(request);
     if (!ownerHash) return apiError(401, "unauthorized", "A valid installation secret is required");
-    return this.mutate(async () => {
-      // A timed-out create can still be in flight. Reserve a tombstone even when
-      // DELETE reaches the coordinator first, using the same creation limits.
-      if (!this.metadata.getShare(id)) {
-        const now = this.now();
-        const ipHash = request.headers.get("X-Share-IP");
-        if (!/^[a-f0-9]{64}$/.test(ipHash ?? "")) return apiError(401, "unauthorized", "Missing client identity");
-        const reserved = this.metadata.createShare({ id, ownerHash, ipHash,
-          url: `${this.publicOrigin}/s/${id}/`, expiresAt: now + LIMITS.retentionMs,
-          now, ...dayAndMonthStarts(now) });
-        if (reserved.kind === "quota") return notFound();
-      }
-      const result = this.metadata.markDeleted(id, ownerHash);
-      if (result.kind === "missing") return apiError(404, "not_found", "Share not found");
-      if (result.kind === "owner") return apiError(403, "forbidden", "This installation does not own the share");
+    // A timed-out create can still be in flight. Reserve a tombstone even when
+    // DELETE reaches the coordinator first, using the same creation limits.
+    if (!this.metadata.getShare(id)) {
+      const now = this.now();
+      const ipHash = request.headers.get("X-Share-IP");
+      if (!/^[a-f0-9]{64}$/.test(ipHash ?? "")) return apiError(401, "unauthorized", "Missing client identity");
+      const reserved = this.metadata.createShare({ id, ownerHash, ipHash,
+        url: `${this.publicOrigin}/s/${id}/`, expiresAt: now + LIMITS.retentionMs,
+        now, ...dayAndMonthStarts(now) });
+      if (reserved.kind === "quota") return notFound();
+    }
+    // The tombstone does not wait for storage, so the link stops working at
+    // once. Cleanup takes the share's turn, after any write still in flight.
+    const result = this.metadata.markDeleted(id, ownerHash);
+    if (result.kind === "missing") return apiError(404, "not_found", "Share not found");
+    if (result.kind === "owner") return apiError(403, "forbidden", "This installation does not own the share");
+    return this.serialize(id, async () => {
       try {
         const keys = [];
         let cursor;
