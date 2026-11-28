@@ -340,8 +340,6 @@ export class ShareCoordinatorService {
     this.tails = new Map();
   }
 
-  // Storage calls for one share run in arrival order, so a reservation always
-  // belongs to the request that holds the turn. Other shares do not wait.
   serialize(id, operation) {
     const result = (this.tails.get(id) ?? Promise.resolve()).then(operation);
     const tail = result.catch(() => {});
@@ -467,7 +465,6 @@ export class ShareCoordinatorService {
         if (!committed) this.metadata.rollbackUpload(id, valid.path, sha);
         return apiError(502, "storage_error", "Object storage rejected the upload");
       }
-      // A cancel or the expiry can arrive while storage is writing.
       const late = this.uploadRefusal(id, ownerHash);
       if (late) {
         if (!committed) this.metadata.rollbackUpload(id, valid.path, sha);
@@ -529,8 +526,6 @@ export class ShareCoordinatorService {
   async remove(request, id) {
     const ownerHash = this.owner(request);
     if (!ownerHash) return apiError(401, "unauthorized", "A valid installation secret is required");
-    // A timed-out create can still be in flight. Reserve a tombstone even when
-    // DELETE reaches the coordinator first, using the same creation limits.
     if (!this.metadata.getShare(id)) {
       const now = this.now();
       const ipHash = request.headers.get("X-Share-IP");
@@ -540,8 +535,6 @@ export class ShareCoordinatorService {
         now, ...dayAndMonthStarts(now) });
       if (reserved.kind === "quota") return notFound();
     }
-    // The tombstone does not wait for storage, so the link stops working at
-    // once. Cleanup takes the share's turn, after any write still in flight.
     const result = this.metadata.markDeleted(id, ownerHash);
     if (result.kind === "missing") return apiError(404, "not_found", "Share not found");
     if (result.kind === "owner") return apiError(403, "forbidden", "This installation does not own the share");
@@ -593,8 +586,6 @@ export class ShareCoordinatorService {
     if (!valid) return notFound();
     const absolute = valid.path === "take.md" && new URL(request.url).searchParams.get("absolute") === "1";
     const key = `${id}/${valid.path}`;
-    // One storage call returns the validator, the length and the bytes of one
-    // object version. A replacement committed during that call is read again.
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const file = this.publicFile(id, valid.path);
       if (!file) return notFound();

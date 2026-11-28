@@ -192,7 +192,6 @@ impl History {
                 };
                 if let Ok(file) = filed {
                     if let Some(path) = saved_audio {
-                        // Keep the retry WAV if the history file cannot be flushed to disk.
                         if file.sync_data().is_ok() {
                             let _ = std::fs::remove_file(path);
                         }
@@ -833,7 +832,6 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
         let explicit = "## 02:15:00 +02:00\n\nsame\n\n## 02:15:00 +01:00\n\nsame\n\n";
         let mut cases = vec![explicit.to_owned()];
-        // Run under TZ=Europe/Stockholm to exercise the legacy fold.
         if matches!(
             Local.from_local_datetime(&date.and_hms_opt(2, 15, 0).unwrap()),
             chrono::LocalResult::Ambiguous(_, _)

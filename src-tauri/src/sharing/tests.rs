@@ -38,10 +38,8 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-/// Each request as its method and its path inside the share, with its body.
 type Received = Vec<(String, Vec<u8>)>;
 
-/// An actual TCP peer catches mistakes in HTTP status handling and send bodies.
 struct Server {
     host: String,
     requests: Arc<Mutex<Received>>,
@@ -58,8 +56,6 @@ impl Server {
     }
 }
 
-/// `reply` picks the status of each request. It runs before the answer goes
-/// out, while the uploader waits for it.
 fn server(reply: impl Fn(&str) -> u16 + Send + 'static) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let host = format!("http://{}", listener.local_addr().unwrap());
@@ -93,7 +89,6 @@ fn server(reply: impl Fn(&str) -> u16 + Send + 'static) -> Server {
             let head = String::from_utf8_lossy(&bytes[..body]).into_owned();
             let mut words = head.split(' ');
             let (method, path) = (words.next().unwrap(), words.next().unwrap());
-            // "/api/shares/" and the seven-character ID come before the path.
             let line = format!("{method} /{}", path[19..].trim_start_matches('/'));
             let status = reply(&line);
             seen.lock().unwrap().push((line, bytes[body..].to_vec()));
@@ -107,7 +102,6 @@ fn server(reply: impl Fn(&str) -> u16 + Send + 'static) -> Server {
     Server { host, requests }
 }
 
-/// Gives every due job a turn, as the uploader's loop does, until none has work left.
 fn run(service: &Sharing) {
     let client = agent();
     while service
@@ -117,8 +111,6 @@ fn run(service: &Sharing) {
     {}
 }
 
-/// One clip as the recorder leaves it: a playlist that lists `listed`
-/// fragments, of which the first `written` are in the folder.
 fn record(dir: &Path, listed: usize, written: usize) {
     let media = dir.join("live/clip.segments");
     std::fs::create_dir_all(&media).unwrap();
@@ -137,7 +129,6 @@ fn record(dir: &Path, listed: usize, written: usize) {
     std::fs::write(media.join("index.m3u8"), playlist).unwrap();
 }
 
-/// The files packaging adds when the take ends.
 fn package(dir: &Path) {
     let playlist = dir.join("live/clip.segments/index.m3u8");
     let ended = std::fs::read_to_string(&playlist).unwrap() + "#EXT-X-ENDLIST\n";
@@ -417,7 +408,6 @@ fn a_finished_take_missing_a_fragment_fails_at_once_and_publishes_when_it_return
     let local = format!("Capture: {}", dir.join("take.md").display());
     assert_eq!(paste_link(&dir.join("take.md"), local.clone()), local);
 
-    // A retry while the fragment is still gone fails again and uploads nothing.
     service.retry();
     run(&service);
     assert_eq!(server.requests(), ["POST /"]);
@@ -477,7 +467,6 @@ fn a_crash_between_an_upload_and_its_saved_progress_sends_it_again_and_publishes
     let crashed = std::env::temp_dir().join(format!("see-crashed-{}", random_hex(12).unwrap()));
     let (queue, copy) = (Arc::new(Mutex::new(PathBuf::new())), crashed.clone());
     let live = queue.clone();
-    // The queue folder as a crash would leave it while this upload is in flight.
     let server = server(move |request| {
         if request == "PUT /live/clip.segments/segment-001.m4s" && !copy.exists() {
             std::fs::create_dir_all(&copy).unwrap();
@@ -736,7 +725,6 @@ fn only_a_live_link_on_our_host_is_eligible() {
         None
     );
     assert_eq!(eligible_url("not a link file"), None);
-    // The first beta wrote no expiry.
     assert_eq!(
         eligible_url(&format!(r#"{{"url":"{url}","state":"ready"}}"#)),
         Some(url)

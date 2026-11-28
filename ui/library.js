@@ -300,7 +300,6 @@
     return `<div class="files">${rows.map(([k, v]) => `<div><b>${k}</b> ${esc(v)}</div>`).join("")}</div>`;
   }
 
-  // Leave each surviving player connected while inserting new captures around it.
   function updateMediaSection(current, next) {
     const wanted = new Set([...next.querySelectorAll("audio, video")].map(player => player.src));
     const players = new Map();

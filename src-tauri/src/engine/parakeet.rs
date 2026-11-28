@@ -60,7 +60,6 @@ impl Parakeet {
                         return open(&files.dir)
                             .map_err(|error| EngineError::Load(error.to_string()));
                     }
-                    // Only the marker changes. The next retry can replace the failed generation after verifying its successor.
                     let _ = fs::rename(files.dir.join("ready"), files.dir.join("ready.invalid"));
                     Err(EngineError::Load(format!(
                         "Model files need repair. Retry to prepare them again. {error}"

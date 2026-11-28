@@ -171,7 +171,6 @@ fn paste_loop(
             .is_some_and(|target| target.focus.holds_instead_of_pasting())
             || std::env::var("SEE_COMPUTER_PASTE").is_ok_and(|value| value == "hold");
         let restore = trusted && !hold && job.clipboard == Clipboard::RestorePrior;
-        // A copy during Accessibility lookup belongs to the user. Offer our words in the pill.
         if unsafe { see_pasteboard_count(handle) } != expected {
             (job.done)(Outcome(Ok(Landing::Held)));
             continue;
@@ -259,8 +258,7 @@ fn paste_loop(
 
 pub struct Outcome(pub Result<Landing, Error>);
 
-/// Where a job's text ended up. `Held` means no synthetic Cmd+V was posted
-/// because the focus or clipboard changed. The user can copy the words from the pill.
+/// `Pasted` means Cmd+V was posted. `Held` leaves the words available for Copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Landing {
     Pasted,

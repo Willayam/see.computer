@@ -21,7 +21,7 @@ pub enum PillEvent {
     /// Nothing could take the words, so the chip stretches into a card that
     /// shows them with a Copy button and a dismiss.
     Held(Held),
-    /// A late result or a failed paste waits until the current activity ends.
+    /// Offer the words after the current activity ends.
     Recovered(Held),
     /// Read-back recorded a fix to a word the learner can use. Waits for the
     /// pill to be idle, so it never covers a dictation.
@@ -294,7 +294,6 @@ pub fn attach(app: &AppHandle, rx: Receiver<PillEvent>, on_armed: impl Fn(bool) 
             }
             if let PillEvent::Recovered(held) = event {
                 if matches!(held.recovery, Recovery::SavedAudio(_)) {
-                    // A manual retry can finish while the first result still awaits Copy.
                     let same_audio = |card: &Card| matches!(card, Card::Held(other) if other.recovery == held.recovery);
                     let showing = card
                         .lock()

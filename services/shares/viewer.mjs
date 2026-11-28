@@ -51,8 +51,6 @@ export function viewerHtml(nonce) {
     let renderedFinal = false;
     let liveVersion = "";
     let hlsScript;
-    // The figures on the page, by kind and address. A capture that stays listed
-    // keeps its node, so a clip keeps playing while others arrive.
     const mounted = new Map();
 
     function assetPath(value) {
@@ -68,7 +66,6 @@ export function viewerHtml(nonce) {
       return node;
     }
 
-    // A browser downloads the player only for a clip it cannot play itself.
     function loadHls() {
       hlsScript ??= new Promise((resolve, reject) => {
         const script = document.createElement("script");
@@ -136,7 +133,6 @@ export function viewerHtml(nonce) {
         video.addEventListener("play", () => { pressed = true; });
         video.addEventListener("pause", () => { pressed = false; });
         const handOver = () => {
-          // Codes 3 and 4 are decode and format errors. A network error stays with the browser.
           if (video.error.code < 3) return;
           video.removeEventListener("error", handOver);
           playWithHls(pressed);
@@ -223,8 +219,6 @@ export function viewerHtml(nonce) {
       }
       show(captures);
       renderedFinal = true;
-      // First-beta shares packaged the take as one file. The captures above do
-      // not wait to learn whether this share has one.
       const packaged = capture("video", "fullclip.mp4", "Packaged video", false);
       if (captures.some((item) => item && item.key === packaged.key)) return;
       fetch(new URL("fullclip.mp4", root), { method: "HEAD", cache: "no-store" }).then((probe) => {

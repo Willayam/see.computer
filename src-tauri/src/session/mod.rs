@@ -216,7 +216,6 @@ struct Controller {
     /// Jobs that outran the deadline, still owed their words, with the audio
     /// file that stands in for them if the engine never answers.
     late: Vec<LateJob>,
-    /// Results the pill already owns. Retrying their WAV must not file the same words twice.
     recovered: std::collections::HashSet<PathBuf>,
     /// Every sample of the live take sent to the engine so far.
     heard: Vec<f32>,
@@ -313,7 +312,6 @@ impl Controller {
                 if !remaining.is_zero() {
                     return self.rx.recv_timeout(remaining);
                 }
-                // FIFO puts an already queued completion before expiry and new traffic after it.
                 self.tx
                     .send(Msg::Deadline(deadline))
                     .map_err(|_| RecvTimeoutError::Disconnected)?;

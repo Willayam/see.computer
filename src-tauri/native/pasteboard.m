@@ -46,7 +46,6 @@ bool see_pasteboard_restore(void *handle, intptr_t expected, void *snapshot) {
     }
 }
 
-// -1 means another process owns the pasteboard. -2 means the write failed.
 intptr_t see_pasteboard_write(void *handle, intptr_t expected, const uint8_t *bytes, size_t length, void *prior) {
     @autoreleasepool {
         NSPasteboard *board = (__bridge NSPasteboard *)handle;

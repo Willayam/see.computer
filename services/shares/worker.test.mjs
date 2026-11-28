@@ -19,7 +19,6 @@ const ownerB = "b".repeat(64);
 const ipA = "1".repeat(64);
 const ipB = "2".repeat(64);
 
-// The Durable Object storage API over SQLite, so the tests run the production SQL.
 function storage(database) {
   return {
     sql: {
@@ -44,8 +43,6 @@ class MemoryR2 {
     this.holds = [];
   }
 
-  // Stalls the next matching call until release(): before it touches the
-  // object, or once it has with `after`. release(error) makes the call fail.
   hold(operation, key, { after = false } = {}) {
     const hold = { operation, key, after };
     hold.reached = new Promise((resolve) => { hold.arrive = resolve; });
@@ -115,8 +112,6 @@ class MemoryR2 {
   }
 }
 
-// A new coordinator instance. Pass the database and bucket of an earlier one
-// to restart it over the same stored state.
 function fixture(database = new Database(":memory:"), bucket = new MemoryR2()) {
   let now = initialNow;
   const metadata = new SqliteMetadata(storage(database));
@@ -128,7 +123,6 @@ function shareRows(metadata) {
   return metadata.sql.exec("SELECT * FROM shares").toArray();
 }
 
-// Whether the promise settles once requests that are free to run have run.
 async function settled(promise) {
   let done = false;
   promise.then(() => { done = true; }, () => { done = true; });
@@ -444,7 +438,6 @@ describe("a coordinator restarted over stored state", () => {
     await earlier.service.fetch(internalRequest(`/api/shares/${ready}/complete`, { method: "POST" }));
     await upload(earlier.service, canceled, "take.md", "# Take");
     await earlier.service.fetch(internalRequest(`/api/shares/${canceled}`, { method: "DELETE" }));
-    // The instance stops during two writes. Storage kept the first one.
     const kept = earlier.bucket.hold("put", `${landed}/shots/001.jpg`, { after: true });
     const dropped = earlier.bucket.hold("put", `${lost}/shots/001.jpg`);
     upload(earlier.service, landed, "shots/001.jpg", "image");
@@ -679,7 +672,6 @@ describe("public reads", () => {
     expect(head.headers.get("ETag")).toBe(full.headers.get("ETag"));
     expect(await (await service.fetch(new Request(url, { headers: { Range: "bytes=0-7" } }))).text()).toBe("![shot](");
 
-    // Storage holds a replacement that the coordinator has not committed.
     const reading = bucket.hold("get", `${shareId}/take.md`);
     const pending = service.fetch(new Request(url));
     await reading.reached;
@@ -823,8 +815,6 @@ class PageNode {
 
 const viewerRoot = `${origin}/s/${id(1)}/`;
 
-// Runs the page's own script. `responses` maps a path to the JSON the share
-// serves for it, or to a promise of it. A path with no entry answers 404.
 async function openViewer({ responses, nativeHls = false, playerLoads = true }) {
   const source = /<script nonce="nonce">([\s\S]*?)<\/script>/.exec(viewerHtml("nonce"))[1];
   const page = { responses, nativeHls, requests: [], timers: [], players: [], loading: [] };

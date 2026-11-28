@@ -16,11 +16,9 @@ const MAX_SHARE_FILES: usize = 1500;
 const FILE_LIMIT: &str = "Share exceeds 1,500 files. Local recording saved.";
 const BYTE_LIMIT: &str = "Share exceeds 256 MiB. Local recording saved.";
 const OBJECT_LIMIT: &str = "A recording file exceeds 8 MiB. Local recording saved.";
-/// How long one job uploads before it saves its progress and another job gets a turn.
 const TURN: Duration = Duration::from_secs(1);
 const MISSING: &str = "A recording file is missing. The share is incomplete.";
 
-/// Upload name to the stamp of the version the share holds.
 type Sent = BTreeMap<String, String>;
 
 #[derive(Clone)]
@@ -31,10 +29,7 @@ struct Shared {
     host: String,
     state: Mutex<State>,
     wake: Condvar,
-    /// Orders writes of the queue and link files, and remembers the link state
-    /// last written for each job. Lock it before `state` and never while
-    /// holding `state`, so reading or changing the state never waits on a file
-    /// sync.
+    /// When both locks are needed, take this one first and release `state` before file I/O.
     disk: Mutex<BTreeMap<String, &'static str>>,
 }
 
@@ -95,9 +90,8 @@ enum Source {
     Bytes(Vec<u8>),
 }
 
-/// What one walk of a take folder found to upload.
 struct Folder {
-    /// Upload name and local path of each media file, init segments first.
+    /// HLS initialization segments precede their media fragments.
     media: Vec<(String, PathBuf)>,
     playlists: Vec<Playlist>,
     live: Option<LiveInventory>,
@@ -135,8 +129,7 @@ impl LiveInventory {
     }
 
     fn unchanged(&self) -> bool {
-        // The recorder publishes segments by rename. A periodic full scan
-        // also picks up an external in-place change to an existing segment.
+        // Renaming a fragment changes its directory stamp. An in-place external edit does not.
         self.scanned.elapsed() < Duration::from_secs(5)
             && self
                 .paths
@@ -147,14 +140,11 @@ impl LiveInventory {
 
 struct Playlist {
     asset: Asset,
-    /// The init and media files it lists. `None` until it lists any media.
     parts: Option<Vec<String>>,
 }
 
-/// The finished take's Markdown and transcript as the share serves them.
 struct Documents {
     assets: [Asset; 2],
-    /// The media the transcript refers to. `None` when a capture names no file.
     captured: Option<Vec<String>>,
 }
 
@@ -312,8 +302,7 @@ impl Sharing {
         self.0.wake.notify_one();
     }
 
-    /// The initial paste may use a link only after the finished inventory fits
-    /// and its state was saved. Otherwise the caller keeps the local path.
+    /// A finished take can paste its link once its inventory fits and the queue has saved it.
     pub fn finalize(&self, dir: &Path) -> bool {
         let job = {
             let state = self.0.state.lock().unwrap();
@@ -411,8 +400,6 @@ impl Sharing {
         saved
     }
 
-    /// Saves the job as it is now. Each save reads the job after it has the
-    /// disk, so a file never goes back to an older state.
     fn persist(&self, id: &str) -> io::Result<()> {
         let mut links = self.0.disk.lock().unwrap();
         let job = self.0.state.lock().unwrap().jobs.get(id).cloned();
@@ -422,7 +409,6 @@ impl Sharing {
         }
     }
 
-    /// Writes the queue file, and the link file when its state changed.
     fn write(&self, links: &mut BTreeMap<String, &'static str>, job: &Job) -> io::Result<()> {
         let saved = write_private(
             &self.0.root.join(format!("{}.json", job.id)),
@@ -485,7 +471,6 @@ impl Sharing {
         }
     }
 
-    /// The jobs whose turn has come. A cancel is due even while sharing is off.
     fn due(&self) -> Vec<Job> {
         let now = epoch();
         let candidates: Vec<_> = {
@@ -517,7 +502,6 @@ impl Sharing {
             .collect()
     }
 
-    /// One turn for a job, with its failure recorded. Returns whether it made progress.
     fn step(&self, agent: &ureq::Agent, job: &Job) -> bool {
         let error = match self.tick(agent, job) {
             Ok(worked) => return worked,
@@ -574,8 +558,6 @@ impl Sharing {
         }
         let mut sent = Cow::Borrowed(&job.sent);
         let outcome = self.upload(agent, job, &mut sent);
-        // The uploads of this turn reach the queue file in one write. A crash
-        // before it sends them again, and the service accepts the same bytes twice.
         let saved = match sent {
             Cow::Owned(_) => self.persist(&job.id),
             Cow::Borrowed(_) => Ok(()),
@@ -585,16 +567,12 @@ impl Sharing {
         Ok(worked)
     }
 
-    /// Sends what one walk of the take folder found, in dependency order, and
-    /// publishes a finished take once nothing is left.
     fn upload(
         &self,
         agent: &ureq::Agent,
         job: &Job,
         sent: &mut Cow<Sent>,
     ) -> Result<bool, UploadError> {
-        // Media can still arrive while the take records. Once it is finished,
-        // a file it refers to and does not have will never come.
         let (folder, documents) = if job.finalized {
             let (folder, documents) = Folder::finished(&job.dir, sent)?;
             if job.quota == Quota::Unchecked {
@@ -654,8 +632,6 @@ impl Sharing {
         Ok(true)
     }
 
-    /// Uploads the asset unless the share already holds this version. `false`
-    /// ends the turn: the job was paused or canceled, or its time is up.
     fn send(
         &self,
         agent: &ureq::Agent,
@@ -691,7 +667,6 @@ impl Sharing {
         self.persist(id)
     }
 
-    /// Changes the job in memory after a request succeeded.
     fn change(&self, id: &str, change: impl FnOnce(&mut Job)) {
         let mut state = self.0.state.lock().unwrap();
         state.message.clear();
@@ -773,8 +748,6 @@ impl Sharing {
         }
     }
 
-    /// Checks the bytes the viewer will receive, including previously uploaded
-    /// objects that have since disappeared from the take folder.
     fn quota(
         &self,
         job: &Job,
@@ -829,8 +802,6 @@ impl Sharing {
         if bytes > MAX_SHARE_BYTES {
             return Err(UploadError::permanent(BYTE_LIMIT));
         }
-        // Older queue files recorded stamps only. The server already accepted
-        // each missing object under its per-file limit.
         Ok(if bytes + unknown * MAX_OBJECT <= MAX_SHARE_BYTES {
             Quota::WithinLimits
         } else {
@@ -838,7 +809,6 @@ impl Sharing {
         })
     }
 
-    /// The upload for one media file. A screenshot goes up as a JPEG.
     fn media(&self, job: &Job, name: &str, path: &Path, sent: &Sent) -> Result<Asset, UploadError> {
         let stamp = file_stamp(path)?;
         if path.extension().is_none_or(|extension| extension != "png") {
@@ -979,9 +949,6 @@ impl Folder {
         Ok(folder)
     }
 
-    /// Reads a finished take. Fails when it refers to media that can never
-    /// reach the share: a file that is neither in the folder nor uploaded, or
-    /// a playlist that lists one.
     fn finished(dir: &Path, sent: &Sent) -> Result<(Self, Documents), UploadError> {
         let folder = Folder::read(dir, true)?;
         let documents = documents(dir)?;
@@ -1002,7 +969,6 @@ impl Folder {
         Ok((folder, documents))
     }
 
-    /// What the share page shows while the take records.
     fn live_manifest(&self, uploaded: impl Fn(&str) -> bool) -> serde_json::Result<Asset> {
         let clips: Vec<_> = self
             .playlists
@@ -1024,7 +990,6 @@ impl Folder {
 }
 
 impl Playlist {
-    /// Whether it lists media and `known` holds for every file it lists.
     fn lists_only(&self, known: impl Fn(&str) -> bool) -> bool {
         let parts = self.parts.as_ref();
         parts.is_some_and(|parts| parts.iter().all(|part| known(part)))
@@ -1101,7 +1066,6 @@ fn capture_links(markdown: String, links: &BTreeMap<String, String>) -> String {
     }
     let mut remote = String::with_capacity(markdown.len());
     for line in markdown.split_inclusive('\n') {
-        // The packager puts each spoken segment on a line with a bold timestamp.
         if line.starts_with("**") {
             remote.push_str(line);
             continue;
@@ -1122,8 +1086,7 @@ fn capture_links(markdown: String, links: &BTreeMap<String, String>) -> String {
     remote
 }
 
-/// The share URL in the text of a `share.json`, when a paste may use it: the
-/// share is ready or uploading, has not expired, and lives on our host.
+/// Returns a share link that is uploading or ready on our host and has yet to expire.
 pub(crate) fn eligible_url(text: &str) -> Option<String> {
     let link: Link = serde_json::from_str(text).ok()?;
     let live = matches!(link.state.as_str(), "ready" | "uploading")
@@ -1132,8 +1095,7 @@ pub(crate) fn eligible_url(text: &str) -> Option<String> {
     live.then_some(link.url)
 }
 
-/// The paste is either the link or the local path, never both. The local
-/// path returns when sharing fails or a link is revoked.
+/// Substitutes an eligible share link for the attachment path, preserving the narration.
 pub fn paste_link(markdown: &Path, mut local_paste: String) -> String {
     let link = markdown
         .parent()
@@ -1172,7 +1134,6 @@ fn collect_files(
     Ok(())
 }
 
-/// The init and media files a playlist lists. `None` until it lists any media.
 fn playlist_parts(name: &str, bytes: &[u8]) -> Option<Vec<String>> {
     if !bytes.windows(8).any(|part| part == b"#EXTINF:") {
         return None;

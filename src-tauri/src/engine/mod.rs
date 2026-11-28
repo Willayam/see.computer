@@ -28,8 +28,6 @@ const CHUNK_TARGET: usize = 20 * SAMPLE_RATE;
 const CHUNK_MAX: usize = 30 * SAMPLE_RATE;
 const CUT_SEARCH: usize = 5 * SAMPLE_RATE;
 const CUT_WINDOW: usize = SAMPLE_RATE / 5;
-/// The first preview runs as soon as speech is long enough. Later previews leave
-/// room for the final pass, especially when the pending audio costs more to decode.
 const PREVIEW_STEP: Duration = Duration::from_millis(800);
 /// Less than this and the model has too little to say anything sensible.
 const PREVIEW_MIN: usize = SAMPLE_RATE * 6 / 10;
@@ -437,7 +435,6 @@ impl Worker {
                     }
                 }
                 if previews && utterance.preview_due() {
-                    // Check the queue and register the interrupt as one operation.
                     let mut slot = running
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);

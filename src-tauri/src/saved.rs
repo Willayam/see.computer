@@ -1,8 +1,5 @@
-//! Dictations whose transcription outran its deadline, kept as audio until the
-//! engine delivers their words or the user asks for another pass.
-//!
-//! A file here means words that have not reached the user yet. The controller
-//! removes it after the words reach history, or the user copies or dismisses them.
+//! Recoverable audio for dictations that timed out. Keep it until history saves the
+//! words or the user copies or dismisses them.
 
 use std::path::{Path, PathBuf};
 

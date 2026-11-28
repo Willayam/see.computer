@@ -64,7 +64,6 @@ pub(super) fn prepared_ready(dir: &Path) -> std::io::Result<bool> {
     if sizes.contains(&0) || sizes[2] != CATALOG[1].bytes || sizes[3] != CATALOG[2].bytes {
         return Ok(false);
     }
-    // Existing installations used an empty marker after their first successful model load.
     Ok(marker.is_empty()
         || marker
             .split_whitespace()
