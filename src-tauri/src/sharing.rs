@@ -42,6 +42,7 @@ struct State {
     enabled: bool,
     jobs: BTreeMap<String, Job>,
     message: String,
+    idle: BTreeMap<String, Arc<LiveInventory>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -99,6 +100,49 @@ struct Folder {
     /// Upload name and local path of each media file, init segments first.
     media: Vec<(String, PathBuf)>,
     playlists: Vec<Playlist>,
+    live: Option<LiveInventory>,
+}
+
+struct LiveInventory {
+    scanned: Instant,
+    paths: Vec<(PathBuf, Option<FileStamp>)>,
+}
+
+#[derive(PartialEq)]
+struct FileStamp {
+    inode: u64,
+    len: u64,
+    modified: SystemTime,
+}
+
+impl LiveInventory {
+    fn stamp(path: &Path) -> io::Result<Option<FileStamp>> {
+        use std::os::unix::fs::MetadataExt;
+        match path.metadata() {
+            Ok(meta) => Ok(Some(FileStamp {
+                inode: meta.ino(),
+                len: meta.len(),
+                modified: meta.modified()?,
+            })),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn observe(&mut self, path: &Path) -> io::Result<()> {
+        self.paths.push((path.to_owned(), Self::stamp(path)?));
+        Ok(())
+    }
+
+    fn unchanged(&self) -> bool {
+        // The recorder publishes segments by rename. A periodic full scan
+        // also picks up an external in-place change to an existing segment.
+        self.scanned.elapsed() < Duration::from_secs(5)
+            && self
+                .paths
+                .iter()
+                .all(|(path, stamp)| Self::stamp(path).is_ok_and(|value| value == *stamp))
+    }
 }
 
 struct Playlist {
@@ -173,6 +217,7 @@ impl Sharing {
                 enabled,
                 jobs,
                 message: String::new(),
+                idle: BTreeMap::new(),
             }),
             wake: Condvar::new(),
             disk: Mutex::new(BTreeMap::new()),
@@ -308,6 +353,7 @@ impl Sharing {
         let retried: Vec<String> = {
             let mut state = self.0.state.lock().unwrap();
             state.message.clear();
+            state.idle.clear();
             let waiting = state.jobs.values_mut().filter(|j| !j.ready && !j.cancelled);
             waiting
                 .map(|job| {
@@ -351,10 +397,14 @@ impl Sharing {
         let changed = {
             let mut state = self.0.state.lock().unwrap();
             let job = state.jobs.values_mut().find(|job| job.dir == dir);
-            job.map(|job| {
+            let changed = job.map(|job| {
                 change(job);
                 job.id.clone()
-            })
+            });
+            if let Some(id) = &changed {
+                state.idle.remove(id);
+            }
+            changed
         };
         let saved = changed.is_some_and(|id| self.persist(&id).is_ok());
         self.0.wake.notify_one();
@@ -424,22 +474,46 @@ impl Sharing {
             }
             if !progress {
                 let state = self.0.state.lock().unwrap();
-                let _ = self.0.wake.wait_timeout(state, Duration::from_millis(200));
+                match state.next_wake(epoch()) {
+                    None => drop(self.0.wake.wait(state).unwrap()),
+                    Some(delay) if !delay.is_zero() => {
+                        drop(self.0.wake.wait_timeout(state, delay).unwrap())
+                    }
+                    Some(_) => {}
+                }
             }
         }
     }
 
     /// The jobs whose turn has come. A cancel is due even while sharing is off.
     fn due(&self) -> Vec<Job> {
-        let state = self.0.state.lock().unwrap();
-        state
-            .jobs
-            .values()
-            .filter(|job| {
-                job.retry_at <= epoch()
-                    && (job.cancelled || (state.enabled && !job.ready && job.error.is_none()))
+        let now = epoch();
+        let candidates: Vec<_> = {
+            let state = self.0.state.lock().unwrap();
+            state
+                .jobs
+                .values()
+                .filter(|job| job.retry_at <= now && job.runnable(state.enabled))
+                .map(|job| {
+                    let inventory = if job.finalized || job.cancelled {
+                        None
+                    } else {
+                        state.idle.get(&job.id).cloned()
+                    };
+                    (job.id.clone(), inventory)
+                })
+                .collect()
+        };
+        candidates
+            .into_iter()
+            .filter_map(|(id, inventory)| {
+                if inventory.is_some_and(|live| live.unchanged()) {
+                    return None;
+                }
+                let state = self.0.state.lock().unwrap();
+                let job = state.jobs.get(&id)?;
+                (job.retry_at <= now && job.runnable(state.enabled)).then(|| job.clone())
             })
-            .cloned()
             .collect()
     }
 
@@ -482,6 +556,7 @@ impl Sharing {
             {
                 let mut state = self.0.state.lock().unwrap();
                 state.jobs.remove(&job.id);
+                state.idle.remove(&job.id);
                 state.message.clear();
             }
             links.remove(&job.id);
@@ -553,6 +628,16 @@ impl Sharing {
             return Ok(turn.worked);
         }
         let Some(documents) = documents else {
+            if let Some(inventory) = folder.live {
+                let mut state = self.0.state.lock().unwrap();
+                if state
+                    .jobs
+                    .get(&job.id)
+                    .is_some_and(|job| !job.finalized && !job.cancelled)
+                {
+                    state.idle.insert(job.id.clone(), Arc::new(inventory));
+                }
+            }
             return Ok(turn.worked);
         };
         for asset in &documents.assets {
@@ -815,17 +900,46 @@ impl Asset {
     }
 }
 
+impl State {
+    fn next_wake(&self, now: u64) -> Option<Duration> {
+        self.jobs
+            .values()
+            .filter(|job| job.runnable(self.enabled))
+            .map(|job| {
+                if job.retry_at > now {
+                    Duration::from_secs(job.retry_at - now)
+                } else if job.created && !job.finalized && !job.cancelled {
+                    Duration::from_millis(200)
+                } else {
+                    Duration::ZERO
+                }
+            })
+            .min()
+    }
+}
+
+impl Job {
+    fn runnable(&self, enabled: bool) -> bool {
+        self.cancelled || (enabled && !self.ready && self.error.is_none())
+    }
+}
+
 impl Folder {
     fn read(dir: &Path, finalized: bool) -> io::Result<Self> {
         let mut files = Vec::new();
-        collect_files(&dir.join("live"), &mut files)?;
-        collect_files(&dir.join("shots"), &mut files)?;
+        let mut live = (!finalized).then(|| LiveInventory {
+            scanned: Instant::now(),
+            paths: Vec::new(),
+        });
+        collect_files(&dir.join("live"), &mut files, &mut live)?;
+        collect_files(&dir.join("shots"), &mut files, &mut live)?;
         if finalized {
-            collect_files(&dir.join("clips"), &mut files)?;
+            collect_files(&dir.join("clips"), &mut files, &mut live)?;
         }
         let mut folder = Folder {
             media: Vec::new(),
             playlists: Vec::new(),
+            live,
         };
         for path in files {
             let name = path
@@ -833,7 +947,13 @@ impl Folder {
                 .map_err(io::Error::other)?
                 .to_string_lossy()
                 .into_owned();
-            match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
+            let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if matches!(extension, "png" | "m3u8") {
+                if let Some(live) = &mut folder.live {
+                    live.observe(&path)?;
+                }
+            }
+            match extension {
                 "m3u8" => {
                     let bytes = read_bounded(&path)?;
                     folder.playlists.push(Playlist {
@@ -998,7 +1118,14 @@ pub fn paste_link(markdown: &Path, local_paste: String) -> String {
     }
 }
 
-fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+fn collect_files(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    live: &mut Option<LiveInventory>,
+) -> io::Result<()> {
+    if let Some(live) = live {
+        live.observe(dir)?;
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -1008,7 +1135,7 @@ fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
         let entry = entry?;
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            collect_files(&entry.path(), files)?;
+            collect_files(&entry.path(), files, live)?;
         } else if kind.is_file() {
             files.push(entry.path());
         }

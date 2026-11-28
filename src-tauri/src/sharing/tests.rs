@@ -260,6 +260,65 @@ fn off_never_creates_a_job_or_credential_and_pauses_existing_jobs() {
 }
 
 #[test]
+fn the_uploader_sleeps_until_work_arrives_or_a_retry_is_due() {
+    let (service, dir) = setup(true);
+    let delay = || service.0.state.lock().unwrap().next_wake(100);
+    assert_eq!(delay(), None);
+    service.begin(&dir);
+    let id = job(&service).id;
+    assert_eq!(delay(), Some(Duration::ZERO));
+    service.change(&id, |job| job.created = true);
+    assert_eq!(delay(), Some(Duration::from_millis(200)));
+    service
+        .0
+        .state
+        .lock()
+        .unwrap()
+        .jobs
+        .get_mut(&id)
+        .unwrap()
+        .retry_at = 110;
+    assert_eq!(delay(), Some(Duration::from_secs(10)));
+    service.set_enabled(false);
+    assert_eq!(delay(), None);
+    service.cancel(Some(&dir));
+    assert_eq!(delay(), Some(Duration::ZERO));
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_live_take_publishes_an_updated_playlist_and_a_screenshot_that_finishes_in_place() {
+    let server = server(|_| 201);
+    let (service, dir) = setup_at(&server.host, true);
+    service.begin(&dir);
+    record(&dir, 1, 1);
+    let shots = dir.join("shots");
+    std::fs::create_dir_all(&shots).unwrap();
+    let png = include_bytes!("../../icons/tray.png");
+    let mut shot = std::fs::File::create(shots.join("one.png")).unwrap();
+    shot.write_all(&png[..png.len() - 12]).unwrap();
+    run(&service);
+    let first = server.requests().len();
+    run(&service);
+    assert_eq!(server.requests().len(), first);
+    let playlist = dir.join("live/clip.segments/index.m3u8");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(playlist)
+        .unwrap()
+        .write_all(b"#Updated\n")
+        .unwrap();
+    shot.write_all(&png[png.len() - 12..]).unwrap();
+    drop(shot);
+    run(&service);
+    let updates = server.requests().split_off(first);
+    assert!(updates.contains(&"PUT /live/clip.segments/index.m3u8".to_owned()));
+    assert!(updates.contains(&"PUT /shots/one.jpg".to_owned()));
+    assert!(updates.contains(&"PUT /live.json".to_owned()));
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn reload_resumes_saved_takes_and_revokes_interrupted_recordings() {
     let (service, dir) = setup(true);
     service.begin(&dir);
