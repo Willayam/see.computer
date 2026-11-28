@@ -58,6 +58,7 @@ final class Session: ObservableObject {
     private var keyboardWatch: Timer?
     /// The keyboard hid mid-take on purpose, so its silence is not a crash.
     private var keyboardAway = false
+    private var stateNeedsWrite = false
     /// The user sent the live words, so the finished take must not be typed again.
     private var takeSent = false
     /// Tells a tap from this app's own field apart from one that launched or resumed it.
@@ -100,8 +101,11 @@ final class Session: ObservableObject {
         engine.start(previews: true)
 
         Signals.observe(.ping) { [weak self] in
-            MainActor.assumeIsolated { self?.lastPing = Date() }
             Signals.post(.pong)
+            MainActor.assumeIsolated {
+                self?.lastPing = Date()
+                if self?.stateNeedsWrite == true { self?.sendState() }
+            }
         }
         Signals.observe(.start) { [weak self] in
             MainActor.assumeIsolated {
@@ -221,8 +225,9 @@ final class Session: ObservableObject {
     }
 
     func retryEngine() {
+        guard case .failed = stage else { return }
         Diagnostics.log("engine_retry")
-        stage = .waiting
+        stageChanged(.waiting)
         engine.restart(previews: true)
     }
 
@@ -300,7 +305,12 @@ final class Session: ObservableObject {
         // iOS can reclaim the memory-mapped weights while the app sits idle. As on
         // the Mac, page them back in during the take rather than after it.
         engine.warm()
-        live = LiveTake(start: start, utterance: engine.begin())
+        let utterance = engine.begin()
+        guard utterance != 0 else {
+            settle(problem: "The speech engine stopped.")
+            return
+        }
+        live = LiveTake(start: start, utterance: utterance)
         let engine = self.engine
         let audio = CaptureStats()
         takeAudio = audio
@@ -436,8 +446,8 @@ final class Session: ObservableObject {
                 sent: takeSent ? true : nil, start: state.start)
             state.keep(take, at: now)
             // The day file first, so words the keyboard cannot place are already in History.
-            History.append(trimmed, at: now)
-            settle(problem: nil)
+            let saved = History.append(trimmed, at: now)
+            settle(problem: saved ? nil : "Couldn’t save to History. Copy your words from Recent.")
             // The keyboard has the take by now. Recent gains this one entry, and the day
             // files are read again only by the statistics, off the main thread.
             recent = Array(([History.Entry(at: now, text: trimmed)] + recent).prefix(Self.recentLimit))
@@ -535,10 +545,14 @@ final class Session: ObservableObject {
     }
 
     private func publish() {
-        state.dropExpired(at: Date())
-        Bridge.write(state, "state.json")
-        Signals.post(.changed)
+        sendState()
         Island.show(state)
+    }
+
+    private func sendState() {
+        state.dropExpired(at: Date())
+        stateNeedsWrite = !Bridge.write(state, "state.json")
+        if !stateNeedsWrite { Signals.post(.changed) }
     }
 }
 

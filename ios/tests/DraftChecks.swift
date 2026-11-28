@@ -39,6 +39,8 @@ enum DraftChecks {
         refusals()
         try everyWaitingTakeIsKept()
         try theLedgerSettlesEachTakeOnce()
+        try aSilentOrFailedInsertKeepsAllTheWords()
+        try unreadableDeliveryRecordsSurviveMigration()
         aTakeSentBeforeARestart()
         try whatAnOlderKeyboardLeftBehind()
         print("Draft checks passed")
@@ -83,7 +85,7 @@ enum DraftChecks {
         let returned = finished.finished.addingTimeInterval(30)
         precondition(finished.delivery(to: other, at: finished.finished, hasDraft: false) == .waitForField)
         precondition(finished.delivery(to: field, at: finished.finished, hasDraft: false) == .verifyTarget)
-        precondition(finished.delivery(to: field, at: returned, hasDraft: false) == .historyOnly)
+        precondition(finished.delivery(to: field, at: returned, hasDraft: false) == .offer)
         precondition(finished.delivery(to: other, at: returned, hasDraft: true) == .waitForField)
         precondition(finished.delivery(to: field, at: returned, hasDraft: true) == .verifyTarget)
         var sent = finished
@@ -113,6 +115,13 @@ enum DraftChecks {
         precondition(savedHandoff.start?.target.matches(target("hello")) == true)
         precondition(savedHandoff.start?.target.matches(target("hello", field: other)) == false)
         precondition(!String(decoding: handoffData, as: UTF8.self).contains("hello"))
+        let direct = Handoff(asked: start.asked, host: "example.host", start: start)
+        precondition(direct.returning(to: target("hello"), in: "example.host") == .start)
+        precondition(direct.returning(to: target("hello", field: other), in: "example.host") == .ask)
+        precondition(direct.returning(to: target("hello"), in: "another.host") == .wait)
+        precondition(direct.returning(to: nil, in: "example.host") == .wait)
+        precondition(direct.returning(to: target("hello"), in: "example.host",
+                                      at: start.asked.addingTimeInterval(Bridge.handoffWindow)) == .expired)
 
         let oldHandoff = try decoder.decode(Handoff.self, from: Data(#"{"asked":0}"#.utf8))
         let oldDraft = try decoder.decode(Draft.self, from: Data(#"{"before":"hello","spacing":" ","words":"old"}"#.utf8))
@@ -180,7 +189,11 @@ enum DraftChecks {
         // iOS gives a field a new identifier each time the keyboard comes back to it. The
         // take's own words, left there when the keyboard went away, still say which field it is.
         let tail = "Phi chi psi omega and the tail."
-        precondition(placement(draft, tail, field: other, ownsMark: false, mayHaveMoved: true) == .committed)
+        precondition(placement(draft, "Existing" + draft.text, field: other, ownsMark: false, mayHaveMoved: true) == .committed)
+        precondition(placement(draft, "Other" + draft.text, field: other, ownsMark: false, mayHaveMoved: true) == nil)
+        precondition(placement(draft, tail, field: other, ownsMark: false, mayHaveMoved: true) == nil)
+        precondition(!draft.canErase(before: tail))
+        precondition(draft.canErase(before: "Existing" + draft.text))
         precondition(placement(draft, tail, field: other, ownsMark: false) == nil, "Unless another take has words in that field")
         precondition(placement(draft, tail, after: "changed", field: other, ownsMark: false, mayHaveMoved: true) == nil)
         let short = Draft(start: tap(at: target("Existing")), before: "Existing", spacing: " ", words: "Yes.")
@@ -191,22 +204,21 @@ enum DraftChecks {
         precondition(placement(followed, "Existing", field: other, ownsMark: true) == .marked, "A mark set after coming back")
         precondition(placement(followed, "Existing", ownsMark: true, mayHaveMoved: true) == nil)
 
-        // "We" is all the host shows of a draft that ends "... in English. We". The words stay,
-        // and the user is offered what the take says after them.
+        // A field showing only "We" cannot prove that the rest of the draft survived.
         var cut = Draft(start: tap(at: target("Existing")), before: "Existing", spacing: " ", words: "Hi, this is a test in English. We")
-        precondition(cut.wordsLeft(at: target("We", field: other), before: "We") == nil, "Not for words the host never showed")
+        precondition(cut.recovery(at: target("We", field: other), before: "We") == nil, "Not for words the host never showed")
         cut.shown = true
         precondition(placement(cut, "We", field: other, ownsMark: false, mayHaveMoved: true) == nil)
-        precondition(cut.wordsLeft(at: target("We", field: other), before: "We") == cut.words)
-        precondition(cut.wordsLeft(at: target("They", field: other), before: "They") == nil)
-        precondition(cut.wordsLeft(at: target("We", after: "changed", field: other), before: "We") == nil)
-        precondition(cut.wordsLeft(at: target(nil, field: other), before: nil) == nil)
+        precondition(cut.recovery(at: target("We", field: other), before: "We") == .unconfirmed)
+        precondition(cut.recovery(at: target("They", field: other), before: "They") == nil)
+        precondition(cut.recovery(at: target("We", after: "changed", field: other), before: "We") == nil)
+        precondition(cut.recovery(at: target(nil, field: other), before: nil) == nil)
         precondition(Transcript.rest(of: "Hi, this is a test in English, we are done.", after: cut.words) == "are done.")
         // iOS dropped the marked words when the keyboard changed hands, and the field reads as it did at the tap.
-        precondition(cut.wordsLeft(at: target("Existing", field: other), before: "Existing") == "")
+        precondition(cut.recovery(at: target("Existing", field: other), before: "Existing") == .offered)
         var fromEmpty = Draft(start: tap(at: target(nil, after: nil, hasText: false)), before: nil, spacing: "", words: "Hello there")
         fromEmpty.shown = true
-        precondition(fromEmpty.wordsLeft(at: target(nil, after: nil, field: other), before: nil) == nil, "An empty field is like every other empty field")
+        precondition(fromEmpty.recovery(at: target(nil, after: nil, field: other), before: nil) == nil, "An empty field is like every other empty field")
 
         // A second take that landed in another field keeps the first take from being found there.
         let elsewhere = tap(at: target(nil, field: other))
@@ -269,7 +281,7 @@ enum DraftChecks {
         precondition(later.takes.map(\.id) == [3], "A take nothing can place any more is dropped")
         var many = SessionState()
         for id in 1...30 { many.keep(Take(id: Int64(id), text: "take", finished: now, start: first.start), at: now) }
-        precondition(many.takes.count == 20 && many.takes.last?.id == 30)
+        precondition(many.takes.map(\.id) == (1...30).map(Int64.init))
 
         let old = try decoder.decode(SessionState.self, from: Data("""
             {"phase":"armed","take":{"id":1,"text":"old","finished":0},"since":0}
@@ -289,13 +301,13 @@ enum DraftChecks {
         ledger.update(waiting.start!.id) { $0.draft = Draft(start: waiting.start!, before: nil, spacing: "", words: "another") }
         precondition(ledger.entries.count == 2, "Each take keeps its own words")
 
-        for standing in [Ledger.Standing.sent, .offered] {
+        for standing in [Ledger.Standing.sent, .offered, .unconfirmed] {
             ledger.update(start.id) { $0.standing = standing }
             let next = try reopened(ledger)
             precondition(next[start.id]?.standing == standing && next[start.id]?.draft == ledger[start.id]?.draft)
             precondition(!next.isSettled(take), "A take the host has not confirmed is not done with")
         }
-        for standing in [Ledger.Standing.placed, .dismissed] {
+        for standing in [Ledger.Standing.placed, .copied, .dismissed] {
             ledger.update(start.id) { $0.standing = standing }
             let next = try reopened(ledger)
             precondition(next.isSettled(take))
@@ -303,6 +315,45 @@ enum DraftChecks {
         precondition(!ledger.isSettled(waiting) && ledger[waiting.start!.id]?.draft?.words == "another")
         ledger.remove(start.id)
         precondition(!ledger.isSettled(take) && ledger.entries.count == 1)
+    }
+
+    static func aSilentOrFailedInsertKeepsAllTheWords() throws {
+        let start = tap(at: target("Hello"))
+        let take = Take(id: 31, text: "Every word is still here.", finished: Date(), start: start)
+        var ledger = Ledger()
+        precondition(!ledger.reserveInsert(start.id, in: field, save: { _ in false }))
+        precondition(ledger[start.id] == nil)
+        precondition(ledger.reserveInsert(start.id, in: field, awaitingReply: true, save: { _ in true }))
+        precondition(ledger.reserveInsert(start.id, in: field, from: .sent, save: { _ in true }))
+        var reopened = try self.reopened(ledger)
+        precondition(!reopened.isSettled(take))
+        precondition(!reopened.reserveInsert(start.id, in: field, save: { _ in true }))
+        let recovery = reopened.offer(for: take, in: other)
+        precondition(recovery?.action == .copy && recovery?.words == take.text)
+        precondition(recovery?.label == "Copy dictation")
+        precondition(reopened.offer(for: take, in: field, at: take.finished.addingTimeInterval(Bridge.returnWindow)) == nil)
+        reopened.update(start.id) { $0.standing = .offered }
+        precondition(reopened.offer(for: take, in: other)?.label == "Insert dictation")
+        precondition(reopened.offer(for: take, in: field)?.label.contains(take.text) == true)
+        precondition(reopened.reserveInsert(start.id, in: other, from: .offered, save: { _ in true }))
+        precondition(!reopened.reserveInsert(start.id, in: other, from: .offered, save: { _ in true }))
+    }
+
+    static func unreadableDeliveryRecordsSurviveMigration() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let bookmark = dir.appendingPathComponent("inserted.json")
+        let file = dir.appendingPathComponent("ledger.json")
+        try Data("37".utf8).write(to: bookmark)
+        try Data("damaged".utf8).write(to: file)
+        precondition(Ledger.read(in: dir) == nil && fm.fileExists(atPath: bookmark.path))
+        try fm.removeItem(at: file)
+        let migrated = Ledger.read(in: dir)
+        precondition(migrated?.floor == 37 && !fm.fileExists(atPath: bookmark.path))
+        precondition(Ledger.read(in: dir) == migrated)
+        precondition(Ledger.read(in: nil) == nil)
     }
 
     /// A keyboard killed after it sent a take cannot say whether the take landed. The next
@@ -315,21 +366,22 @@ enum DraftChecks {
             $0.standing = .sent
             $0.field = field
         }
-        precondition(ledger.shows(take, in: field, isOwn: true, before: "Alpha. " + take.text + " "))
-        precondition(ledger.shows(take, in: other, isOwn: false, before: "Alpha. " + take.text), "The field under a new identifier")
-        precondition(!ledger.shows(take, in: field, isOwn: true, before: "Alpha."), "The host dropped the insert")
-        precondition(!ledger.shows(take, in: other, isOwn: false, before: nil))
+        precondition(ledger.shows(take, in: field, isOwn: true, before: "Alpha. " + take.text + " ", after: start.target.after))
+        precondition(ledger.shows(take, in: other, isOwn: false, before: "Alpha. " + take.text, after: start.target.after), "The field under a new identifier")
+        precondition(!ledger.shows(take, in: field, isOwn: true, before: "Alpha.", after: start.target.after), "The host dropped the insert")
+        precondition(!ledger.shows(take, in: other, isOwn: false, before: nil, after: start.target.after))
+        precondition(!ledger.shows(take, in: other, isOwn: false, before: "Another field. " + take.text, after: start.target.after))
 
         var crowded = ledger
         crowded.update(UUID()) {
             $0.standing = .placed
             $0.field = other
         }
-        precondition(!crowded.shows(take, in: other, isOwn: false, before: "Alpha. " + take.text), "Another take's words prove nothing")
+        precondition(!crowded.shows(take, in: other, isOwn: false, before: "Alpha. " + take.text, after: start.target.after), "Another take's words prove nothing")
 
         // Only the words after the ones the user kept in the field were sent.
         ledger.update(start.id) { $0.edit = ManualEdit(startID: start.id, target: nil, kept: "Sent just before") }
-        precondition(ledger.shows(take, in: field, isOwn: true, before: "Sent just before, typed, the keyboard went away."))
+        precondition(ledger.shows(take, in: field, isOwn: true, before: "Sent just before, typed, the keyboard went away.", after: start.target.after))
     }
 
     static func whatAnOlderKeyboardLeftBehind() throws {

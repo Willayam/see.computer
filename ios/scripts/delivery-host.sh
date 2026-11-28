@@ -141,6 +141,16 @@ single_text() { focus single "clear=1&set=single&text=Existing text.&"; begin &&
 # The field shows no marked text. Before, an empty one read as sent and a filled one took nothing.
 nomark_empty() { focus nomark "clear=1&"; begin && sleep 6 && finish; events; verdict nomark_empty "$(text nomark)" "$said" mark_refused; }
 nomark_text() { focus nomark "clear=1&set=nomark&text=Existing text.&"; begin && sleep 6 && finish; events; verdict nomark_text "$(text nomark)" "Existing text\. $said" mark_refused; }
+noop_copy() {
+    focus noop "clear=1&"; begin && sleep 6 && finish; events
+    verdict noop_field "$(text noop)" ""
+    note; tap "$strip"; await dictation_copied 5 || return 1
+    if xcrun simctl pbpaste "$udid" | grep -Eq "^$said\$"; then
+        echo "PASS noop_copy: the clipboard holds every word"
+    else
+        echo "FAIL noop_copy: the clipboard does not hold the take"; return 1
+    fi
+}
 # A key typed mid-take keeps the words shown so far, and Done adds only the rest.
 typed_midtake() {
     focus plain "clear=1&set=plain&text=Existing text.&"; begin && words plain && tap "$letter" && sleep 4 && finish; events
@@ -228,7 +238,7 @@ reopened() {
     note; shown=$(grep -c keyboard_shown "$log"); tell "clear=1&set=plain&text=$1&focus=plain" 0.5; showing; sleep 5; events
 }
 
-all="plain_empty plain_text single_text nomark_empty nomark_text typed_midtake sent_midtake cancelled offered dismissed reoffered returned overlapped away restarted legacy unanswered"
+all="plain_empty plain_text single_text nomark_empty nomark_text noop_copy typed_midtake sent_midtake cancelled offered dismissed reoffered returned overlapped away restarted legacy unanswered"
 case "${1:-}" in
     setup) udid="${2:?Pass the simulator UDID}"; setup ;;
     scenarios) echo "$all" | tr ' ' '\n' ;;

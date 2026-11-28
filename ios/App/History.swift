@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// One markdown file per day in the app's Documents folder, which the Files app
@@ -26,16 +27,20 @@ enum History {
         return formatter
     }
 
-    static func append(_ text: String, at date: Date) {
+    @discardableResult
+    static func append(_ text: String, at date: Date) -> Bool {
         let url = Paths.documents.appendingPathComponent("\(day.string(from: date)).md")
         let entry = Data("## \(time.string(from: date))\n\n\(text)\n\n".utf8)
-        guard let handle = try? FileHandle(forWritingTo: url) else {
-            try? entry.write(to: url)
-            return
+        let fd = Darwin.open(url.path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o666)
+        guard fd >= 0 else { return false }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        do {
+            try handle.write(contentsOf: entry)
+            try handle.close()
+            return true
+        } catch {
+            return false
         }
-        handle.seekToEndOfFile()
-        handle.write(entry)
-        try? handle.close()
     }
 
     static func recent(limit: Int) -> [Entry] {

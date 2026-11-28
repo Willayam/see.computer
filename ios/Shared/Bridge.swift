@@ -23,13 +23,10 @@ struct SessionState: Equatable {
     /// Missing from a file written before the app refused takes while the model loads.
     var model: Model?
 
-    private static let mostTakes = 20
-
     /// A take stays for as long as the keyboard could still place it.
     mutating func keep(_ take: Take, at now: Date) {
         dropExpired(at: now)
         takes.append(take)
-        takes.removeFirst(max(0, takes.count - Self.mostTakes))
     }
 
     mutating func dropExpired(at now: Date) {
@@ -75,14 +72,15 @@ struct Take: Codable, Equatable {
     var start: DictationStart?
 
     enum Delivery {
-        case waitForField, verifyTarget, historyOnly
+        case waitForField, verifyTarget, offer, historyOnly
     }
 
     /// `home` is the identifier the take's field has now, when the keyboard has followed
     /// it there since the tap.
     func delivery(to field: UUID, at now: Date, hasDraft: Bool, home: UUID? = nil) -> Delivery {
-        let window = hasDraft ? Bridge.returnWindow : Bridge.insertWindow
-        guard sent != true, let start, now.timeIntervalSince(finished) < window else { return .historyOnly }
+        let age = now.timeIntervalSince(finished)
+        guard sent != true, let start, age < Bridge.returnWindow else { return .historyOnly }
+        if !hasDraft && age >= Bridge.insertWindow { return .offer }
         return (home ?? start.target.field) == field ? .verifyTarget : .waitForField
     }
 }
@@ -148,6 +146,15 @@ struct Handoff: Codable {
     var asked: Date
     var host: String?
     var start: DictationStart?
+
+    enum Return { case wait, start, ask, expired }
+
+    func returning(to field: DictationTarget?, in bundle: String?, at now: Date = Date()) -> Return {
+        guard let start, now.timeIntervalSince(asked) < Bridge.handoffWindow else { return .expired }
+        guard let field else { return .wait }
+        if let host, let bundle, host != bundle { return .wait }
+        return start.target.matches(field) ? .start : .ask
+    }
 }
 
 /// The take so far, as it stands in the text field. Saved because the keyboard can
@@ -191,9 +198,8 @@ struct Draft: Codable, Equatable {
     /// the caret. It leaves marked text out, so an unchanged field still holds the mark
     /// this keyboard set, and a field that now ends in the draft has committed it.
     ///
-    /// `mayHaveMoved` lets a field under an unknown identifier count as the draft's own
-    /// when it ends in enough of the draft's words. The caller passes it only for a field
-    /// in which the keyboard has placed no other take.
+    /// iOS can give the field a new identifier on return. In that case require the saved
+    /// fingerprint of the preceding text and the complete draft before editing it.
     func placement(
         at current: DictationTarget?, before: String?, ownsMark: Bool, mayHaveMoved: Bool = false
     ) -> Placement? {
@@ -202,26 +208,27 @@ struct Draft: Codable, Equatable {
         else { return nil }
         let known = home == current.field
         guard known || mayHaveMoved else { return nil }
-        if known, let committedBefore, current.before == committedBefore {
+        if let committedBefore, current.before == committedBefore, known || words.count >= Self.recognisable {
             return .committed
         }
-        if target.before == current.before { return known && ownsMark ? .marked : nil }
-        return HostContext.ends(before, with: text, atLeast: known ? 0 : Self.recognisable) ? .committed : nil
+        guard known else { return nil }
+        if target.before == current.before { return ownsMark ? .marked : nil }
+        return HostContext.ends(before, with: text) ? .committed : nil
     }
 
     enum Placement {
         case marked, committed
     }
 
-    /// The draft's words that a field under an unknown identifier seems to hold, when that
-    /// is too little to edit the field on but enough to offer the user what it lacks. The
-    /// little the host reports is how the draft ends, so all of them. Or the field reads as
-    /// it did at the tap, so none: iOS can drop marked text when the keyboard changes hands.
-    func wordsLeft(at current: DictationTarget, before: String?) -> String? {
+    func canErase(before: String?) -> Bool {
+        !text.isEmpty && before?.hasSuffix(text) == true
+    }
+
+    func recovery(at current: DictationTarget, before: String?) -> Ledger.Standing? {
         guard shown == true, let target = start?.target, current.selected == nil, target.after == current.after
         else { return nil }
-        if HostContext.isEnd(before, of: text) { return words }
-        return target.before != nil && target.before == current.before && current.hasText ? "" : nil
+        if HostContext.isEnd(before, of: text) { return .unconfirmed }
+        return target.before != nil && target.before == current.before && current.hasText ? .offered : nil
     }
 
     /// The words that stay in the field as the user's own text once the keyboard stops
@@ -252,14 +259,12 @@ enum HostContext {
     /// Enough of a text's end to tell it from a short word the field happens to share.
     private static let tail = 12
 
-    /// `needed` asks for that many matching characters, for a caller with nothing else
-    /// to tell this field from another.
-    static func ends(_ context: String?, with text: String, atLeast needed: Int = 0) -> Bool {
+    static func ends(_ context: String?, with text: String) -> Bool {
         let context = form(context), text = form(text)
         guard !context.isEmpty, !text.isEmpty else { return false }
         let whole = text.drop(while: \.isWhitespace).count
-        if context.hasSuffix(text) { return whole >= needed }
-        return text.hasSuffix(context) && context.count >= max(needed, min(tail, whole))
+        if context.hasSuffix(text) { return true }
+        return text.hasSuffix(context) && context.count >= min(tail, whole)
     }
 
     /// Whether what the host reports, however little, is how `text` ends.
@@ -293,6 +298,7 @@ struct Ledger: Codable, Equatable {
         case sent
         /// The keyboard could not place the take for sure. The user can insert it by hand.
         case offered
+        case unconfirmed, copied
         case placed, dismissed
     }
 
@@ -333,6 +339,19 @@ struct Ledger: Codable, Equatable {
         entries.removeAll { $0.id == id }
     }
 
+    mutating func reserveInsert(_ id: UUID, in field: UUID, from prior: Standing? = nil,
+                                awaitingReply: Bool = false, save: (Ledger) -> Bool) -> Bool {
+        guard self[id]?.standing == prior else { return false }
+        var next = self
+        next.update(id) {
+            $0.field = field
+            $0.standing = awaitingReply ? .sent : .unconfirmed
+        }
+        guard save(next) else { return false }
+        self = next
+        return true
+    }
+
     /// Whether no other take has words in `field`. Words there that look like one take's
     /// draft can then only be that draft.
     func isFree(_ field: UUID, for id: UUID) -> Bool {
@@ -342,17 +361,50 @@ struct Ledger: Codable, Equatable {
     /// Whether a field holds a take that an earlier keyboard sent without lasting to hear the
     /// host's answer. `before` is the text the host reports before the caret. Under a new
     /// identifier the field may still be the take's own, unless another take has words there.
-    func shows(_ take: Take, in field: UUID, isOwn: Bool, before: String?) -> Bool {
-        guard let id = take.start?.id, isOwn || isFree(field, for: id) else { return false }
-        let sent = Transcript.rest(of: take.text, after: self[id]?.edit?.kept ?? "")
-        return HostContext.ends(before?.trimmingCharacters(in: .whitespaces), with: sent)
+    func shows(_ take: Take, in field: UUID, isOwn: Bool, before: String?, after: Data?) -> Bool {
+        guard let start = take.start, let before else { return false }
+        let entry = self[start.id]
+        let sent = Transcript.rest(of: take.text, after: entry?.edit?.kept ?? "")
+        if isOwn { return HostContext.ends(before.trimmingCharacters(in: .whitespaces), with: sent) }
+        let origin = entry?.edit?.target ?? start.target
+        guard !sent.isEmpty, isFree(field, for: start.id), after == origin.after else { return false }
+        let context = before.hasSuffix(sent + " ") ? String(before.dropLast()) : before
+        guard context.hasSuffix(sent) else { return false }
+        let prefix = String(context.dropLast(sent.count))
+        if origin.before == nil { return !origin.hasText && prefix.isEmpty }
+        return DictationTarget.fingerprint(prefix) == origin.before ||
+            (prefix.hasSuffix(" ") && DictationTarget.fingerprint(String(prefix.dropLast())) == origin.before)
     }
 
     /// A take without a tap comes from a build that named no field, so nothing can place it.
     func isSettled(_ take: Take) -> Bool {
         guard take.id > floor ?? 0, let id = take.start?.id else { return true }
         let standing = self[id]?.standing
-        return standing == .placed || standing == .dismissed
+        return standing == .placed || standing == .copied || standing == .dismissed
+    }
+
+    struct Offer: Equatable {
+        enum Action { case insert, copy }
+        let take: Take
+        let words: String
+        let action: Action
+        let label: String
+    }
+
+    func offer(for take: Take, in field: UUID, at now: Date = Date()) -> Offer? {
+        guard let start = take.start, take.sent != true, now.timeIntervalSince(take.finished) < Bridge.returnWindow,
+              let entry = self[start.id] else { return nil }
+        switch entry.standing {
+        case .offered:
+            let words = Transcript.rest(of: take.text, after: entry.edit?.kept ?? "")
+            guard !words.isEmpty else { return nil }
+            let label = start.target.field == field ? "Insert “\(words)”" : "Insert dictation"
+            return Offer(take: take, words: words, action: .insert, label: label)
+        case .unconfirmed:
+            return Offer(take: take, words: take.text, action: .copy, label: "Copy dictation")
+        default:
+            return nil
+        }
     }
 
     /// What a keyboard with one draft, one edit and one bookmark left behind.
@@ -362,21 +414,28 @@ struct Ledger: Codable, Equatable {
         if let edit, let id = edit.startID { update(id, at: now) { $0.edit = edit } }
     }
 
-    static func read() -> Ledger {
-        if let ledger = Bridge.read(Ledger.self, "ledger.json") { return ledger }
+    static func read(in folder: URL? = Bridge.folder) -> Ledger? {
+        do { return try load(in: folder) } catch { return nil }
+    }
+
+    private static func load(in folder: URL?) throws -> Ledger {
+        if let ledger = try Bridge.load(Ledger.self, "ledger.json", in: folder) { return ledger }
         let old = ["inserted.json", "draft.json", "manual-edit.json"]
         let ledger = Ledger(
-            inserted: Bridge.read(Int64.self, old[0]), draft: Bridge.read(Draft.self, old[1]),
-            edit: Bridge.read(ManualEdit.self, old[2]))
-        ledger.write()
-        old.forEach(Bridge.remove)
+            inserted: try Bridge.load(Int64.self, old[0], in: folder),
+            draft: try Bridge.load(Draft.self, old[1], in: folder),
+            edit: try Bridge.load(ManualEdit.self, old[2], in: folder))
+        if ledger.floor != nil || !ledger.entries.isEmpty {
+            try ledger.store(in: folder)
+            old.forEach { Bridge.remove($0, in: folder) }
+        }
         return ledger
     }
 
-    func write(at now: Date = Date()) {
+    func store(in folder: URL? = Bridge.folder, at now: Date = Date()) throws {
         var kept = self
         kept.entries.removeAll { now.timeIntervalSince($0.touched) > Self.lifetime }
-        Bridge.write(kept, "ledger.json")
+        try Bridge.store(kept, "ledger.json", in: folder)
     }
 }
 
@@ -438,25 +497,31 @@ enum Bridge {
     /// started in, when the user comes back within this.
     static let returnWindow: TimeInterval = 10 * 60
 
-    private static var folder: URL? {
+    fileprivate static var folder: URL? {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group)
     }
 
     static func read<Value: Decodable>(_ type: Value.Type, _ name: String) -> Value? {
-        guard let url = folder?.appendingPathComponent(name),
-            let data = try? Data(contentsOf: url)
-        else { return nil }
-        return try? JSONDecoder().decode(type, from: data)
+        try? load(type, name, in: folder)
     }
 
-    static func write<Value: Encodable>(_ value: Value, _ name: String) {
-        guard let url = folder?.appendingPathComponent(name),
-            let data = try? JSONEncoder().encode(value)
-        else { return }
-        try? data.write(to: url, options: .atomic)
+    fileprivate static func load<Value: Decodable>(_ type: Value.Type, _ name: String, in folder: URL?) throws -> Value? {
+        guard let url = folder?.appendingPathComponent(name) else { throw CocoaError(.fileReadNoPermission) }
+        do { return try JSONDecoder().decode(type, from: Data(contentsOf: url)) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile { return nil }
     }
 
-    static func remove(_ name: String) {
+    fileprivate static func store<Value: Encodable>(_ value: Value, _ name: String, in folder: URL?) throws {
+        guard let url = folder?.appendingPathComponent(name) else { throw CocoaError(.fileWriteNoPermission) }
+        try JSONEncoder().encode(value).write(to: url, options: .atomic)
+    }
+
+    @discardableResult
+    static func write<Value: Encodable>(_ value: Value, _ name: String) -> Bool {
+        do { try store(value, name, in: folder); return true } catch { return false }
+    }
+
+    static func remove(_ name: String, in folder: URL? = Bridge.folder) {
         guard let url = folder?.appendingPathComponent(name) else { return }
         try? FileManager.default.removeItem(at: url)
     }

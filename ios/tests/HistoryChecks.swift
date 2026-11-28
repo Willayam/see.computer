@@ -17,15 +17,18 @@ enum HistoryChecks {
             precondition(History.recent(limit: 2).map(\.at) == [second, first])
             try FileManager.default.removeItem(at: file)
         }
-        History.append("first", at: first)
-        History.append("second", at: second)
-        History.append("same second", at: second)
+        precondition(History.append("first", at: first))
+        precondition(History.append("second", at: second))
+        precondition(History.append("same second", at: second))
         let stored = try String(contentsOf: file, encoding: .utf8)
         let offsets = zone == "UTC" ? ["+00:00"] : ["+02:00", "+01:00"]
         precondition(offsets.allSatisfy { stored.contains($0) })
         let recent = History.recent(limit: 3)
         precondition(recent.map(\.at) == [second, second, first])
         precondition(Set(recent.map(\.id)).count == 3)
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+        precondition(!History.append("cannot be saved to a directory", at: second))
         print("History dates and row identities passed in \(zone)")
     }
 }
