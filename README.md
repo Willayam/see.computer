@@ -59,6 +59,14 @@ For learning and accuracy checks, each dictation's audio, captured screen text, 
 
 Files in Documents can also sync through iCloud Desktop & Documents, if you have enabled it.
 
+## Meeting notes
+
+Choose **Record a meeting** in the Mac menu to record your microphone and system audio. When the menu names a call app, see.computer records that app's audio. If it cannot hear the app, it keeps recording your microphone. Choose **Retry Zoom audio** to try Zoom again, or **Record all system audio** to include other apps.
+
+**Stop recording** closes both inputs. The Library finishes the notes using speech it already transcribed during the call. If an expected audio file is missing, the Library names it. Restore the file and choose **Try again**.
+
+Run `see-computer notes --full <meeting-folder>` to transcribe the audio again. The app carries corrections over when the same words appear at the same time. If it cannot carry a correction, it keeps the earlier transcript in `meeting.previous.md` beside `meeting.md`.
+
 ## Custom vocabulary
 
 Parakeet has never heard `Tauri` or `pnpm`, so it writes down the nearest thing it knows. Put the words it keeps missing in `~/Documents/see.computer/vocabulary.md`, one per line, and they are pushed into the decoder while it is still choosing — not substituted afterwards, which could not tell `Tauri` from the `tao ry` that a different sentence really did say.

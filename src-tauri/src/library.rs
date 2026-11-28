@@ -448,29 +448,37 @@ pub async fn library_fix(
                 return Err("Keep a meeting line on one line.".to_owned());
             }
             let folder = crate::paths::documents().join(name);
-            let manifest =
-                folder::read(&folder).ok_or("That meeting is no longer in the Library.")?;
-            if manifest.state != folder::State::Done {
-                return Err("Wait until the meeting has finished transcribing.".to_owned());
-            }
-            let path = folder.join(folder::MARKDOWN);
-            let failed = |error: std::io::Error| format!("Unable to save: {error}.");
-            let before = std::fs::read_to_string(&path).map_err(failed)?;
-            let after = fixed_meeting(&before, start_ms, &original, edited)
-                .ok_or("That line changed on disk, so the Library has been reloaded.")?;
-            let temp = path.with_extension("md.tmp");
-            std::fs::write(&temp, after).map_err(failed)?;
-            if std::fs::read_to_string(&path).ok().as_deref() != Some(before.as_str()) {
-                let _ = std::fs::remove_file(&temp);
-                return Err("The meeting changed while saving. Try again.".to_owned());
-            }
-            std::fs::rename(temp, &path).map_err(failed)?;
+            let at = save_meeting_line(&folder, start_ms, &original, edited)?;
             changed();
-            ledger.fixed(manifest.started_ms + start_ms, &original, edited);
+            ledger.fixed(at, &original, edited);
             Ok(())
         }
         _ => Err("Only dictations and meetings can be fixed here.".to_owned()),
     }
+}
+
+fn save_meeting_line(
+    folder: &Path,
+    start_ms: i64,
+    original: &str,
+    edited: &str,
+) -> Result<i64, String> {
+    let failed = |error: std::io::Error| format!("Unable to save: {error}.");
+    let _editing = folder::lock_transcript(folder).map_err(failed)?;
+    let manifest = folder::read(folder).ok_or("That meeting is no longer in the Library.")?;
+    if manifest.state != folder::State::Done {
+        return Err("Wait until the meeting has finished transcribing.".to_owned());
+    }
+    let path = folder.join(folder::MARKDOWN);
+    let before = std::fs::read_to_string(&path).map_err(failed)?;
+    let after = fixed_meeting(&before, start_ms, original, edited)
+        .ok_or("That line changed on disk, so the Library has been reloaded.")?;
+    let staged = folder::stage(folder, after.as_bytes()).map_err(failed)?;
+    if std::fs::read_to_string(&path).map_err(failed)? != before {
+        return Err("The meeting changed while saving. Try again.".to_owned());
+    }
+    staged.persist(path).map_err(|error| failed(error.error))?;
+    Ok(manifest.started_ms + start_ms)
 }
 
 fn path_string(path: &Path) -> String {
@@ -986,6 +994,31 @@ mod tests {
             fixed_meeting(markdown, 6_000, "we use superbase", "x"),
             None,
             "a line that is no longer there is not rewritten"
+        );
+    }
+
+    #[test]
+    fn simultaneous_library_edits_keep_both_lines() {
+        let root = tempfile::tempdir().unwrap();
+        let meeting = folder::create(root.path(), None, 0).unwrap();
+        let mut manifest = folder::read(&meeting).unwrap();
+        manifest.state = folder::State::Done;
+        folder::write(&meeting, &manifest).unwrap();
+        let path = meeting.join(folder::MARKDOWN);
+        std::fs::write(&path, "[00:01] You: One.\n[00:02] Them: Two.\n").unwrap();
+        let gate = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for (at, original, edited) in [(1000, "One.", "First."), (2000, "Two.", "Second.")] {
+                let (meeting, gate) = (&meeting, &gate);
+                scope.spawn(move || {
+                    gate.wait();
+                    assert_eq!(save_meeting_line(meeting, at, original, edited), Ok(at));
+                });
+            }
+        });
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "[00:01] You: First.\n[00:02] Them: Second.\n"
         );
     }
 

@@ -571,6 +571,48 @@ fn an_older_finished_meeting_keeps_its_transcript_when_read_again() {
     assert!(meeting.folder.join(MANIFEST).exists());
 }
 
+#[test]
+fn retrying_a_failed_reread_keeps_the_older_transcript() {
+    let meeting = meeting(None);
+    let mut manifest = folder::read(&meeting.folder).unwrap();
+    manifest.state = State::Done;
+    folder::write(&meeting.folder, &manifest).unwrap();
+    let typed = "[00:00] You: The owner's correction.\n";
+    std::fs::write(meeting.folder.join(MARKDOWN), typed).unwrap();
+    let mut engine = reader(Fake::new(&Calls::default()));
+    assert!(transcribe(&meeting.folder, &mut engine, Mode::Full).is_err());
+    assert_eq!(markdown(&meeting), typed);
+    assert_eq!(state(&meeting).0, State::Done);
+    write_wav(&meeting, Speaker::You, &track(&[(2, 100)]));
+    transcribe(&meeting.folder, &mut engine, Mode::Resume).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(meeting.folder.join(PREVIOUS)).unwrap(),
+        typed
+    );
+}
+
+#[test]
+fn a_transcript_or_baseline_that_cannot_be_read_is_left_intact() {
+    for name in [MARKDOWN, WRITTEN] {
+        let meeting = meeting(microphone_only());
+        write_wav(&meeting, Speaker::You, &track(&[(2, 100)]));
+        let typed = b"[00:00] You: Keep this correction.\n";
+        let markdown = meeting.folder.join(MARKDOWN);
+        std::fs::write(&markdown, typed).unwrap();
+        let unreadable = meeting.folder.join(name);
+        std::fs::write(&unreadable, [0xff]).unwrap();
+        let before = std::fs::read(&markdown).unwrap();
+        assert!(transcribe(
+            &meeting.folder,
+            &mut reader(Fake::new(&Calls::default())),
+            Mode::Resume
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&unreadable).unwrap(), [0xff]);
+        assert_eq!(std::fs::read(&markdown).unwrap(), before);
+    }
+}
+
 /// The speech model itself, with no vocabulary of the user's in play.
 fn real_engine() -> crate::engine::parakeet::Parakeet {
     let files = crate::engine::Models::default_root()

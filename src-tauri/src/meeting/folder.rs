@@ -1,5 +1,6 @@
 use std::fs;
-use std::io;
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use chrono::{Local, TimeZone};
@@ -178,15 +179,27 @@ pub fn write(folder: &Path, manifest: &Manifest) -> io::Result<()> {
     replace(&folder.join(MANIFEST), &bytes)
 }
 
-/// Swaps in a file's whole content at once, so nothing reads half of it.
+pub fn lock_transcript(folder: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_EXLOCK)
+        .open(folder)
+}
+
+pub fn stage(folder: &Path, content: &[u8]) -> io::Result<tempfile::NamedTempFile> {
+    let mut file = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o666))
+        .tempfile_in(folder)?;
+    file.write_all(content)?;
+    file.as_file().sync_data()?;
+    Ok(file)
+}
+
 pub fn replace(path: &Path, content: &[u8]) -> io::Result<()> {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-    fs::write(&temp, content)?;
-    if let Err(error) = fs::rename(&temp, path) {
-        let _ = fs::remove_file(temp);
-        return Err(error);
-    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("missing meeting folder"))?;
+    stage(parent, content)?.persist(path)?;
     Ok(())
 }
 

@@ -9,7 +9,7 @@ use crate::mic::Audio16k;
 use crate::qos::{self, Class};
 
 use super::chunks::{Chunker, Tail, RATE, READ};
-use super::folder::{self, MARKDOWN};
+use super::folder::{self, MARKDOWN, WRITTEN};
 use super::transcript::{self, Speaker};
 use super::{heard, notes};
 
@@ -61,6 +61,14 @@ pub fn start(
                 break;
             }
             wait = (started.elapsed() * IDLE_PER_BUSY).clamp(TICK, MAX_WAIT);
+        }
+        if !written.is_empty() {
+            if let Err(error) = folder::replace(&folder.join(WRITTEN), written.as_bytes()) {
+                notes::log(
+                    &folder,
+                    &format!("could not save last live transcript: {error}"),
+                );
+            }
         }
         Some(engine)
     });

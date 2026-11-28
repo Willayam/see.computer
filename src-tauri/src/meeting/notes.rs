@@ -1,3 +1,4 @@
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -92,7 +93,7 @@ pub fn write_notes(folder: &Path, reader: &mut Reader, mode: Mode) -> Result<Pat
         .iter()
         .map(|speaker| folder.join(speaker.wav()))
         .collect();
-    local.push(folder.join(HEARD));
+    local.extend([HEARD, MARKDOWN, WRITTEN].map(|name| folder.join(name)));
     if let Some(waited) = fetch(&local)? {
         log(
             folder,
@@ -124,12 +125,7 @@ pub fn write_notes(folder: &Path, reader: &mut Reader, mode: Mode) -> Result<Pat
         }
     }
     let lines = transcript::merge(&you, &them);
-    publish(
-        folder,
-        &transcript::render(&manifest, &lines),
-        manifest.state == State::Done,
-    )
-    .map_err(|error| error.to_string())
+    publish(folder, &transcript::render(&manifest, &lines)).map_err(|error| error.to_string())
 }
 
 /// The tracks to read. A track the recording started and the folder no longer
@@ -257,29 +253,48 @@ fn hear(reader: &mut Reader, chunk: &Chunk) -> Result<Vec<Segment>, String> {
 /// last one. Corrections carry over line by line where they still apply. If
 /// some could not, or an older meeting has no record of what the app wrote,
 /// the corrected file stays in the folder under another name.
-fn publish(folder: &Path, fresh: &str, finished: bool) -> std::io::Result<PathBuf> {
+fn publish(folder: &Path, fresh: &str) -> io::Result<PathBuf> {
+    let _editing = folder::lock_transcript(folder)?;
     let markdown = folder.join(MARKDOWN);
-    let current = std::fs::read_to_string(&markdown).ok();
-    let written = std::fs::read_to_string(folder.join(WRITTEN)).ok();
-    let (text, lost) = match (written, current) {
+    let current = text_if_present(&markdown)?;
+    let written = text_if_present(&folder.join(WRITTEN))?;
+    let (text, lost) = match (written.as_deref(), current.as_deref()) {
         (Some(written), Some(current)) => {
-            let merged = transcript::carry_corrections(&written, &current, fresh);
+            let merged = transcript::carry_corrections(written, current, fresh);
             let lost = (current != written && merged != current).then_some(current);
             (merged, lost)
         }
-        (None, Some(current)) if finished && current != fresh => (fresh.to_owned(), Some(current)),
+        (None, Some(current)) if current != fresh => (fresh.to_owned(), Some(current)),
         _ => (fresh.to_owned(), None),
     };
+    let next = folder::stage(folder, text.as_bytes())?;
+    let baseline = folder::stage(folder, fresh.as_bytes())?;
     if let Some(previous) = lost {
-        set_aside(folder, &previous)?;
+        set_aside(folder, previous)?;
     }
-    folder::replace(&markdown, text.as_bytes())?;
-    folder::replace(&folder.join(WRITTEN), fresh.as_bytes())?;
+    if text_if_present(&markdown)? != current {
+        return Err(io::Error::other(
+            "the meeting transcript changed while saving, try again",
+        ));
+    }
+    next.persist(&markdown)?;
+    baseline.persist(folder.join(WRITTEN))?;
     Ok(markdown)
 }
 
-fn set_aside(folder: &Path, text: &str) -> std::io::Result<()> {
-    use std::io::Write;
+fn text_if_present(path: &Path) -> io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!("{}: {error}", path.display()),
+        )),
+    }
+}
+
+fn set_aside(folder: &Path, text: &str) -> io::Result<()> {
+    let mut backup = folder::stage(folder, text.as_bytes())?;
     let (stem, extension) = PREVIOUS.rsplit_once('.').expect("a file name with a dot");
     for index in 1.. {
         let name = if index == 1 {
@@ -287,14 +302,16 @@ fn set_aside(folder: &Path, text: &str) -> std::io::Result<()> {
         } else {
             format!("{stem}-{index}.{extension}")
         };
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(folder.join(name))
-        {
-            Ok(mut file) => return file.write_all(text.as_bytes()),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
+        let path = folder.join(name);
+        match backup.persist_noclobber(&path) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                if std::fs::read(path).is_ok_and(|previous| previous == text.as_bytes()) {
+                    return Ok(());
+                }
+                backup = error.file;
+            }
+            Err(error) => return Err(error.error),
         }
     }
     unreachable!()
@@ -302,10 +319,15 @@ fn set_aside(folder: &Path, text: &str) -> std::io::Result<()> {
 
 /// Write the notes and record the result in the manifest.
 pub fn transcribe(folder: &Path, reader: &mut Reader, mode: Mode) -> Result<PathBuf, String> {
+    if folder::read(folder).is_some_and(|manifest| manifest.state == State::Recording) {
+        return Err("Stop recording before transcribing this meeting".to_owned());
+    }
     log(folder, "started");
     let started = Instant::now();
     let mut result = write_notes(folder, reader, mode);
-    if let Some(mut manifest) = folder::read(folder) {
+    if let Some(mut manifest) =
+        folder::read(folder).filter(|m| result.is_ok() || m.state != State::Done)
+    {
         match &result {
             Ok(_) => {
                 manifest.state = State::Done;
