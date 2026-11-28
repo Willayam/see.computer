@@ -1,5 +1,8 @@
 #import <AppKit/AppKit.h>
 
+const intptr_t SEE_PASTEBOARD_CHANGED = -1;
+static const intptr_t SEE_PASTEBOARD_WRITE_FAILED = -2;
+
 void *see_pasteboard_open(const char *name) {
     @autoreleasepool {
         NSPasteboard *board = name
@@ -50,13 +53,13 @@ intptr_t see_pasteboard_write(void *handle, intptr_t expected, const uint8_t *by
     @autoreleasepool {
         NSPasteboard *board = (__bridge NSPasteboard *)handle;
         NSString *text = [[NSString alloc] initWithBytes:bytes length:length encoding:NSUTF8StringEncoding];
-        if (!text) return -2;
-        if (board.changeCount != expected) return -1;
+        if (!text) return SEE_PASTEBOARD_WRITE_FAILED;
+        if (board.changeCount != expected) return SEE_PASTEBOARD_CHANGED;
         NSInteger owned = [board clearContents];
         if (![board setString:text forType:NSPasteboardTypeString]) {
             if (prior) see_pasteboard_restore(handle, owned, prior);
-            return -2;
+            return SEE_PASTEBOARD_WRITE_FAILED;
         }
-        return board.changeCount == owned ? owned : -1;
+        return board.changeCount == owned ? owned : SEE_PASTEBOARD_CHANGED;
     }
 }

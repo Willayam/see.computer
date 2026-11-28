@@ -64,7 +64,8 @@ pub(super) fn prepared_ready(dir: &Path) -> std::io::Result<bool> {
     if sizes.contains(&0) || sizes[2] != CATALOG[1].bytes || sizes[3] != CATALOG[2].bytes {
         return Ok(false);
     }
-    Ok(marker.is_empty()
+    let legacy_marker = marker.is_empty();
+    Ok(legacy_marker
         || marker
             .split_whitespace()
             .map(str::parse::<u64>)

@@ -27,7 +27,6 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
-      - run: TZ=Europe/Stockholm cargo test history::tests::repeated_hour_edits_the_selected_occurrence
       - name: Check recording, clipboard preservation and idle drawing
         working-directory: .
         run: |

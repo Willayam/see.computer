@@ -829,17 +829,28 @@ mod tests {
 
     #[test]
     fn repeated_hour_edits_the_selected_occurrence() {
+        if std::env::var("TZ").as_deref() != Ok("Europe/Stockholm") {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .env("TZ", "Europe/Stockholm")
+                .args([
+                    "--exact",
+                    "history::tests::repeated_hour_edits_the_selected_occurrence",
+                ])
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            assert!(
+                result.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
         let date = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
         let explicit = "## 02:15:00 +02:00\n\nsame\n\n## 02:15:00 +01:00\n\nsame\n\n";
-        let mut cases = vec![explicit.to_owned()];
-        if matches!(
-            Local.from_local_datetime(&date.and_hms_opt(2, 15, 0).unwrap()),
-            chrono::LocalResult::Ambiguous(_, _)
-        ) {
-            cases.push(explicit.replace(" +02:00", "").replace(" +01:00", ""));
-        }
-        for text in cases {
-            let entries = day_entries(date, &text);
+        let legacy = explicit.replace(" +02:00", "").replace(" +01:00", "");
+        for text in [explicit, &legacy] {
+            let entries = day_entries(date, text);
             assert_eq!(entries.len(), 2);
             assert_eq!(entries[1].start_ms - entries[0].start_ms, 3_600_000);
             let fix = Fix {
@@ -848,7 +859,7 @@ mod tests {
                 original: "same".into(),
                 edited: "second".into(),
             };
-            let after = replaced(&text, &fix).unwrap();
+            let after = replaced(text, &fix).unwrap();
             assert_eq!(
                 day_entries(date, &after)
                     .iter()

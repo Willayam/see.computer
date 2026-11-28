@@ -29,7 +29,7 @@ int main(void) {
         assert(snapshot);
         RejectText *failure = [RejectText new];
         failure.board = board;
-        assert(see_pasteboard_write((__bridge void *)failure, board.changeCount, (const uint8_t *)"yes", 3, snapshot) == -2);
+        assert(see_pasteboard_write((__bridge void *)failure, board.changeCount, (const uint8_t *)"yes", 3, snapshot) == SEE_PASTEBOARD_WRITE_FAILED);
         assert(board.pasteboardItems.count == 2);
         assert([[board.pasteboardItems[0] dataForType:NSPasteboardTypeRTF] isEqual:format]);
         see_pasteboard_release(snapshot);
@@ -49,7 +49,7 @@ int main(void) {
         [board clearContents];
         [board setString:@"another copy" forType:NSPasteboardTypeString];
         assert(!see_pasteboard_restore(handle, owned, snapshot));
-        assert(see_pasteboard_write(handle, owned, (const uint8_t *)"words", 5, snapshot) == -1);
+        assert(see_pasteboard_write(handle, owned, (const uint8_t *)"words", 5, snapshot) == SEE_PASTEBOARD_CHANGED);
         assert([[board stringForType:NSPasteboardTypeString] isEqual:@"another copy"]);
         see_pasteboard_release(snapshot);
         [board clearContents];

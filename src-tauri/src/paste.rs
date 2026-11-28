@@ -9,6 +9,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 
 unsafe extern "C" {
+    static SEE_PASTEBOARD_CHANGED: isize;
     fn see_pasteboard_open(name: *const std::ffi::c_char) -> *mut c_void;
     fn see_pasteboard_release(value: *mut c_void);
     fn see_pasteboard_count(board: *mut c_void) -> isize;
@@ -171,7 +172,8 @@ fn paste_loop(
             .is_some_and(|target| target.focus.holds_instead_of_pasting())
             || std::env::var("SEE_COMPUTER_PASTE").is_ok_and(|value| value == "hold");
         let restore = trusted && !hold && job.clipboard == Clipboard::RestorePrior;
-        if unsafe { see_pasteboard_count(handle) } != expected {
+        let clipboard_changed = unsafe { see_pasteboard_count(handle) } != expected;
+        if clipboard_changed {
             (job.done)(Outcome(Ok(Landing::Held)));
             continue;
         }
@@ -197,7 +199,7 @@ fn paste_loop(
             .map_or(std::ptr::null_mut(), |p| p.0.as_ptr());
         let owned =
             unsafe { see_pasteboard_write(handle, expected, text.as_ptr(), text.len(), snapshot) };
-        if owned == -1 {
+        if owned == unsafe { SEE_PASTEBOARD_CHANGED } {
             (job.done)(Outcome(Ok(Landing::Held)));
             continue;
         }
