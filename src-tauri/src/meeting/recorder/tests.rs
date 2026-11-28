@@ -50,6 +50,10 @@ impl Drop for RunningTap {
 }
 
 impl System for Fake {
+    fn input_time(&self) -> StreamInstant {
+        StreamInstant::ZERO
+    }
+
     fn processes(&self) -> Result<Vec<AudioProcess>, String> {
         self.processes.lock().unwrap().clone()
     }
@@ -111,10 +115,12 @@ fn zoom() -> MeetingApp {
 
 fn speak(seconds: usize) {
     let sink = meeting_sink().lock().unwrap();
-    for _ in 0..seconds {
+    for second in 0..seconds {
         sink.as_ref()
             .expect("the recording is listening")
             .send(Block {
+                stream_id: 1,
+                captured_at: StreamInstant::from_secs_f64(second as f64),
                 samples: vec![0.25; 16_000],
                 rate: 16_000,
                 channels: 1,
@@ -291,8 +297,10 @@ fn system_audio_is_recorded_when_the_user_picks_it_and_says_so() {
 fn writes_stereo_blocks_as_mono_16k() {
     let wav = root().with_extension("wav");
     let (tx, rx) = std::sync::mpsc::channel();
-    for _ in 0..3 {
+    for part in 0..3 {
         tx.send(Block {
+            stream_id: 1,
+            captured_at: StreamInstant::from_secs_f64(f64::from(part) / 3.0),
             samples: vec![0.25; 48_000 * 2 / 3],
             rate: 48_000,
             channels: 2,
@@ -310,7 +318,7 @@ fn writes_stereo_blocks_as_mono_16k() {
         },
     )
     .unwrap();
-    write_mic(rx, writer).unwrap();
+    write_mic(rx, writer, StreamInstant::ZERO).unwrap();
     let mut reader = hound::WavReader::open(&wav).unwrap();
     let samples = reader
         .samples::<i16>()
@@ -319,4 +327,62 @@ fn writes_stereo_blocks_as_mono_16k() {
     assert!((samples.len() as isize - 16_000).abs() <= 1);
     assert_eq!(samples[8_000], 8192);
     std::fs::remove_file(wav).unwrap();
+}
+
+#[test]
+fn the_microphone_keeps_its_place_after_late_start_and_device_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join(YOU);
+    let (tx, rx) = mpsc::channel();
+    let writer = hound::WavWriter::create(
+        &path,
+        hound::WavSpec {
+            channels: 1,
+            sample_rate: RATE,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        },
+    )
+    .unwrap();
+    let send = |stream_id, at, rate, level| {
+        tx.send(Block {
+            stream_id,
+            captured_at: StreamInstant::from_secs_f64(at),
+            samples: vec![level; rate as usize / 2],
+            rate,
+            channels: 1,
+        })
+        .unwrap()
+    };
+    send(1, 0.0, 48_000, -0.5); // entirely before recording
+    send(1, 2.0, 48_000, 0.25);
+    send(1, 2.501, 48_000, 0.25); // clock jitter inside one run
+    send(2, 93.0, 48_000, 0.5); // replacement at the same sample rate
+    send(1, 93.3, 48_000, -0.5); // late callback from the retired device
+    send(3, 93.4, 16_000, -0.25); // replacement whose first buffer overlaps by 100 ms
+    send(3, 94.5, 16_000, -0.25); // missing buffers on the same device
+    drop(tx);
+    write_mic(rx, writer, StreamInstant::from_secs_f64(1.0)).unwrap();
+    let samples: Vec<i16> = hound::WavReader::open(path)
+        .unwrap()
+        .samples()
+        .map(Result::unwrap)
+        .collect();
+    let mut start = 0;
+    for (end, level) in [
+        (16_000, 0),
+        (32_000, 8192),
+        (92 * 16_000, 0),
+        (92 * 16_000 + 8_000, 16384),
+        (92 * 16_000 + 14_400, -8192),
+        (93 * 16_000 + 8_000, 0),
+        (94 * 16_000, -8192),
+    ] {
+        assert!(
+            samples[start..end].iter().all(|&sample| sample == level),
+            "samples {start}..{end}"
+        );
+        start = end;
+    }
+    assert_eq!(samples.len(), start);
 }

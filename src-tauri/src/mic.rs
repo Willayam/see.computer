@@ -99,6 +99,7 @@ enum Inner {
 }
 
 struct Shared {
+    stream_id: u64,
     armed: AtomicBool,
     last_callback_ms: AtomicU64,
     /// Loudest armed sample as f32 bits, which order like the floats they encode.
@@ -252,6 +253,7 @@ impl Mic {
 }
 
 fn open_live() -> Result<(Inner, StreamingResampler), MicError> {
+    static NEXT_STREAM: AtomicU64 = AtomicU64::new(1);
     let host = cpal::default_host();
     let device = host.default_input_device().ok_or(MicError::NoInputDevice)?;
     let config = device
@@ -260,6 +262,7 @@ fn open_live() -> Result<(Inner, StreamingResampler), MicError> {
     let device_rate = config.sample_rate();
     let channels = config.channels();
     let shared = Arc::new(Shared {
+        stream_id: NEXT_STREAM.fetch_add(1, Ordering::Relaxed),
         armed: AtomicBool::new(false),
         peak_bits: AtomicU32::new(0),
         last_callback_ms: AtomicU64::new(monotonic_millis()),
@@ -273,7 +276,7 @@ fn open_live() -> Result<(Inner, StreamingResampler), MicError> {
             let state = Arc::clone(&shared);
             device.build_input_stream(
                 stream_config,
-                move |data: &[f32], _| append_input(&state, data, device_rate, channels),
+                move |data: &[f32], info| append_input(&state, info, data, device_rate, channels),
                 err,
                 None,
             )
@@ -282,12 +285,12 @@ fn open_live() -> Result<(Inner, StreamingResampler), MicError> {
             let state = Arc::clone(&shared);
             device.build_input_stream(
                 stream_config,
-                move |data: &[i16], _| {
+                move |data: &[i16], info| {
                     let samples: Vec<f32> = data
                         .iter()
                         .map(|sample| *sample as f32 / i16::MAX as f32)
                         .collect();
-                    append_input(&state, &samples, device_rate, channels);
+                    append_input(&state, info, &samples, device_rate, channels);
                 },
                 err,
                 None,
@@ -297,12 +300,12 @@ fn open_live() -> Result<(Inner, StreamingResampler), MicError> {
             let state = Arc::clone(&shared);
             device.build_input_stream(
                 stream_config,
-                move |data: &[u16], _| {
+                move |data: &[u16], info| {
                     let samples: Vec<f32> = data
                         .iter()
                         .map(|sample| (*sample as f32 - 32_768.0) / 32_768.0)
                         .collect();
-                    append_input(&state, &samples, device_rate, channels);
+                    append_input(&state, info, &samples, device_rate, channels);
                 },
                 err,
                 None,
@@ -418,7 +421,13 @@ impl StreamingResampler {
     }
 }
 
-fn append_input(shared: &Shared, data: &[f32], rate: u32, channels: u16) {
+fn append_input(
+    shared: &Shared,
+    info: &cpal::InputCallbackInfo,
+    data: &[f32],
+    rate: u32,
+    channels: u16,
+) {
     shared
         .last_callback_ms
         .store(monotonic_millis(), Ordering::Relaxed);
@@ -444,6 +453,8 @@ fn append_input(shared: &Shared, data: &[f32], rate: u32, channels: u16) {
     if let Ok(sink) = meeting_sink().try_lock() {
         if let Some(tx) = sink.as_ref() {
             let _ = tx.send(Block {
+                stream_id: shared.stream_id,
+                captured_at: info.timestamp().capture,
                 samples: data.to_vec(),
                 rate,
                 channels,
@@ -453,6 +464,8 @@ fn append_input(shared: &Shared, data: &[f32], rate: u32, channels: u16) {
 }
 
 pub struct Block {
+    pub stream_id: u64,
+    pub captured_at: cpal::StreamInstant,
     pub samples: Vec<f32>,
     pub rate: u32,
     pub channels: u16,

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, PoisonError};
 use std::thread::JoinHandle;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::engine::Engine;
 use crate::meeting::folder::{
@@ -11,14 +11,16 @@ use crate::meeting::folder::{
 };
 use crate::meeting::holders::{self, AudioProcess};
 use crate::meeting::{processes_of, MeetingApp};
-use crate::mic::{meeting_sink, Block, StreamingResampler};
+use crate::mic::{meeting_sink, Block, StreamingResampler, RATE};
 use crate::qos::{self, Class};
+use cpal::StreamInstant;
 
 use super::live::{self, Live};
 use super::tap::{self, TapError, Target};
 
 /// The parts of the Mac a recording reaches for, so a test can stand in for them.
 pub trait System: Send + Sync {
+    fn input_time(&self) -> StreamInstant;
     fn processes(&self) -> Result<Vec<AudioProcess>, String>;
     /// Dropping the tap stops it and finishes the WAV. The number is the
     /// wall-clock time of the WAV's first sample, in milliseconds since 1970.
@@ -30,6 +32,16 @@ pub trait System: Send + Sync {
 pub struct Mac;
 
 impl System for Mac {
+    fn input_time(&self) -> StreamInstant {
+        // CPAL's CoreAudio capture timestamps use the Mac's host clock across device changes.
+        #[link(name = "CoreAudio", kind = "framework")]
+        extern "C" {
+            fn AudioGetCurrentHostTime() -> u64;
+            fn AudioConvertHostTimeToNanos(time: u64) -> u64;
+        }
+        StreamInstant::from_nanos(unsafe { AudioConvertHostTimeToNanos(AudioGetCurrentHostTime()) })
+    }
+
     fn processes(&self) -> Result<Vec<AudioProcess>, String> {
         holders::processes().map_err(|error| error.to_string())
     }
@@ -111,15 +123,17 @@ pub fn start(
         io::Error::other(error)
     })?;
     let (tx, rx) = std::sync::mpsc::channel();
+    let opened_ms = now_ms();
+    let opened = system.input_time();
     let mic = qos::spawn("see-meeting-mic", Class::Upkeep, move || {
-        write_mic(rx, writer)
+        write_mic(rx, writer, opened)
     });
     *meeting_sink()
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = Some(tx);
     let tracks = Tracks {
         you: Microphone {
-            offset_ms: now_ms().saturating_sub(started_ms).max(0) as u64,
+            offset_ms: opened_ms.saturating_sub(started_ms).max(0) as u64,
         },
         them: None,
     };
@@ -230,37 +244,60 @@ impl Recording {
     }
 }
 
-fn write_mic(
-    blocks: Receiver<Block>,
-    mut writer: hound::WavWriter<io::BufWriter<std::fs::File>>,
-) -> io::Result<()> {
-    let mut resampler: Option<StreamingResampler> = None;
-    let mut rate = 0;
-    let mut write = |samples: Vec<f32>| -> io::Result<()> {
-        for sample in samples {
-            writer
-                .write_sample((sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16)
-                .map_err(io::Error::other)?;
-        }
-        Ok(())
-    };
+type MicWav = hound::WavWriter<io::BufWriter<std::fs::File>>;
+
+fn write_samples(writer: &mut MicWav, samples: Vec<f32>) -> io::Result<()> {
+    for sample in samples {
+        writer
+            .write_sample((sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16)
+            .map_err(io::Error::other)?;
+    }
+    Ok(())
+}
+
+fn write_mic(blocks: Receiver<Block>, mut writer: MicWav, opened: StreamInstant) -> io::Result<()> {
+    let mut source = (0, 0);
+    let mut next_capture = opened;
+    let mut resampler = StreamingResampler::new(RATE, RATE);
     for block in blocks {
-        if block.rate == 0 || block.channels == 0 {
+        if block.rate == 0 || block.channels == 0 || block.stream_id < source.0 {
             continue;
         }
-        if rate != block.rate {
-            if let Some(previous) = resampler.as_mut() {
-                write(previous.push(&[], true))?;
+        let frames = block.samples.len() / usize::from(block.channels);
+        let duration = Duration::from_secs_f64(frames as f64 / f64::from(block.rate));
+        let missing_buffer =
+            block.captured_at.saturating_duration_since(next_capture) > duration / 2;
+        let mut trim = 0;
+        if source != (block.stream_id, block.rate) || missing_buffer {
+            write_samples(&mut writer, resampler.push(&[], true))?;
+            let elapsed = block.captured_at.saturating_duration_since(opened);
+            let at = (elapsed.as_secs_f64() * f64::from(RATE)).round() as u64;
+            if at > u64::from(u32::MAX - 44) / 2 {
+                return Err(io::Error::other(
+                    "the microphone track exceeds the WAV size limit",
+                ));
             }
-            resampler = Some(StreamingResampler::new(block.rate, 16_000));
-            rate = block.rate;
+            let end =
+                opened + Duration::from_secs_f64(f64::from(writer.duration()) / f64::from(RATE));
+            let overlap = end.saturating_duration_since(block.captured_at);
+            trim = (overlap.as_secs_f64() * f64::from(block.rate)).round() as usize;
+            if trim >= frames {
+                continue;
+            }
+            for _ in u64::from(writer.duration())..at {
+                writer.write_sample(0_i16).map_err(io::Error::other)?;
+            }
+            resampler = StreamingResampler::new(block.rate, RATE);
+            source = (block.stream_id, block.rate);
         }
-        let mono = crate::mic::downmix(&block.samples, block.channels);
-        write(resampler.as_mut().unwrap().push(&mono, false))?;
+        next_capture = block.captured_at + duration;
+        let mono = crate::mic::downmix(
+            &block.samples[trim * usize::from(block.channels)..],
+            block.channels,
+        );
+        write_samples(&mut writer, resampler.push(&mono, false))?;
     }
-    if let Some(resampler) = resampler.as_mut() {
-        write(resampler.push(&[], true))?;
-    }
+    write_samples(&mut writer, resampler.push(&[], true))?;
     writer.finalize().map_err(io::Error::other)
 }
 
