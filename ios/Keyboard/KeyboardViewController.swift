@@ -157,7 +157,8 @@ final class KeyboardViewController: UIInputViewController {
             ])
         // A take goes on while the user looks elsewhere. The Dynamic Island shows it
         // and can finish it. Sending the words is the one way of leaving that ends it.
-        if !endTakeIfFieldWasSent(), state.phase == .recording, !takeWasSent {
+        // A controller iOS has already replaced has no field left to speak for.
+        if Self.shown === self, !endTakeIfFieldWasSent(), state.phase == .recording, !takeWasSent {
             Diagnostics.log("away_sent")
             Signals.post(.away)
         }
@@ -169,8 +170,31 @@ final class KeyboardViewController: UIInputViewController {
         meter.stop()
     }
 
+    /// The controller iOS is showing. iOS can build a new one and show it without telling
+    /// the one before, which would go on running its timers and typing into a field it
+    /// no longer has. Those edits reach no host.
+    private static weak var shown: KeyboardViewController?
+
+    private func standDown() {
+        isActive = false
+        // Only iOS showing this controller again brings it back, not its next layout pass.
+        hasLeft = true
+        markedDraft = nil
+        placing = nil
+        placingDeadline?.cancel()
+        heartbeat?.invalidate()
+        heartbeat = nil
+        deleteUp()
+        meter.stop()
+    }
+
     private func activate() {
         guard !isActive else { return }
+        if let earlier = Self.shown, earlier !== self {
+            Diagnostics.log("keyboard_replaced")
+            earlier.standDown()
+        }
+        Self.shown = self
         isActive = true
         offerSetAside = false
         strandedMarkCommitted = nil
