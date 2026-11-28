@@ -78,6 +78,7 @@ final class Session: ObservableObject {
             ?? .oneHour
         var restored = SessionState()
         restored.take = Bridge.read(SessionState.self, "state.json")?.take
+        restored.model = stage.model
         state = restored
         publish()
         guard !benching else { return }
@@ -236,6 +237,11 @@ final class Session: ObservableObject {
             }
             let handoff = Bridge.read(Handoff.self, "handoff.json")
             if wasInFront, let start = handoff?.start {
+                // A model still loading leaves the handoff for the keyboard, which starts once it is ready.
+                guard case .ready = stage else {
+                    Diagnostics.log("handoff_waits_for_model", ["stage": stage])
+                    return
+                }
                 Diagnostics.log("handoff_in_front")
                 Bridge.remove("handoff.json")
                 startTake(start)
@@ -270,9 +276,18 @@ final class Session: ObservableObject {
             return
         }
         guard Date().timeIntervalSince(start.asked) < Bridge.handoffWindow else { return }
-        if case .failed(let message) = stage {
+        switch stage {
+        case .ready:
+            break
+        case .failed(let message):
             Diagnostics.log("start_refused", ["error": message])
             state.problem = message
+            publish()
+            return
+        case .waiting, .loading, .downloading:
+            // The worker reads no audio until the model has loaded. A take begun now would
+            // record unheard and finish long after the user tapped Done.
+            Diagnostics.log("start_refused", ["stage": stage])
             publish()
             return
         }
@@ -492,6 +507,10 @@ final class Session: ObservableObject {
         default: Diagnostics.log("engine_stage", ["stage": newStage])
         }
         stage = newStage
+        if state.model != newStage.model {
+            state.model = newStage.model
+            publish()
+        }
         guard case .failed(let message) = newStage else { return }
         Diagnostics.log("engine_failed", ["error": message, "phase": state.phase.rawValue])
         switch state.phase {
@@ -513,5 +532,16 @@ final class Session: ObservableObject {
         Bridge.write(state, "state.json")
         Signals.post(.changed)
         Island.show(state)
+    }
+}
+
+private extension Engine.Stage {
+    var model: SessionState.Model {
+        switch self {
+        case .waiting, .loading: return .loading
+        case .downloading: return .downloading
+        case .ready: return .ready
+        case .failed: return .failed
+        }
     }
 }

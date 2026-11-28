@@ -85,6 +85,11 @@ enum DraftChecks {
             {"since":0,"field":"\(field)","previewStillInField":true}
             """.utf8))
         precondition(oldState.take?.text == "old" && oldState.take?.start == nil)
+        precondition(oldState.model == nil, "A file from an older app says nothing about the model")
+        var loading = SessionState(phase: .armed)
+        loading.model = .loading
+        let savedLoading = try decoder.decode(SessionState.self, from: encoder.encode(loading))
+        precondition(savedLoading.model == .loading)
         precondition(oldHandoff.start == nil)
         precondition(oldDraft.placement(at: target("hello old"), ownsMark: true) == nil)
         precondition(oldEdit.startID == nil && oldEdit.target == nil)

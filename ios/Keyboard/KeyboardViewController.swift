@@ -14,6 +14,15 @@ final class KeyboardViewController: UIInputViewController {
     private var hasLeft = false
     /// A message of the keyboard's own, which the heartbeat must not repaint over.
     private var note: String?
+    /// The user asked for a take while the speech model could not hear one.
+    private var askedBeforeModel = false
+    private var modelNote: String? {
+        switch state.model {
+        case .loading: return "The speech model is still loading"
+        case .downloading: return "Finish the download in see.computer"
+        case .ready, .failed, nil: return nil
+        }
+    }
 
     private let bar = StartBar()
     private let completions = CompletionStrip()
@@ -270,6 +279,7 @@ final class KeyboardViewController: UIInputViewController {
                   let field = $0.start?.target.field else { return false }
             return field == SeeDocumentIdentifier(textDocumentProxy)
         } ?? false
+        if fieldHasSettled { startAfterReturningFromTheApp() }
         settleField()
         showWords()
         render()
@@ -461,6 +471,12 @@ final class KeyboardViewController: UIInputViewController {
             guard let self, alive, self.isActive, self.state.phase == .armed,
                 Bridge.read(Handoff.self, "handoff.json")?.start?.id == start.id,
                 start.target.matches(self.currentTarget) else { return }
+            // The next state the app publishes brings this back, within the handoff's 15 seconds.
+            guard self.modelNote == nil else {
+                self.askedBeforeModel = true
+                self.render()
+                return
+            }
             Bridge.remove("handoff.json")
             self.startTake(start)
         }
@@ -495,6 +511,7 @@ final class KeyboardViewController: UIInputViewController {
         pressedAt = Date()
         pressStartedTake = false
         note = nil
+        askedBeforeModel = false
         Diagnostics.log(
             "tap", ["phase": state.phase.rawValue, "pong_age_s": min(Date().timeIntervalSince(lastPong), 9999)])
         guard hasFullAccess else {
@@ -518,6 +535,12 @@ final class KeyboardViewController: UIInputViewController {
                 return
             }
             if self.state.phase == .armed {
+                guard self.modelNote == nil else {
+                    Diagnostics.log("tap_before_model", ["model": self.state.model?.rawValue ?? "none"])
+                    self.askedBeforeModel = true
+                    self.render()
+                    return
+                }
                 Diagnostics.log("start_sent", ["by": "tap"])
                 self.pressStartedTake = true
                 self.startTake(start)
@@ -752,7 +775,7 @@ final class KeyboardViewController: UIInputViewController {
     private func render() {
         let phase: SessionState.Phase = looksAlive || !fieldHasSettled ? state.phase : .off
         let talking = phase == .recording || phase == .transcribing
-        let message = hasFullAccess ? note ?? state.problem : "Allow Full Access"
+        let message = hasFullAccess ? (askedBeforeModel ? modelNote : nil) ?? note ?? state.problem : "Allow Full Access"
         bar.show(phase)
         let preview = !wordsInField && !liveWords.isEmpty
         let elapsed = max(0, Int(Date().timeIntervalSince(state.since ?? Date())))

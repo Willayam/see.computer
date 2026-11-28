@@ -7,12 +7,19 @@ struct SessionState: Codable, Equatable {
         case off, armed, recording, transcribing
     }
 
+    /// Whether the speech model can hear a take yet.
+    enum Model: String, Codable {
+        case loading, downloading, ready, failed
+    }
+
     var phase: Phase = .off
     var take: Take?
     var problem: String?
     /// When the take being recorded started, for the keyboard's clock.
     var since: Date?
     var start: DictationStart?
+    /// Missing from a file written before the app refused takes while the model loads.
+    var model: Model?
 }
 
 struct Take: Codable, Equatable {
