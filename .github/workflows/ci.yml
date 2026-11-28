@@ -79,11 +79,12 @@ jobs:
             -configuration Release CODE_SIGNING_ALLOWED=NO \
             -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/see-ios" \
             SWIFT_ACTIVE_COMPILATION_CONDITIONS=STORE GCC_PREPROCESSOR_DEFINITIONS=STORE=1 build
-      - name: Check draft ownership and bilingual typing
+      - name: Check draft ownership, audio order and bilingual typing
         working-directory: .
         run: |
           ios/scripts/test-draft.sh
           ios/scripts/test-history.sh
+          ios/scripts/test-engine.sh
           device=$(xcrun simctl list devices available --json | jq -er '[.devices[][] | select(.name | startswith("iPhone"))][0].udid')
           xcrun simctl bootstatus "$device" -b
           SWIPE_RUNTIME_ARTIFACTS="$RUNNER_TEMP/see-ios/SourcePackages/artifacts/swiperuntime" ios/scripts/test-typing.sh "$device"
