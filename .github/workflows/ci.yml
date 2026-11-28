@@ -47,6 +47,13 @@ jobs:
           swiftc -O scripts/test-pill.swift -o .audit/native-media-test/test-pill
           .audit/native-media-test/test-pill "$PWD/ui/pill.html"
           scripts/tests/library/run.sh
+      - name: Check the download link when the motion script is unavailable
+        working-directory: .
+        run: |
+          mkdir -p "$RUNNER_TEMP/download-fixture"
+          cp site/{index.html,family.css,style.css} "$RUNNER_TEMP/download-fixture"
+          swiftc -O scripts/test-download.swift -o "$RUNNER_TEMP/test-download"
+          "$RUNNER_TEMP/test-download" "$RUNNER_TEMP/download-fixture"
 
   ios-core:
     name: iPhone engine builds from the shared sources
