@@ -681,7 +681,7 @@ fn finalized_manifest_uses_remote_media_and_keeps_local_originals() {
     std::fs::write(dir.join("transcript.json"), source).unwrap();
     std::fs::write(
         dir.join("take.md"),
-        "[Clip](clips/001/clip.mov) [Shot](shots/001.png)",
+        "**0:00–0:01** Keep clips/001/clip.mov and [the example](shots/001.png).\n\n[Clip](clips/001/clip.mov) [Shot](shots/001.png)",
     )
     .unwrap();
     service.finalize(&dir);
@@ -692,7 +692,7 @@ fn finalized_manifest_uses_remote_media_and_keeps_local_originals() {
     };
     assert_eq!(
         String::from_utf8(markdown).unwrap(),
-        "[Clip](live/clip.segments/index.m3u8) [Shot](shots/001.jpg)"
+        "**0:00–0:01** Keep clips/001/clip.mov and [the example](shots/001.png).\n\n[Clip](live/clip.segments/index.m3u8) [Shot](shots/001.jpg)"
     );
     let remote: serde_json::Value = serde_json::from_slice(&transcript).unwrap();
     assert_eq!(
@@ -704,8 +704,10 @@ fn finalized_manifest_uses_remote_media_and_keeps_local_originals() {
         std::fs::read_to_string(dir.join("transcript.json")).unwrap(),
         source
     );
-    let local = format!("Capture: {}", dir.join("take.md").display());
-    let link = format!("Capture: {HOST}/s/{}/", job(&service).id);
+    let path = dir.join("take.md");
+    let narration = format!("Keep {} with the take.", path.display());
+    let local = format!("{narration}\n\nCapture: {}", path.display());
+    let link = format!("{narration}\n\nCapture: {HOST}/s/{}/", job(&service).id);
     // Still uploading: the paste is the link alone, without the local path.
     assert_eq!(paste_link(&dir.join("take.md"), local.clone()), link);
     service

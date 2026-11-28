@@ -1038,8 +1038,9 @@ fn documents(dir: &Path) -> Result<Documents, UploadError> {
     };
     let mut transcript: serde_json::Value =
         serde_json::from_slice(&read_bounded(&dir.join("transcript.json")).map_err(gone)?)?;
-    let mut markdown = String::from_utf8(read_bounded(&dir.join("take.md")).map_err(gone)?)
+    let markdown = String::from_utf8(read_bounded(&dir.join("take.md")).map_err(gone)?)
         .map_err(io::Error::other)?;
+    let mut links = BTreeMap::new();
     let mut captured = None;
     if let Some(captures) = transcript
         .get_mut("captures")
@@ -1053,7 +1054,7 @@ fn documents(dir: &Path) -> Result<Documents, UploadError> {
                 .map(str::to_owned)
             {
                 if let Some(video) = capture.get("video").and_then(serde_json::Value::as_str) {
-                    markdown = markdown.replace(video, &playlist);
+                    links.insert(video.to_owned(), playlist.clone());
                 }
                 capture["video"] = playlist.into();
             }
@@ -1064,7 +1065,7 @@ fn documents(dir: &Path) -> Result<Documents, UploadError> {
             {
                 if let Some(base) = file.strip_suffix(".png") {
                     let jpeg = format!("{base}.jpg");
-                    markdown = markdown.replace(&file, &jpeg);
+                    links.insert(file, jpeg.clone());
                     capture["file"] = jpeg.into();
                 }
             }
@@ -1087,11 +1088,38 @@ fn documents(dir: &Path) -> Result<Documents, UploadError> {
     }
     Ok(Documents {
         assets: [
-            bytes_asset("take.md", markdown.into_bytes()),
+            bytes_asset("take.md", capture_links(markdown, &links).into_bytes()),
             bytes_asset("transcript.json", serde_json::to_vec(&transcript)?),
         ],
         captured,
     })
+}
+
+fn capture_links(markdown: String, links: &BTreeMap<String, String>) -> String {
+    if links.is_empty() {
+        return markdown;
+    }
+    let mut remote = String::with_capacity(markdown.len());
+    for line in markdown.split_inclusive('\n') {
+        // The packager puts each spoken segment on a line with a bold timestamp.
+        if line.starts_with("**") {
+            remote.push_str(line);
+            continue;
+        }
+        let mut parts = line.split("](");
+        remote.push_str(parts.next().unwrap_or_default());
+        for part in parts {
+            remote.push_str("](");
+            if let Some((path, tail)) = part.split_once(')') {
+                remote.push_str(links.get(path).map(String::as_str).unwrap_or(path));
+                remote.push(')');
+                remote.push_str(tail);
+            } else {
+                remote.push_str(part);
+            }
+        }
+    }
+    remote
 }
 
 /// The share URL in the text of a `share.json`, when a paste may use it: the
@@ -1106,16 +1134,17 @@ pub(crate) fn eligible_url(text: &str) -> Option<String> {
 
 /// The paste is either the link or the local path, never both. The local
 /// path returns when sharing fails or a link is revoked.
-pub fn paste_link(markdown: &Path, local_paste: String) -> String {
+pub fn paste_link(markdown: &Path, mut local_paste: String) -> String {
     let link = markdown
         .parent()
         .and_then(|dir| std::fs::read_to_string(dir.join("share.json")).ok())
         .and_then(|text| eligible_url(&text));
-    match link {
-        // A queued upload finishes within seconds, so the paste is the link alone.
-        Some(url) => local_paste.replace(&markdown.to_string_lossy().to_string(), &url),
-        None => local_paste,
+    if let Some(url) = link {
+        if let Some(prefix) = local_paste.strip_suffix(markdown.to_string_lossy().as_ref()) {
+            local_paste.replace_range(prefix.len().., &url);
+        }
     }
+    local_paste
 }
 
 fn collect_files(
