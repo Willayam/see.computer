@@ -916,24 +916,11 @@ fn changes(history_root: &Path, documents: &Path, known: &BTreeMap<String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_dir() -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "see-library-test-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        path
-    }
 
     #[test]
     fn dictation_day_has_first_epoch_and_paste() {
-        let root = temp_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         let path = root.join("2026-10-07.md");
         std::fs::write(&path, "## 09:00:00\n\nFirst.\n\n## 10:00:00\n\nSecond.\n\n").unwrap();
         let item = day(&path).unwrap();
@@ -945,37 +932,36 @@ mod tests {
             local_ms("2026-10-07", "10:00:00").unwrap()
         );
         assert_eq!(item.paste, "First.\n\nSecond.");
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn conflict_copy_has_its_own_library_item() {
-        let root = temp_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         let path = root.join("2026-10-13 2.md");
         std::fs::write(&path, "## 10:00:00\n\nSecond\n\n").unwrap();
         let item = day(&path).unwrap();
         assert_eq!(item.id, "dictation:2026-10-13 2");
         assert_eq!(item.lines[0].text, "Second");
         assert_eq!(item.files.markdown.as_deref(), Some(path.to_str().unwrap()));
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn refresh_transfers_only_changed_days_and_drops_deleted_ids() {
-        let root = temp_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         let doc = root.join("documents");
         let day = root.join("2026-10-25.md");
         std::fs::write(&day, "## 02:15:00 +02:00\n\nfirst\n\n").unwrap();
-        let first = changes(&root, &doc, &BTreeMap::new());
+        let first = changes(root, &doc, &BTreeMap::new());
         assert_eq!(first.changed[0].paste, "first");
-        assert!(changes(&root, &doc, &first.versions).changed.is_empty());
+        assert!(changes(root, &doc, &first.versions).changed.is_empty());
         std::fs::write(&day, "## 02:15:00 +01:00\n\nsecond\n\n").unwrap();
-        let next = changes(&root, &doc, &first.versions);
+        let next = changes(root, &doc, &first.versions);
         assert_eq!(next.changed[0].paste, "second");
         std::fs::remove_file(&day).unwrap();
-        let removed = changes(&root, &doc, &next.versions);
+        let removed = changes(root, &doc, &next.versions);
         assert!(removed.versions.is_empty() && removed.changed.is_empty());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1005,7 +991,8 @@ mod tests {
 
     #[test]
     fn take_uses_real_capture_schema_and_sorts() {
-        let root = temp_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         let history = root.join("history");
         let documents = root.join("documents");
         std::fs::create_dir_all(&history).unwrap();
@@ -1037,7 +1024,6 @@ mod tests {
             found[0].media[1].poster.as_deref(),
             Some(path.join("clips/001/frames/0004500.jpg").to_str().unwrap())
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

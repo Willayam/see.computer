@@ -440,15 +440,9 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    fn temp_dir() -> PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("see-recorder-test-{unique}"));
-        std::fs::create_dir_all(&path).unwrap();
-        path
-    }
+    const TEST_TIMEOUT: Duration = STOP_TIMEOUT
+        .saturating_add(SIGNAL_DELAY)
+        .saturating_add(Duration::from_secs(2));
 
     fn fake_program(dir: &Path) -> PathBuf {
         let path = dir.join("recorder.sh");
@@ -464,7 +458,7 @@ mod tests {
     }
 
     fn wait_for(path: &Path) {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + TEST_TIMEOUT;
         while !path.exists() {
             assert!(Instant::now() < deadline, "fixture did not become ready");
             std::thread::sleep(Duration::from_millis(10));
@@ -481,47 +475,45 @@ mod tests {
 
     #[test]
     fn movie_names_avoid_movie_take_and_segment_collisions() {
-        let dir = temp_dir();
-        let first = unique_movie_path(&dir);
+        let dir = tempfile::tempdir().unwrap();
+        let first = unique_movie_path(dir.path());
         std::fs::create_dir_all(segment_dir(&first)).unwrap();
-        let second = unique_movie_path(&dir);
+        let second = unique_movie_path(dir.path());
         assert_ne!(first, second);
 
         std::fs::write(&second, b"occupied").unwrap();
-        let third = unique_movie_path(&dir);
+        let third = unique_movie_path(dir.path());
         assert_ne!(second, third);
         assert_ne!(first, third);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn fake_backend_still_finishes_through_the_public_callback() {
-        let dir = temp_dir();
-        let recorder = Recorder::with_program(fake_program(&dir), dir.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = Recorder::with_program(fake_program(dir.path()), dir.path().to_owned());
         let active = recorder.start().unwrap();
         let path = active.path().to_path_buf();
         wait_for(&path.with_extension("mov.ready"));
         let (reply, finished) = std::sync::mpsc::channel();
         active.stop(move |result| reply.send(result).unwrap());
-        assert!(finished
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap()
+        finished
+            .recv_timeout(TEST_TIMEOUT)
+            .expect("the stop worker calls back after the recorder exits")
             .0
-            .is_ok());
+            .expect("the recorder publishes the movie");
         assert_eq!(std::fs::read(&path).unwrap(), b"recording");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn fake_backend_abort_removes_movie_and_segments() {
-        let dir = temp_dir();
-        let recorder = Recorder::with_program(fake_program(&dir), dir.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = Recorder::with_program(fake_program(dir.path()), dir.path().to_owned());
         let active = recorder.start().unwrap();
         let path = active.path().to_path_buf();
         wait_for(&path.with_extension("mov.ready"));
         std::fs::create_dir_all(segment_dir(&path)).unwrap();
         active.abort();
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + TEST_TIMEOUT;
         while path.exists() || segment_dir(&path).exists() {
             assert!(
                 Instant::now() < deadline,
@@ -529,6 +521,5 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        let _ = std::fs::remove_dir_all(dir);
     }
 }
