@@ -35,6 +35,7 @@ enum DraftChecks {
         try savedShapes()
         transcripts()
         try partialDraftsKeepTheWholeTake()
+        manualEditsKeepWholeWords()
         hostsThatReportOnlyTheEnd()
         refusals()
         try everyWaitingTakeIsKept()
@@ -182,17 +183,17 @@ enum DraftChecks {
         }
         precondition(draft.confirmedWords(at: target(complete), before: complete) == words)
         let edit = ManualEdit(startID: start.id, target: target(complete + " Typed."), kept: words)
-        precondition(edit.remainingWords(in: take, before: complete + " Typed.") == "Bring the tickets.")
-        precondition(edit.remainingWords(in: take, before: prefix + " Book the afternoon Typed.") == nil)
-        precondition(edit.remainingWords(in: take, before: "Different prefix. " + words + " Typed.") == nil)
-        precondition(edit.remainingWords(in: take, before: nil) == nil)
+        precondition(edit.remainingWords(in: take, before: complete + " Typed.", after: nil) == "Bring the tickets.")
+        precondition(edit.remainingWords(in: take, before: prefix + " Book the afternoon Typed.", after: nil) == nil)
+        precondition(edit.remainingWords(in: take, before: "Different prefix. " + words + " Typed.", after: nil) == nil)
+        precondition(edit.remainingWords(in: take, before: nil, after: nil) == nil)
         let repeatedStart = tap(at: target("Thanks. Thanks."))
         let repeated = Take(id: 8, text: "Thanks. Goodbye.", finished: Date(), start: repeatedStart)
         let repeatEdit = ManualEdit(startID: repeatedStart.id, target: target("Thanks. Thanks. Thanks."), kept: "Thanks.")
-        precondition(repeatEdit.remainingWords(in: repeated, before: "Thanks. Thanks.") == nil)
-        precondition(repeatEdit.remainingWords(in: repeated, before: "Thanks. Thanks. Thanks.") == "Goodbye.")
+        precondition(repeatEdit.remainingWords(in: repeated, before: "Thanks. Thanks.", after: nil) == nil)
+        precondition(repeatEdit.remainingWords(in: repeated, before: "Thanks. Thanks. Thanks.", after: nil) == "Goodbye.")
         let refused = ManualEdit(startID: start.id, target: target(prefix), kept: "")
-        precondition(refused.remainingWords(in: take, before: prefix) == take.text)
+        precondition(refused.remainingWords(in: take, before: prefix, after: nil) == take.text)
         var waiting = Ledger()
         waiting.update(start.id) { $0.draft = draft }
         precondition(waiting.offer(for: take, in: other)?.action == .copy)
@@ -202,6 +203,32 @@ enum DraftChecks {
         sent.sent = true
         precondition(waiting.offer(for: sent, in: field)?.words == take.text)
         precondition(waiting.offer(for: sent, in: field)?.action == .copy)
+    }
+
+    static func manualEditsKeepWholeWords() {
+        func remaining(_ kept: String, prefix: String = "Agenda.", before: String, after: String?) -> String? {
+            let start = tap(at: target(prefix, after: nil))
+            let take = Take(id: 9, text: kept + " Bring the tickets.", finished: Date(), start: start)
+            let edit = ManualEdit(startID: start.id, target: target(before, after: after), kept: kept)
+            return edit.remainingWords(in: take, before: before, after: after)
+        }
+        for (kept, suffix) in [("Book the afternoon", "s"), ("tåg", "et"), ("today", "’s"),
+                               ("it", "'s"), ("train", "-yard"), ("name", "_2"), ("42", ".5"),
+                               ("B", "2"), ("Malmo", "\u{308}"), ("👩", "\u{200D}💻")] {
+            for index in suffix.indices + [suffix.endIndex] {
+                let before = "Agenda. " + kept + suffix[..<index]
+                precondition(remaining(kept, before: before, after: String(suffix[index...])) == nil)
+            }
+        }
+        let kept = "Book the afternoon", rest = "Bring the tickets."
+        let field = "Agenda. " + kept
+        for separator in ["", ".", ", typed", " typed", "\u{a0}typed", "!” typed"] {
+            precondition(remaining(kept, before: field + separator, after: nil) == rest)
+            precondition(remaining(kept, before: field, after: separator) == rest)
+        }
+        precondition(remaining(kept, before: "Agenda." + kept, after: nil) == nil)
+        precondition(remaining(kept, prefix: "Agenda. ", before: field, after: nil) == rest)
+        precondition(remaining("Malmö", prefix: "“", before: "“Malmo\u{308}", after: nil) == rest)
     }
 
     /// A host reports the last sentence or two before the caret, never the whole field.

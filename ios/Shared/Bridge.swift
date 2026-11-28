@@ -245,19 +245,32 @@ struct ManualEdit: Codable, Equatable {
         return target
     }
 
-    func remainingWords(in take: Take, before context: String?) -> String? {
+    func remainingWords(in take: Take, before context: String?, after rightContext: String?) -> String? {
         guard let start = take.start, startID == start.id, let kept else { return nil }
         if kept.isEmpty { return take.text }
         guard let context else { return nil }
         var search = context.startIndex..<context.endIndex
         while let match = context.range(of: kept, range: search) {
             let through = String(context[..<match.upperBound])
-            if start.target.showsInsertion(kept, before: through) || start.target.showsInsertion(" " + kept, before: through) {
+            let preceding = String(context[..<match.lowerBound])
+            let anchored = start.target.showsInsertion(" " + kept, before: through) ||
+                (Spacing.prefix(before: preceding).isEmpty && start.target.showsInsertion(kept, before: through))
+            if anchored {
+                let following = String(context[match.upperBound...]) + (rightContext ?? "")
+                let afterPunctuation = following.drop(while: { ".,!?;:)]}…»”".contains($0) })
+                guard afterPunctuation.isEmpty || afterPunctuation.first?.isWhitespace == true else { return nil }
                 return Transcript.rest(of: take.text, after: kept)
             }
             search = context.index(after: match.lowerBound)..<context.endIndex
         }
         return nil
+    }
+}
+
+enum Spacing {
+    static func prefix(before: String?) -> String {
+        guard let last = before?.last else { return "" }
+        return last.isWhitespace || "([{\"'/-\u{201C}\u{2018}".contains(last) ? "" : " "
     }
 }
 

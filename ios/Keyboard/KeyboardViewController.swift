@@ -723,7 +723,7 @@ final class KeyboardViewController: UIInputViewController {
             let edit = entry?.edit
             let rest: String
             if let edit {
-                guard let confirmed = edit.remainingWords(in: take, before: before)
+                guard let confirmed = edit.remainingWords(in: take, before: before, after: proxy.documentContextAfterInput)
                 else { return settle(start.id, as: .unconfirmed, in: &ledger) }
                 rest = confirmed
             } else {
@@ -1347,13 +1347,5 @@ final class KeyboardViewController: UIInputViewController {
             keys.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -11.0 / 3),
             keys.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
-    }
-}
-
-/// What goes between the text already in the field and the new take.
-enum Spacing {
-    static func prefix(before: String?) -> String {
-        guard let last = before?.last else { return "" }
-        return last.isWhitespace || "([{\"'/-\u{201C}\u{2018}".contains(last) ? "" : " "
     }
 }

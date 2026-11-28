@@ -26,9 +26,9 @@ To use your Mac dictionary, tap **Use the dictionary from your Mac** in the app 
 
 ## Using it
 
-Tap **Dictate** above the letters, talk, then tap **Done**. You can also hold Dictate and release it to finish. If you edit the field mid-take, the keyboard keeps the words already shown and puts the rest at the cursor. Sending the message ends the take. Tap the X to cancel.
+Tap **Dictate** above the letters, talk, then tap **Done**. You can also hold Dictate and release it to finish. If you type after a live draft, the keyboard puts the remaining words at the cursor when it can confirm the whole draft is still there. If you change one of those words, it leaves your edit in place and offers **Copy dictation** for the full take. Sending the message ends the take. Tap the X to cancel.
 
-If the keyboard loses track of the field or cursor, it offers **Insert dictation**. Tap it to insert the words at the current cursor. If the host gives no confirmation after an insert, **Copy dictation** puts the full take on the clipboard. These actions stay available for ten minutes. Typing hides the offer until the keyboard opens again. The X dismisses it. An offer in a different field hides the transcript until you choose to insert or copy it. Finished takes also appear in the app’s History.
+If the keyboard loses track of the field or cursor before sending any words, it offers **Insert dictation**. Tap it to insert the words at the current cursor. If the host gives no confirmation after an insert, **Copy dictation** puts the full take on the clipboard. These actions stay available for ten minutes. Typing hides the offer until the keyboard opens again. The X dismisses it. An offer in a different field hides the transcript until you choose to insert or copy it. Finished takes also appear in the app’s History.
 
 **Typing languages** in the see.computer app follows the iPhone’s preferred languages by default. Choose **English & Svenska** once to keep Å, Ä and Ö on the letter rows in every app. Shift changes case, a double tap locks capitals, and **123** opens numbers and symbols. Hold and slide the space bar to position the cursor. Double-tap a word in the host app to use its Copy and Paste menu. Double-tap space after a letter or digit to insert a period and a space. Typing a space after a number returns to the letters.
 
