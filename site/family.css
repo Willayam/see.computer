@@ -440,15 +440,6 @@ picture { display: contents; }
 html.js .hero:not(.in) .rise .w > span { transform: translateY(1.25em); transition: none; }
 .hero .after { transition: opacity 0.6s ease-out 0.2s, transform 0.9s var(--ease) 0.2s; }
 html.js .hero:not(.in) .after { opacity: 0; transform: translateY(12px); transition: none; }
-/* family.js starts the entrance within a second of loading. If it never runs,
-   the hero and its download key show themselves. */
-html.js .hero:not(.in) .rise .w > span,
-html.js .hero:not(.in) .after { animation: unaided 0.6s var(--ease) 2s forwards; }
-@keyframes unaided { to { opacity: 1; transform: none; } }
-@media (prefers-reduced-motion: reduce) {
-  html.js .hero:not(.in) .rise .w > span,
-  html.js .hero:not(.in) .after { animation-duration: 0s; }
-}
 
 /* A plate: the raised slab that carries a page's main statement and its action. */
 .plate {

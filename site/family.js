@@ -20,14 +20,12 @@
   });
 
   const hero = document.querySelector('.hero');
-  if (hero) {
+  if (hero && !still && document.fonts?.load && 'PerformancePaintTiming' in window
+      && !performance.getEntriesByName('first-contentful-paint').length) {
     const enter = () => hero.classList.add('in');
-    const fonts = document.fonts;
-    if (still || !fonts?.load) enter();
-    else {
-      Promise.all([fonts.load('600 60px Fraunces'), fonts.load('italic 500 60px Fraunces')]).then(enter, enter);
-      setTimeout(enter, 1000);
-    }
+    setTimeout(enter, 1000);
+    root.classList.add('js');
+    Promise.all([document.fonts.load('600 60px Fraunces'), document.fonts.load('italic 500 60px Fraunces')]).then(enter, enter);
   }
 
   if (!still && 'IntersectionObserver' in window) {
