@@ -740,6 +740,11 @@ describe("public reads", () => {
       "[script](javascript:alert(1))",
       "[parent](../secret.md)",
       "[local](/Users/person/take.md)",
+      "",
+      "**0:00–1:00:01** Keep [this example](shots/001.jpg).",
+      "And [this one](transcript.json).",
+      "",
+      "**Captures** [Photo](shots/001.jpg)",
     ].join("\n");
     const rewritten = rewriteMarkdownPaths(source, share);
     expect(rewritten).toContain(`![safe](${share}shots/001.jpg)`);
@@ -748,6 +753,8 @@ describe("public reads", () => {
     expect(rewritten).toContain("[script](javascript:alert(1))");
     expect(rewritten).toContain("[parent](../secret.md)");
     expect(rewritten).toContain("[local](/Users/person/take.md)");
+    expect(rewritten).toContain("**0:00–1:00:01** Keep [this example](shots/001.jpg).\nAnd [this one](transcript.json).");
+    expect(rewritten).toContain(`**Captures** [Photo](${share}shots/001.jpg)`);
   });
 
   test("range parser rejects multiple and zero-length suffix ranges", () => {

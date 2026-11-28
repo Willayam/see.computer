@@ -30,6 +30,11 @@ fn link(dir: &Path) -> Link {
     serde_json::from_slice(&std::fs::read(dir.join("share.json")).unwrap()).unwrap()
 }
 
+fn finalize(service: &Sharing, dir: &Path) -> String {
+    let markdown = dir.join("take.md");
+    service.finalize_paste(&markdown, markdown.display().to_string())
+}
+
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
@@ -175,8 +180,8 @@ fn finalized_take_reports_the_limiting_quota_before_paste() {
                     .unwrap();
             }
         }
-        service.finalize(&dir);
         let local = dir.join("take.md").display().to_string();
+        assert_eq!(finalize(&service, &dir), local);
         assert_eq!(paste_link(&dir.join("take.md"), local.clone()), local);
         assert!(service.status().contains(limit), "{}", service.status());
         let restarted = Sharing::load(service.0.root.clone(), HOST, true);
@@ -202,14 +207,14 @@ fn a_legacy_upload_with_unknown_sizes_waits_for_confirmation_only_if_it_might_ex
             }
         })
         .unwrap();
-    service.finalize(&dir);
+    finalize(&service, &dir);
     assert_eq!(link(&dir).state, "checking");
     service
         .update(&id, |j| {
             j.uploaded_bytes.insert("live/previous-0.m4s".into(), 100);
         })
         .unwrap();
-    service.finalize(&dir);
+    finalize(&service, &dir);
     assert_eq!(link(&dir).state, "uploading");
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
@@ -220,7 +225,7 @@ fn a_take_at_the_file_limit_can_share_while_uploading() {
     service.begin(&dir);
     record(&dir, 1495, 1495);
     package(&dir);
-    assert!(service.finalize(&dir));
+    assert_eq!(finalize(&service, &dir), link(&dir).url);
     assert_eq!(link(&dir).state, "uploading");
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
@@ -234,7 +239,10 @@ fn a_failed_checkpoint_keeps_an_old_link_out_of_the_initial_paste() {
     let queue_file = service.0.root.join(format!("{}.json", job(&service).id));
     std::fs::remove_file(&queue_file).unwrap();
     std::fs::create_dir(&queue_file).unwrap();
-    assert!(!service.finalize(&dir));
+    assert_eq!(
+        finalize(&service, &dir),
+        dir.join("take.md").display().to_string()
+    );
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
 
@@ -379,7 +387,7 @@ fn a_finished_backlog_uploads_in_one_turn_and_publishes() {
     service.begin(&dir);
     record(&dir, 12, 12);
     package(&dir);
-    service.finalize(&dir);
+    finalize(&service, &dir);
     let client = agent();
     assert!(service.step(&client, job(&service)));
     assert!(service.step(&client, job(&service)));
@@ -403,7 +411,7 @@ fn a_finished_take_missing_a_fragment_fails_at_once_and_publishes_when_it_return
     service.begin(&dir);
     record(&dir, 3, 2);
     package(&dir);
-    service.finalize(&dir);
+    finalize(&service, &dir);
     assert_eq!(job(&service).error.as_deref(), Some(MISSING));
     assert_eq!(service.status(), MISSING);
     assert_eq!(link(&dir).state, "failed");
@@ -485,7 +493,7 @@ fn a_crash_between_an_upload_and_its_saved_progress_sends_it_again_and_publishes
     service.begin(&dir);
     record(&dir, 3, 3);
     package(&dir);
-    service.finalize(&dir);
+    finalize(&service, &dir);
     run(&service);
     assert!(job(&service).ready);
     let (first, uploads) = (server.bodies(), server.requests().len());
@@ -531,7 +539,7 @@ fn completion_checkpoint_survives_a_client_restart() {
     service.begin(&dir);
     record(&dir, 3, 3);
     package(&dir);
-    service.finalize(&dir);
+    finalize(&service, &dir);
     run(&service);
     assert!(job(&service).ready);
     let finished = server.requests().len();
@@ -562,7 +570,7 @@ fn completion_checkpoint_failure_keeps_publication_retryable() {
     original.lock().unwrap().clone_from(&queue_file);
     record(&dir, 1, 1);
     package(&dir);
-    service.finalize(&dir);
+    finalize(&service, &dir);
     run(&service);
     assert!(!job(&service).ready);
     let finished = server.requests().len();
@@ -636,7 +644,7 @@ fn the_link_file_is_written_only_when_its_state_changes() {
     assert_eq!(written(), begun);
 
     package(&dir);
-    service.finalize(&dir);
+    finalize(&service, &dir);
     run(&service);
     assert_eq!(link(&dir).state, "ready");
     assert_ne!(written(), begun);
@@ -741,10 +749,10 @@ fn finalized_manifest_uses_remote_media_and_keeps_local_originals() {
     std::fs::write(dir.join("transcript.json"), source).unwrap();
     std::fs::write(
         dir.join("take.md"),
-        "**0:00–0:01** Keep clips/001/clip.mov and [the example](shots/001.png).\n\n[Clip](clips/001/clip.mov) [Shot](shots/001.png)",
+        "**0:00–1:00:01** Keep clips/001/clip.mov and [the example](shots/001.png).\nKeep [this](shots/001.png) here too.\n\n**Captures** [Clip](clips/001/clip.mov) [Shot](shots/001.png)",
     )
     .unwrap();
-    service.finalize(&dir);
+    finalize(&service, &dir);
     let [markdown, transcript] = documents(&dir).unwrap().assets;
     let (Source::Bytes(markdown), Source::Bytes(transcript)) = (markdown.source, transcript.source)
     else {
@@ -752,7 +760,7 @@ fn finalized_manifest_uses_remote_media_and_keeps_local_originals() {
     };
     assert_eq!(
         String::from_utf8(markdown).unwrap(),
-        "**0:00–0:01** Keep clips/001/clip.mov and [the example](shots/001.png).\n\n[Clip](live/clip.segments/index.m3u8) [Shot](shots/001.jpg)"
+        "**0:00–1:00:01** Keep clips/001/clip.mov and [the example](shots/001.png).\nKeep [this](shots/001.png) here too.\n\n**Captures** [Clip](live/clip.segments/index.m3u8) [Shot](shots/001.jpg)"
     );
     let remote: serde_json::Value = serde_json::from_slice(&transcript).unwrap();
     assert_eq!(
@@ -870,7 +878,7 @@ fn live_r2_synthetic_recording() {
     )
     .unwrap();
     std::fs::write(dir.join("transcript.json"), r#"{"fullText":"Hej och hello. Synthetic video and audio, with local transcription preserved.","durationMs":4000,"captures":[{"type":"clip","video":"clips/001/clip.mov","playlist":"live/clip.segments/index.m3u8","durationMs":4000,"frames":[]}]}"#).unwrap();
-    service.finalize(&dir);
+    finalize(&service, &dir);
     while !job(&service).ready {
         assert!(started.elapsed() < Duration::from_secs(45));
         service.tick(&client, &mut job(&service)).unwrap();

@@ -1300,14 +1300,8 @@ impl Controller {
                     let paste = if empty {
                         sharing.cancel(take_dir.as_deref());
                         packaged.paste
-                    } else if packaged
-                        .markdown
-                        .parent()
-                        .is_some_and(|dir| sharing.finalize(dir))
-                    {
-                        crate::sharing::paste_link(&packaged.markdown, packaged.paste)
                     } else {
-                        packaged.paste
+                        sharing.finalize_paste(&packaged.markdown, packaged.paste)
                     };
                     Packaged {
                         paste,

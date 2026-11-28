@@ -32,7 +32,7 @@ struct Shared {
     state: Mutex<State>,
     wake: Condvar,
     /// When both locks are needed, take this one first and release `state` before file I/O.
-    disk: Mutex<BTreeMap<String, &'static str>>,
+    queue_files: Mutex<BTreeMap<String, &'static str>>,
 }
 
 struct State {
@@ -217,7 +217,7 @@ impl Sharing {
                 idle: BTreeMap::new(),
             }),
             wake: Condvar::new(),
-            disk: Mutex::new(BTreeMap::new()),
+            queue_files: Mutex::new(BTreeMap::new()),
         }));
         for id in unchecked {
             let _ = sharing.persist(&id);
@@ -271,7 +271,7 @@ impl Sharing {
 
     /// Called only for a capture, never for plain dictation. Generates the URL locally.
     pub fn begin(&self, dir: &Path) {
-        let mut links = self.0.disk.lock().unwrap();
+        let mut links = self.0.queue_files.lock().unwrap();
         {
             let state = self.0.state.lock().unwrap();
             if !state.enabled || state.jobs.values().any(|job| job.dir == dir) {
@@ -309,13 +309,16 @@ impl Sharing {
         self.0.wake.notify_one();
     }
 
-    /// A finished take can paste its link once its inventory fits and the queue has saved it.
-    pub fn finalize(&self, dir: &Path) -> bool {
+    /// Returns the paste for a finished take, using its local path if the share cannot be verified.
+    pub fn finalize_paste(&self, markdown: &Path, local_paste: String) -> String {
+        let Some(dir) = markdown.parent() else {
+            return local_paste;
+        };
         let job = {
             let state = self.0.state.lock().unwrap();
             state.jobs.values().find(|job| job.dir == dir).cloned()
         };
-        let Some(job) = job else { return false };
+        let Some(job) = job else { return local_paste };
         let checked = Folder::finished(dir, &job.sent)
             .and_then(|(folder, documents)| self.quota(&job, &folder, &documents));
         let (quota, failure) = match checked {
@@ -333,7 +336,11 @@ impl Sharing {
             job.error = job.error.take().or(failure);
             eligible = !job.cancelled && job.error.is_none() && job.quota == Quota::WithinLimits;
         });
-        eligible && saved
+        if eligible && saved {
+            paste_link(markdown, local_paste)
+        } else {
+            local_paste
+        }
     }
 
     pub fn cancel(&self, dir: Option<&Path>) {
@@ -408,7 +415,7 @@ impl Sharing {
     }
 
     fn persist(&self, id: &str) -> io::Result<()> {
-        let mut links = self.0.disk.lock().unwrap();
+        let mut links = self.0.queue_files.lock().unwrap();
         let job = self.0.state.lock().unwrap().jobs.get(id).cloned();
         match job {
             Some(job) => self.write(&mut links, &job),
@@ -543,7 +550,7 @@ impl Sharing {
             // DELETE is retried even while sharing is off. It never uploads content.
             // Always send it: a create response may have been lost before local persistence.
             self.request(agent, "DELETE", job, "", &[])?;
-            let mut links = self.0.disk.lock().unwrap();
+            let mut links = self.0.queue_files.lock().unwrap();
             {
                 let mut state = self.0.state.lock().unwrap();
                 state.jobs.remove(&job.id);
@@ -1072,13 +1079,36 @@ fn documents(dir: &Path) -> Result<Documents, UploadError> {
     })
 }
 
+fn starts_spoken_segment(line: &str) -> bool {
+    let Some((range, _)) = line
+        .strip_prefix("**")
+        .and_then(|line| line.split_once("** "))
+    else {
+        return false;
+    };
+    range.split_once(['–', '-']).is_some_and(|(start, end)| {
+        [start, end].into_iter().all(|time| {
+            time.contains(':')
+                && time
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b':')
+        })
+    })
+}
+
 fn capture_links(markdown: String, links: &BTreeMap<String, String>) -> String {
     if links.is_empty() {
         return markdown;
     }
     let mut remote = String::with_capacity(markdown.len());
+    let mut narration = false;
     for line in markdown.split_inclusive('\n') {
-        if line.starts_with("**") {
+        if line.trim().is_empty() {
+            narration = false;
+        } else if starts_spoken_segment(line) {
+            narration = true;
+        }
+        if narration || !line.contains("](") {
             remote.push_str(line);
             continue;
         }

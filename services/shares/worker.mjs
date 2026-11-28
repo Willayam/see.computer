@@ -96,11 +96,16 @@ export function parseByteRange(value, size) {
 }
 
 export function rewriteMarkdownPaths(markdown, shareUrl) {
-  return markdown.replace(/(!?\[[^\]\n]*\]\()([^\s)]+)(\))/g, (whole, before, target, after) => {
-    const valid = validateRelativePath(target);
-    if (!valid) return whole;
-    return `${before}${new URL(valid.path, shareUrl).href}${after}`;
-  });
+  let narration = false;
+  return markdown.split("\n").map(line => {
+    if (!line.trim()) narration = false;
+    else if (/^\*\*(?:\d+:){1,2}\d+[–-](?:\d+:){1,2}\d+\*\* /.test(line)) narration = true;
+    if (narration || !line.includes("](")) return line;
+    return line.replace(/(!?\[[^\]]*\]\()([^\s)]+)(\))/g, (whole, before, target, after) => {
+      const valid = validateRelativePath(target);
+      return valid ? `${before}${new URL(valid.path, shareUrl).href}${after}` : whole;
+    });
+  }).join("\n");
 }
 
 function etagMatches(header, etag) {
