@@ -340,6 +340,42 @@ fn reload_resumes_saved_takes_and_revokes_interrupted_recordings() {
 }
 
 #[test]
+fn restart_reconciles_share_links_after_an_interrupted_state_change() {
+    for state in ["removed", "failed", "ready"] {
+        let (service, dir) = setup(true);
+        service.begin(&dir);
+        let id = job(&service).id;
+        let file = service.0.root.join(format!("{id}.json"));
+        let mut saved = job(&service);
+        saved.finalized = true;
+        saved.quota = Quota::WithinLimits;
+        match state {
+            "removed" => saved.cancelled = true,
+            "failed" => saved.error = Some(MISSING.into()),
+            "ready" => saved.ready = true,
+            _ => unreachable!(),
+        }
+        std::fs::write(file, serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert_eq!(link(&dir).state, "uploading");
+        let _restarted = Sharing::load(service.0.root.clone(), HOST, true);
+        assert_eq!(link(&dir).state, state);
+        let eligible = eligible_url(&std::fs::read_to_string(dir.join("share.json")).unwrap());
+        assert_eq!(eligible.is_some(), state == "ready");
+        if state == "ready" {
+            for cloud_state in ["removed", "failed", "expired"] {
+                let mut cloud = link(&dir);
+                cloud.state = cloud_state.into();
+                std::fs::write(dir.join("share.json"), serde_json::to_vec(&cloud).unwrap())
+                    .unwrap();
+                let _restarted = Sharing::load(service.0.root.clone(), HOST, true);
+                assert_eq!(link(&dir).state, cloud_state);
+            }
+        }
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+}
+
+#[test]
 fn failed_put_keeps_chunk_pending_and_successful_retry_commits_it() {
     let failing = AtomicBool::new(true);
     let server = server(move |_| match failing.swap(false, Ordering::SeqCst) {

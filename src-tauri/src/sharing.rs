@@ -14,6 +14,7 @@ const HOST: &str = "https://see.computer";
 const MAX_OBJECT: u64 = 8 * 1024 * 1024;
 const MAX_SHARE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SHARE_FILES: usize = 1500;
+const RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
 const FILE_LIMIT: &str = "Share exceeds 1,500 files. Local recording saved.";
 const BYTE_LIMIT: &str = "Share exceeds 256 MiB. Local recording saved.";
 const OBJECT_LIMIT: &str = "A recording file exceeds 8 MiB. Local recording saved.";
@@ -187,6 +188,7 @@ impl Sharing {
 
     fn load(root: PathBuf, host: &str, enabled: bool) -> Self {
         let mut jobs = BTreeMap::new();
+        let mut links = BTreeMap::new();
         if let Ok(entries) = std::fs::read_dir(&root) {
             for entry in entries.flatten() {
                 if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
@@ -204,25 +206,18 @@ impl Sharing {
                         && job.dir.join("transcript.json").is_file()
                     {
                         job.finalized = true;
+                        let _ = job.save(&root);
                     } else {
                         job.cancelled = true;
                     }
                 }
+                if let Ok(Some(state)) = job.reconcile_link(host) {
+                    links.insert(job.id.clone(), state);
+                }
                 jobs.insert(job.id.clone(), job);
             }
         }
-        let unchecked: Vec<_> = jobs
-            .values()
-            .filter(|job| {
-                job.finalized
-                    && !job.cancelled
-                    && !job.ready
-                    && job.error.is_none()
-                    && job.quota == Quota::Unchecked
-            })
-            .map(|job| job.id.clone())
-            .collect();
-        let sharing = Self(Arc::new(Shared {
+        Self(Arc::new(Shared {
             root,
             host: host.to_owned(),
             state: Mutex::new(State {
@@ -232,12 +227,8 @@ impl Sharing {
                 idle: BTreeMap::new(),
             }),
             wake: Condvar::new(),
-            queue_files: Mutex::new(BTreeMap::new()),
-        }));
-        for id in unchecked {
-            let _ = sharing.persist(&id);
-        }
-        sharing
+            queue_files: Mutex::new(links),
+        }))
     }
 
     #[cfg(test)]
@@ -448,21 +439,8 @@ impl Sharing {
     }
 
     fn write(&self, links: &mut BTreeMap<String, &'static str>, job: &Job) -> io::Result<()> {
-        let saved = write_private(
-            &self.0.root.join(format!("{}.json", job.id)),
-            &serde_json::to_vec(job)?,
-        );
-        let state = if job.cancelled {
-            "removed"
-        } else if job.error.is_some() {
-            "failed"
-        } else if job.ready {
-            "ready"
-        } else if job.finalized && job.quota != Quota::WithinLimits {
-            "checking"
-        } else {
-            "uploading"
-        };
+        let saved = job.save(&self.0.root);
+        let state = job.link_state();
         if (saved.is_err() && matches!(state, "ready" | "uploading"))
             || links.get(&job.id) == Some(&state)
             || !job.dir.is_dir()
@@ -474,7 +452,7 @@ impl Sharing {
             &serde_json::to_vec(&Link {
                 url: format!("{}/s/{}/", self.0.host, job.id),
                 state: state.to_owned(),
-                expires_at: job.created_at + 30 * 24 * 60 * 60,
+                expires_at: job.expires_at(),
             })?,
         )?;
         links.insert(job.id.clone(), state);
@@ -576,6 +554,7 @@ impl Sharing {
             // Always send it: a create response may have been lost before local persistence.
             self.request(agent, "DELETE", job, "", &[])?;
             let mut links = self.0.queue_files.lock().unwrap();
+            job.reconcile_link(&self.0.host)?;
             {
                 let mut state = self.0.state.lock().unwrap();
                 state.jobs.remove(&job.id);
@@ -944,6 +923,65 @@ impl State {
 }
 
 impl Job {
+    fn expires_at(&self) -> u64 {
+        if self.created_at == 0 {
+            0
+        } else {
+            self.created_at.saturating_add(RETENTION_SECS)
+        }
+    }
+
+    fn save(&self, root: &Path) -> io::Result<()> {
+        write_private(
+            &root.join(format!("{}.json", self.id)),
+            &serde_json::to_vec(self)?,
+        )
+    }
+
+    fn link_state(&self) -> &'static str {
+        if self.cancelled {
+            "removed"
+        } else if self.error.is_some() {
+            "failed"
+        } else if self.ready {
+            "ready"
+        } else if self.finalized && self.quota != Quota::WithinLimits {
+            "checking"
+        } else {
+            "uploading"
+        }
+    }
+
+    fn reconcile_link(&self, host: &str) -> io::Result<Option<&'static str>> {
+        let state = self.link_state();
+        let expires = self.expires_at();
+        if state == "uploading" || (state == "ready" && expires > 0 && expires <= epoch()) {
+            return Ok(None);
+        }
+        let path = self.dir.join("share.json");
+        let bytes = match std::fs::read(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            result => result?,
+        };
+        let Ok(mut link) = serde_json::from_slice::<Link>(&bytes) else {
+            return Ok(None);
+        };
+        if link.url != format!("{host}/s/{}/", self.id) {
+            return Ok(None);
+        }
+        if link.state != state {
+            if link.state == "removed"
+                || (link.state == "failed" && state != "removed")
+                || (state == "ready" && !matches!(link.state.as_str(), "uploading" | "checking"))
+            {
+                return Ok(None);
+            }
+            link.state = state.to_owned();
+            write_private(&path, &serde_json::to_vec(&link)?)?;
+        }
+        Ok(Some(state))
+    }
+
     fn runnable(&self, enabled: bool) -> bool {
         self.cancelled || (enabled && !self.ready && self.error.is_none())
     }
