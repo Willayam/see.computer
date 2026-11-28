@@ -34,7 +34,7 @@ enum DraftChecks {
         try draftsAndEdits()
         try savedShapes()
         transcripts()
-        attemptedWordsAreNotKept()
+        try partialDraftsKeepTheWholeTake()
         hostsThatReportOnlyTheEnd()
         refusals()
         try everyWaitingTakeIsKept()
@@ -59,20 +59,20 @@ enum DraftChecks {
         precondition(!origin.matches(target("hello", selected: "next")))
         precondition(!origin.matches(target("hello", after: "changed")))
         precondition(placement(draft, "hello", ownsMark: true) == .marked)
-        precondition(placement(draft, "hello", ownsMark: false) == nil)
+        precondition(placement(draft, "hello", ownsMark: false) == .uncertain)
         precondition(placement(draft, full, ownsMark: false) == .committed)
         precondition(placement(draft, "hello", field: other, ownsMark: true) == nil, "A mark belongs to the field it was set in")
         precondition(placement(draft, "words", ownsMark: true) == .uncertain, "A word the field shares with the draft proves nothing")
-        precondition(placement(draft, full, after: "changed", ownsMark: true) == nil)
-        precondition(placement(draft, full, selected: "next", ownsMark: true) == nil)
-        precondition(placement(draft, full + " extra", ownsMark: true) == nil)
+        precondition(placement(draft, full, after: "changed", ownsMark: true) == .uncertain)
+        precondition(placement(draft, full, selected: "next", ownsMark: true) == .uncertain)
+        precondition(placement(draft, full + " extra", ownsMark: true) == .uncertain)
 
         let empty = target(nil, after: nil, hasText: false)
         let emptyStart = tap(at: empty)
         let emptyDraft = Draft(start: emptyStart, before: nil, spacing: "", words: "first words")
         precondition(placement(emptyDraft, nil, after: nil, ownsMark: true) == .marked)
         precondition(placement(emptyDraft, "first words", after: nil, ownsMark: false) == .committed)
-        precondition(placement(emptyDraft, nil, after: nil, hasText: false, ownsMark: true) == nil)
+        precondition(placement(emptyDraft, nil, after: nil, hasText: false, ownsMark: true) == .uncertain)
 
         let selected = target("hello", selected: "word")
         precondition(selected.matches(target("hello", selected: "word")))
@@ -153,28 +153,55 @@ enum DraftChecks {
         precondition(Transcript.rest(of: "I'm going to go home", after: "I'm gonna") == "to go home")
     }
 
-    /// A host that ignores marked text never showed the draft. Counting its words as
-    /// already typed would cut them off the final text.
-    static func attemptedWordsAreNotKept() {
-        let final = "alpha beta gamma delta"
-        let empty = target(nil, after: nil, hasText: false)
-        let asked = Draft(start: tap(at: empty), before: nil, spacing: "", words: "alpha beta")
-        let nowhere = placement(asked, nil, after: nil, hasText: false, ownsMark: true)
-        precondition(nowhere == nil)
-        precondition(Transcript.rest(of: final, after: asked.kept(nowhere, retyped: false)) == final)
-
-        // In a field that already holds text the same host looks like one holding the mark.
-        let busy = Draft(start: tap(at: target("Existing text")), before: "Existing text", spacing: " ", words: "alpha beta")
-        let claimed = placement(busy, "Existing text", ownsMark: true)
-        precondition(claimed == .marked && busy.shown == nil)
-        precondition(busy.kept(nil, retyped: false) == "", "A mark the host never answered for is not text in the field")
-        precondition(busy.kept(claimed, retyped: true) == "alpha beta", "Words the keyboard typed in as plain text are")
-
-        var shown = busy
-        shown.shown = true
-        precondition(Transcript.rest(of: final, after: shown.kept(nil, retyped: false)) == "gamma delta")
-        precondition(busy.kept(.committed, retyped: false) == "alpha beta")
-        precondition(shown.kept(.uncertain, retyped: false).isEmpty)
+    static func partialDraftsKeepTheWholeTake() throws {
+        let prefix = "Agenda."
+        let words = "Book the afternoon train to Malmö."
+        let start = tap(at: target(prefix))
+        let take = Take(id: 7, text: words + " Bring the tickets.", finished: Date(), start: start)
+        let draft = Draft(start: start, before: prefix, spacing: " ", words: words)
+        let complete = prefix + draft.text
+        let responses = ["Book the afternoon", "the afternoon train", "to Malmö.", "Malmö.",
+                         "Book the train to Malmö.", "unrelated text", ""]
+        for shown in [true, false] {
+            var old = try JSONSerialization.jsonObject(with: encoder.encode(draft)) as! [String: Any]
+            old["shown"] = shown
+            let restored = try decoder.decode(Draft.self, from: JSONSerialization.data(withJSONObject: old))
+            for part in responses {
+                let before = part.isEmpty ? prefix : prefix + " " + part
+                let caret = target(before)
+                precondition(restored.placement(at: caret, before: before, ownsMark: false) == .uncertain)
+                let kept = restored.confirmedWords(at: caret, before: before)
+                var ledger = Ledger()
+                ledger.recordEdit(ManualEdit(startID: start.id, target: caret, kept: kept), for: start.id)
+                let persisted = try reopened(ledger)
+                precondition(kept == nil && persisted[start.id]?.standing == .unconfirmed)
+                precondition(!ledger.reserveInsert(start.id, in: field, save: { _ in true }))
+                precondition(persisted.offer(for: take, in: field)?.action == .copy)
+                precondition(persisted.offer(for: take, in: other)?.words == take.text)
+            }
+        }
+        precondition(draft.confirmedWords(at: target(complete), before: complete) == words)
+        let edit = ManualEdit(startID: start.id, target: target(complete + " Typed."), kept: words)
+        precondition(edit.remainingWords(in: take, before: complete + " Typed.") == "Bring the tickets.")
+        precondition(edit.remainingWords(in: take, before: prefix + " Book the afternoon Typed.") == nil)
+        precondition(edit.remainingWords(in: take, before: "Different prefix. " + words + " Typed.") == nil)
+        precondition(edit.remainingWords(in: take, before: nil) == nil)
+        let repeatedStart = tap(at: target("Thanks. Thanks."))
+        let repeated = Take(id: 8, text: "Thanks. Goodbye.", finished: Date(), start: repeatedStart)
+        let repeatEdit = ManualEdit(startID: repeatedStart.id, target: target("Thanks. Thanks. Thanks."), kept: "Thanks.")
+        precondition(repeatEdit.remainingWords(in: repeated, before: "Thanks. Thanks.") == nil)
+        precondition(repeatEdit.remainingWords(in: repeated, before: "Thanks. Thanks. Thanks.") == "Goodbye.")
+        let refused = ManualEdit(startID: start.id, target: target(prefix), kept: "")
+        precondition(refused.remainingWords(in: take, before: prefix) == take.text)
+        var waiting = Ledger()
+        waiting.update(start.id) { $0.draft = draft }
+        precondition(waiting.offer(for: take, in: other)?.action == .copy)
+        precondition(waiting.offer(for: take, in: field) == nil)
+        waiting.recordEdit(ManualEdit(startID: start.id, target: start.target), for: start.id)
+        var sent = take
+        sent.sent = true
+        precondition(waiting.offer(for: sent, in: field)?.words == take.text)
+        precondition(waiting.offer(for: sent, in: field)?.action == .copy)
     }
 
     /// A host reports the last sentence or two before the caret, never the whole field.
@@ -185,7 +212,7 @@ enum DraftChecks {
         precondition(placement(draft, "Existing" + draft.text, ownsMark: false) == .committed)
         precondition(placement(draft, "Edited" + draft.text, ownsMark: false) == .uncertain)
         precondition(placement(draft, "tail.", ownsMark: false) == .uncertain)
-        precondition(placement(draft, "Something else entirely.", ownsMark: false) == nil)
+        precondition(placement(draft, "Something else entirely.", ownsMark: false) == .uncertain)
 
         // iOS gives a field a new identifier each time the keyboard comes back to it. The
         // take's own words, left there when the keyboard went away, still say which field it is.
@@ -205,21 +232,8 @@ enum DraftChecks {
         precondition(placement(followed, "Existing", field: other, ownsMark: true) == .marked, "A mark set after coming back")
         precondition(placement(followed, "Existing", ownsMark: true, mayHaveMoved: true) == nil)
 
-        // A field showing only "We" cannot prove that the rest of the draft survived.
-        var cut = Draft(start: tap(at: target("Existing")), before: "Existing", spacing: " ", words: "Hi, this is a test in English. We")
-        precondition(cut.recovery(at: target("We", field: other), before: "We") == nil, "Not for words the host never showed")
-        cut.shown = true
+        let cut = Draft(start: tap(at: target("Existing")), before: "Existing", spacing: " ", words: "Hi, this is a test in English. We")
         precondition(placement(cut, "We", field: other, ownsMark: false, mayHaveMoved: true) == nil)
-        precondition(cut.recovery(at: target("We", field: other), before: "We") == .unconfirmed)
-        precondition(cut.recovery(at: target("They", field: other), before: "They") == nil)
-        precondition(cut.recovery(at: target("We", after: "changed", field: other), before: "We") == nil)
-        precondition(cut.recovery(at: target(nil, field: other), before: nil) == nil)
-        precondition(Transcript.rest(of: "Hi, this is a test in English, we are done.", after: cut.words) == "are done.")
-        // iOS dropped the marked words when the keyboard changed hands, and the field reads as it did at the tap.
-        precondition(cut.recovery(at: target("Existing", field: other), before: "Existing") == .offered)
-        var fromEmpty = Draft(start: tap(at: target(nil, after: nil, hasText: false)), before: nil, spacing: "", words: "Hello there")
-        fromEmpty.shown = true
-        precondition(fromEmpty.recovery(at: target(nil, after: nil, field: other), before: nil) == nil, "An empty field is like every other empty field")
 
         // A second take that landed in another field keeps the first take from being found there.
         let elsewhere = tap(at: target(nil, field: other))
@@ -236,7 +250,7 @@ enum DraftChecks {
 
         // An unchanged field holds the mark or nothing, even when it happens to end in the same words.
         let echo = Draft(start: tap(at: target("say hello hello")), before: "say hello hello", spacing: " ", words: "hello")
-        precondition(placement(echo, "say hello hello", ownsMark: false) == nil)
+        precondition(placement(echo, "say hello hello", ownsMark: false) == .uncertain)
         precondition(placement(echo, "say hello hello", ownsMark: true) == .marked)
 
         var legacy = draft
@@ -254,7 +268,7 @@ enum DraftChecks {
         precondition(reply(text, before: "Existing text.", now: "Existing text.") == .refused)
         precondition(reply(text, before: nil, now: nil, hasText: false) == .refused)
         precondition(reply(text, before: nil, now: nil) == .uncertain)
-        precondition(reply(text, before: "One. Two. Existing text.", now: "Existing text.") == .refused)
+        precondition(reply(text, before: "One. Two. Existing text.", now: "Existing text.") == .uncertain)
         precondition(reply(text, before: "Existing text.", now: "Existing text." + text) == .placed)
         precondition(reply("résumé", before: nil, now: "re\u{301}sume\u{301}") == .placed)
         precondition(reply(text, before: "Existing text.", now: nil, hasText: false) == .uncertain)

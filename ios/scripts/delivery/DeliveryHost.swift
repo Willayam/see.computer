@@ -17,6 +17,8 @@ class Field: UITextView {
     }
 
     var markedLength: Int { markedTextRange.flatMap { text(in: $0) }?.count ?? 0 }
+    var commitFirstCharacters: Int? { didSet { prefixCommitted = false } }
+    private var prefixCommitted = false
 
     func note(_ call: String) {
         History.add("\(accessibilityIdentifier ?? "") \(call) -> len=\(text.count) marked=\(markedLength)")
@@ -30,6 +32,15 @@ class Field: UITextView {
     // A keyboard extension's marked text arrives here, not through `setMarkedText`.
     override func setAttributedMarkedText(_ markedText: NSAttributedString?, selectedRange: NSRange) {
         note("mark(\(markedText?.length ?? 0))")
+        if prefixCommitted { return }
+        if let limit = commitFirstCharacters, limit > 0, let value = markedText?.string, value.count > limit {
+            let prefix = NSAttributedString(string: String(value.prefix(limit)))
+            super.setAttributedMarkedText(prefix, selectedRange: NSRange(location: prefix.length, length: 0))
+            super.unmarkText()
+            prefixCommitted = true
+            try? text.write(to: History.documents.appendingPathComponent("partial.txt"), atomically: true, encoding: .utf8)
+            return
+        }
         super.setAttributedMarkedText(markedText, selectedRange: selectedRange)
     }
 
@@ -151,6 +162,7 @@ final class Host: UIViewController, UITextViewDelegate {
         if query["clear"] != nil {
             fields.forEach { $0.view.text = "" }
             single.text = ""
+            field("plain")?.commitFirstCharacters = query["partial"].flatMap(Int.init)
         }
         if let name = query["set"], let text = query["text"] {
             if name == "single" { single.text = text }

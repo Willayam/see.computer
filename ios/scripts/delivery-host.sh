@@ -151,6 +151,17 @@ noop_copy() {
         echo "FAIL noop_copy: the clipboard does not hold the take"; return 1
     fi
 }
+partial_copy() {
+    rm -f "$fields/partial.txt"
+    focus plain "clear=1&partial=12&set=plain&text=Agenda.&"
+    begin && sleep 6 && finish || return 1
+    [ -s "$fields/partial.txt" ] || { echo "FAIL partial_copy: host recorded no partial draft"; return 1; }
+    partial="$(cat "$fields/partial.txt")"
+    same partial_field "$(text plain)" "$partial"
+    note; tap "$strip"; await dictation_copied 5 || return 1
+    same partial_copy "$(xcrun simctl pbpaste "$udid")" "$(newest_take)"
+    same partial_field_after_copy "$(text plain)" "$partial"
+}
 # A key typed mid-take keeps the words shown so far, and Done adds only the rest.
 typed_midtake() {
     focus plain "clear=1&set=plain&text=Existing text.&"; begin && words plain && tap "$letter" && sleep 4 && finish; events
@@ -238,7 +249,7 @@ reopened() {
     note; shown=$(grep -c keyboard_shown "$log"); tell "clear=1&set=plain&text=$1&focus=plain" 0.5; showing; sleep 5; events
 }
 
-all="plain_empty plain_text single_text nomark_empty nomark_text noop_copy typed_midtake sent_midtake cancelled offered dismissed reoffered returned overlapped away restarted legacy unanswered"
+all="plain_empty plain_text single_text nomark_empty nomark_text noop_copy partial_copy typed_midtake sent_midtake cancelled offered dismissed reoffered returned overlapped away restarted legacy unanswered"
 case "${1:-}" in
     setup) udid="${2:?Pass the simulator UDID}"; setup ;;
     scenarios) echo "$all" | tr ' ' '\n' ;;

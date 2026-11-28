@@ -175,10 +175,6 @@ struct Draft: Codable, Equatable {
     var dropped: Bool?
     var start: DictationStart?
     var committedBefore: Data?
-    /// The host has shown these words. It committed them, or it held them as marked text
-    /// for as long as a host takes to say that it shows none. Until then the draft is
-    /// only what the keyboard asked for.
-    var shown: Bool?
     /// The identifier of the field when the keyboard last put the draft there. iOS gives
     /// a field a new identifier each time the keyboard comes back to it.
     var field: UUID?
@@ -210,18 +206,18 @@ struct Draft: Codable, Equatable {
     func placement(
         at current: DictationTarget?, before: String?, ownsMark: Bool, mayHaveMoved: Bool = false
     ) -> Placement? {
-        guard let current, let target = start?.target, target.isReadable,
-            target.selected == nil, current.selected == nil, target.after == current.after, current.hasText
-        else { return nil }
+        guard let current, let target = start?.target else { return nil }
         let known = home == current.field
         guard known || mayHaveMoved else { return nil }
+        let unverified: Placement? = known ? .uncertain : nil
+        guard target.isReadable, target.selected == nil, current.selected == nil,
+              target.after == current.after, current.hasText else { return unverified }
         let complete = committedBefore.map { $0 == current.before } ?? target.showsInsertion(text, before: before)
-        if complete, known || words.count >= Self.recognisable {
+        if complete, canErase(before: before), known || words.count >= Self.recognisable {
             return .committed
         }
-        guard known else { return nil }
-        if target.before == current.before { return ownsMark ? .marked : nil }
-        return HostContext.overlapsEnding(before, of: text) ? .uncertain : nil
+        if known, ownsMark, target.before == current.before { return .marked }
+        return unverified
     }
 
     enum Placement {
@@ -232,19 +228,8 @@ struct Draft: Codable, Equatable {
         !text.isEmpty && before?.hasSuffix(text) == true
     }
 
-    func recovery(at current: DictationTarget, before: String?) -> Ledger.Standing? {
-        guard shown == true, let target = start?.target, current.selected == nil, target.after == current.after
-        else { return nil }
-        if HostContext.overlapsEnding(before, of: text) { return .unconfirmed }
-        return target.before != nil && target.before == current.before && current.hasText ? .offered : nil
-    }
-
-    /// The words that stay in the field as the user's own text once the keyboard stops
-    /// updating the draft. Words the keyboard only asked the host to show do not count,
-    /// or the final text would leave them out without their ever having been there.
-    func kept(_ placement: Placement?, retyped: Bool) -> String {
-        guard placement != .uncertain else { return "" }
-        return retyped || placement == .committed || shown == true ? words : ""
+    func confirmedWords(at field: DictationTarget?, before: String?) -> String? {
+        placement(at: field, before: before, ownsMark: false) == .committed ? words : nil
     }
 }
 
@@ -259,6 +244,21 @@ struct ManualEdit: Codable, Equatable {
         guard startID == start.id, let target, target.selected == nil, target.matches(current) else { return nil }
         return target
     }
+
+    func remainingWords(in take: Take, before context: String?) -> String? {
+        guard let start = take.start, startID == start.id, let kept else { return nil }
+        if kept.isEmpty { return take.text }
+        guard let context else { return nil }
+        var search = context.startIndex..<context.endIndex
+        while let match = context.range(of: kept, range: search) {
+            let through = String(context[..<match.upperBound])
+            if start.target.showsInsertion(kept, before: through) || start.target.showsInsertion(" " + kept, before: through) {
+                return Transcript.rest(of: take.text, after: kept)
+            }
+            search = context.index(after: match.lowerBound)..<context.endIndex
+        }
+        return nil
+    }
 }
 
 /// The text a host reports before the caret. A host reports the last sentence or two, at
@@ -267,19 +267,15 @@ struct ManualEdit: Codable, Equatable {
 enum HostContext {
     enum Reply { case placed, refused, uncertain }
 
-    static func overlapsEnding(_ context: String?, of text: String) -> Bool {
-        let reported = form(context), words = form(text).drop(while: \.isWhitespace)
-        guard !reported.isEmpty, !words.isEmpty else { return false }
-        return reported.hasSuffix(words) || words.hasSuffix(reported)
-    }
-
     static func reply(to text: String, before: String?, after: String?, now: String?, nowAfter: String?,
                       hasText: Bool) -> Reply {
         guard !text.isEmpty, form(after) == form(nowAfter) else { return .uncertain }
         let prior = form(before), reported = form(now)
         if hasText, reported == form(prior + text) { return .placed }
         if reported.isEmpty { return prior.isEmpty && !hasText ? .refused : .uncertain }
-        return prior.hasSuffix(reported) && !overlapsEnding(reported, of: text) ? .refused : .uncertain
+        guard reported == prior else { return .uncertain }
+        let words = form(text).drop(while: \.isWhitespace)
+        return reported.hasSuffix(words) || words.contains(reported) ? .uncertain : .refused
     }
 
     private static func form(_ text: String?) -> String {
@@ -338,6 +334,15 @@ struct Ledger: Codable, Equatable {
         entries.removeAll { $0.id == id }
     }
 
+    mutating func recordEdit(_ edit: ManualEdit, for id: UUID) {
+        update(id) {
+            $0.draft = nil
+            $0.edit = edit
+            $0.field = edit.target?.field ?? $0.field
+            if edit.kept == nil && $0.standing == nil { $0.standing = .unconfirmed }
+        }
+    }
+
     mutating func reserveInsert(_ id: UUID, in field: UUID, from prior: Standing? = nil,
                                 awaitingReply: Bool = false, save: (Ledger) -> Bool) -> Bool {
         guard self[id]?.standing == prior else { return false }
@@ -385,19 +390,20 @@ struct Ledger: Codable, Equatable {
     }
 
     func offer(for take: Take, in field: UUID, at now: Date = Date()) -> Offer? {
-        guard let start = take.start, take.sent != true, now.timeIntervalSince(take.finished) < Bridge.returnWindow,
+        guard let start = take.start, now.timeIntervalSince(take.finished) < Bridge.returnWindow,
               let entry = self[start.id] else { return nil }
-        switch entry.standing {
-        case .offered:
-            let words = Transcript.rest(of: take.text, after: entry.edit?.kept ?? "")
-            guard !words.isEmpty else { return nil }
-            let label = start.target.field == field ? "Insert “\(words)”" : "Insert dictation"
-            return Offer(take: take, words: words, action: .insert, label: label)
-        case .unconfirmed:
+        let waitingForDraft = take.sent != true && entry.standing == nil && entry.draft != nil && entry.home != field
+        if entry.standing == .unconfirmed || waitingForDraft {
             return Offer(take: take, words: take.text, action: .copy, label: "Copy dictation")
-        default:
-            return nil
         }
+        guard take.sent != true, entry.standing == .offered else { return nil }
+        if let edit = entry.edit, edit.kept?.isEmpty != true {
+            return Offer(take: take, words: take.text, action: .copy, label: "Copy dictation")
+        }
+        let words = Transcript.rest(of: take.text, after: entry.edit?.kept ?? "")
+        guard !words.isEmpty else { return nil }
+        let label = start.target.field == field ? "Insert “\(words)”" : "Insert dictation"
+        return Offer(take: take, words: words, action: .insert, label: label)
     }
 
     /// What a keyboard with one draft, one edit and one bookmark left behind.
