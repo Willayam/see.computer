@@ -53,7 +53,7 @@ The coordinator reserves a replacement's byte delta and file-count delta before 
 
 Storage calls for one share run in the order they arrive. A slow R2 write holds back only its own share. Creating a share never waits on R2. If the share is canceled or expires while a write is in flight, the coordinator refuses that write and releases its reservation.
 
-Allowed extensions are `png`, `jpg`, `mp4`, `mov`, `m4s`, `m3u8`, `json`, and `md`. The `mov` type supports existing packaged takes and is served as `video/quicktime`. New recordings should upload HLS under `clips/001/index.m3u8` or a fragmented `fullclip.mp4`. Safari plays HLS natively. Chrome and other Media Source browsers use the self-hosted hls.js 1.7.2 light player. Its npm archive integrity is verified when vendoring; its license is included in public/hls-LICENSE.
+Allowed extensions are `png`, `jpg`, `mp4`, `mov`, `m4s`, `m3u8`, `json`, and `md`. The `mov` type supports existing packaged takes and is served as `video/quicktime`. New recordings should upload HLS under `clips/001/index.m3u8` or a fragmented `fullclip.mp4`. Safari plays HLS natively. Chrome and other Media Source browsers use the self-hosted hls.js 1.7.2 light player. The page fetches the player only for an HLS clip that the browser cannot play itself. That includes a browser that reports HLS support and then fails to parse the clip, as Chrome 158 does with a take that is still recording. Its npm archive integrity is verified when vendoring; its license is included in public/hls-LICENSE.
 
 During recording, upload `live.json` with this shape:
 
@@ -64,7 +64,7 @@ During recording, upload `live.json` with this shape:
 }
 ```
 
-The public page polls `status.json` and `live.json`. Uploaded paths pass through the same extension and path allowlist before the page creates an element. Transcript and manifest text enter the document through `textContent`.
+The public page polls `status.json` and `live.json`. A capture that stays listed keeps its element, so a clip keeps playing while screenshots arrive. Uploaded paths pass through the same extension and path allowlist before the page creates an element. Transcript and manifest text enter the document through `textContent`.
 
 After `transcript.json` and `take.md` exist, mark the share ready with an empty body.
 
@@ -90,7 +90,7 @@ Run the unit suite from this directory.
 bun test worker.test.mjs
 ```
 
-The tests run the production request handler and its SQL against an in-memory SQLite database and an in-memory R2 adapter. They do not contact Cloudflare.
+The tests run the production request handler and its SQL against an in-memory SQLite database and an in-memory R2 adapter. They run the page's own script against a small stand-in for the DOM. They do not contact Cloudflare.
 
 ## Create and deploy
 

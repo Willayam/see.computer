@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import vm from "node:vm";
 import worker, {
   LIMITS,
   ShareCoordinatorService,
@@ -744,5 +745,248 @@ describe("public reads", () => {
     expect(parseByteRange("bytes=0-1,3-4", 10)).toBe(false);
     expect(parseByteRange("bytes=-0", 10)).toBe(false);
     expect(parseByteRange("bytes=0-99", 10)).toEqual({ offset: 0, length: 10, end: 9 });
+  });
+});
+
+// The DOM calls the viewer makes. A node counts each time it leaves its
+// parent, which is what interrupts a playing video in a browser.
+class PageNode {
+  constructor(name, page) {
+    this.name = name;
+    this.page = page;
+    this.children = [];
+    this.parent = null;
+    this.detached = 0;
+    this.listeners = {};
+    this.paused = true;
+    this.plays = 0;
+  }
+
+  get firstChild() {
+    return this.children[0] ?? null;
+  }
+
+  get nextSibling() {
+    return this.parent.children[this.parent.children.indexOf(this) + 1] ?? null;
+  }
+
+  append(...nodes) {
+    for (const node of nodes) this.insertBefore(node, null);
+  }
+
+  insertBefore(node, before) {
+    node.remove();
+    this.children.splice(before ? this.children.indexOf(before) : this.children.length, 0, node);
+    node.parent = this;
+    if (node.name === "script") this.page.loading.push(node);
+  }
+
+  remove() {
+    if (!this.parent) return;
+    this.parent.children.splice(this.parent.children.indexOf(this), 1);
+    this.parent = null;
+    this.detached += 1;
+  }
+
+  replaceWith(node) {
+    this.parent.insertBefore(node, this);
+    this.remove();
+  }
+
+  canPlayType() {
+    return this.page.nativeHls ? "maybe" : "";
+  }
+
+  addEventListener(type, listener) {
+    this.listeners[type] = listener;
+  }
+
+  removeEventListener(type) {
+    delete this.listeners[type];
+  }
+
+  play() {
+    this.paused = false;
+    this.plays += 1;
+    this.listeners.play?.();
+    return Promise.resolve();
+  }
+
+  // Chrome pauses a video whose source failed before it reports the error.
+  fail(code) {
+    this.paused = true;
+    this.error = { code };
+    this.listeners.error?.();
+    this.listeners.pause();
+  }
+}
+
+const viewerRoot = `${origin}/s/${id(1)}/`;
+
+// Runs the page's own script. `responses` maps a path to the JSON the share
+// serves for it, or to a promise of it. A path with no entry answers 404.
+async function openViewer({ responses, nativeHls = false, playerLoads = true }) {
+  const source = /<script nonce="nonce">([\s\S]*?)<\/script>/.exec(viewerHtml("nonce"))[1];
+  const page = { responses, nativeHls, requests: [], timers: [], players: [], loading: [] };
+  const node = (name) => new PageNode(name, page);
+  Object.assign(page, { status: node("p"), narration: node("p"), captures: node("div"), head: node("head") });
+  class Hls {
+    static isSupported() {
+      return true;
+    }
+
+    constructor() {
+      page.players.push(this);
+    }
+
+    loadSource(url) {
+      this.url = url;
+    }
+
+    attachMedia(video) {
+      this.video = video;
+    }
+
+    destroy() {
+      this.destroyed = true;
+    }
+  }
+  const context = vm.createContext({
+    URL,
+    location: { href: viewerRoot },
+    document: {
+      head: page.head,
+      querySelector: (selector) => ({ "#status": page.status, "#narration": page.narration, "#captures": page.captures })[selector],
+      createElement: node,
+    },
+    setTimeout: (callback) => page.timers.push(callback),
+    async fetch(target, options = {}) {
+      const path = String(target).replace(viewerRoot, "");
+      page.requests.push(`${options.method ?? "GET"} ${path}`);
+      const body = await page.responses[path];
+      return { ok: body !== undefined, json: async () => body };
+    },
+  });
+  page.settle = async () => {
+    for (let turn = 0; turn < 5; turn += 1) {
+      for (const script of page.loading.splice(0)) {
+        if (!playerLoads) script.onerror();
+        else {
+          context.Hls = Hls;
+          script.onload();
+        }
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+  page.poll = async () => {
+    await page.timers.shift()();
+    await page.settle();
+  };
+  page.captions = () => page.captures.children.map((figure) => figure.children[1].textContent ?? figure.children[1].children[0].textContent);
+  vm.runInContext(source, context);
+  await page.settle();
+  return page;
+}
+
+describe("viewer page", () => {
+  const uploading = { state: "uploading", expiresAt: new Date(initialNow + LIMITS.retentionMs).toISOString() };
+  const playlist = "live/2026-09-09-01.segments/index.m3u8";
+  const laterPlaylist = "live/2026-09-09-02.segments/index.m3u8";
+
+  test("screenshots and browsers that play HLS themselves never fetch the player", async () => {
+    expect(viewerHtml("nonce").match(/<script/g)).toHaveLength(1);
+    const shots = await openViewer({ responses: { "status.json": uploading, "live.json": { clips: [], shots: [{ file: "shots/001.jpg" }] } } });
+    expect(shots.captures.children.map((figure) => figure.children[0].src)).toEqual([`${viewerRoot}shots/001.jpg`]);
+    expect(shots.head.children).toHaveLength(0);
+
+    const native = await openViewer({ nativeHls: true, responses: { "status.json": uploading, "live.json": { clips: [{ playlist }], shots: [] } } });
+    expect(native.captures.children.map((figure) => figure.children[0].src)).toEqual([`${viewerRoot}${playlist}`]);
+    expect(native.head.children).toHaveLength(0);
+  });
+
+  test("a new screenshot leaves a clip and its player in place", async () => {
+    const responses = { "status.json": uploading, "live.json": { clips: [{ playlist }, { playlist: laterPlaylist }], shots: [] } };
+    const page = await openViewer({ responses });
+    expect(page.head.children.map((script) => [script.src, script.nonce])).toEqual([["/hls-1.7.2.min.js", "nonce"]]);
+    const [clip, laterClip] = page.captures.children;
+    expect(page.players.map((player) => [player.url, player.video])).toEqual([
+      [`${viewerRoot}${playlist}`, clip.children[0]],
+      [`${viewerRoot}${laterPlaylist}`, laterClip.children[0]],
+    ]);
+
+    responses["live.json"] = { clips: [{ playlist }, { playlist: laterPlaylist }], shots: [{ file: "shots/001.jpg" }] };
+    await page.poll();
+    expect(page.captions()).toEqual(["Screenshot recorded during upload", "Live video clip", "Live video clip"]);
+    expect(page.captures.children.slice(1)).toEqual([clip, laterClip]);
+    expect([clip.detached, laterClip.detached]).toEqual([0, 0]);
+    expect(page.players.map((player) => player.destroyed)).toEqual([undefined, undefined]);
+    expect(page.head.children).toHaveLength(1);
+
+    responses["live.json"] = { clips: [{ playlist }], shots: [{ file: "shots/001.jpg" }] };
+    await page.poll();
+    expect(page.captures.children[1]).toBe(clip);
+    expect(page.players.map((player) => player.destroyed)).toEqual([undefined, true]);
+  });
+
+  test("the finished take appears before the packaged-video probe answers", async () => {
+    for (const packaged of [true, false]) {
+      let answer;
+      const responses = {
+        "status.json": uploading,
+        "live.json": { clips: [{ playlist }], shots: [] },
+        "transcript.json": {
+          fullText: "Look at the sidebar.",
+          captures: [
+            { type: "clip", video: playlist, durationMs: 12000, frames: [{ file: "clips/001/frames/0004500.jpg", timestamp: "00:04" }] },
+            { type: "shot", file: "shots/001.jpg", timestamp: "00:14" },
+          ],
+        },
+        "fullclip.mp4": new Promise((resolve) => { answer = resolve; }),
+      };
+      const page = await openViewer({ responses });
+      const [clip] = page.captures.children;
+      responses["status.json"] = { ...uploading, state: "ready" };
+      await page.poll();
+      const finished = ["Video clip, 12 seconds", "Video frame at 00:04", "Screenshot at 00:14"];
+      expect(page.requests).toContain("HEAD fullclip.mp4");
+      expect(page.narration.textContent).toBe("Look at the sidebar.");
+      expect(page.captions()).toEqual(finished);
+      expect(page.captures.children[0]).toBe(clip);
+
+      answer(packaged ? {} : undefined);
+      await page.settle();
+      expect(page.captions()).toEqual(packaged ? ["Packaged video", ...finished] : finished);
+      expect(clip.detached).toBe(0);
+      expect(page.players.map((player) => player.destroyed)).toEqual([undefined]);
+      expect(page.timers).toHaveLength(0);
+    }
+  });
+
+  test("a browser whose own HLS playback fails hands the clip to the player", async () => {
+    for (const pressedPlay of [false, true]) {
+      const page = await openViewer({ nativeHls: true, responses: { "status.json": uploading, "live.json": { clips: [{ playlist }], shots: [] } } });
+      const video = page.captures.children[0].children[0];
+      expect(page.head.children).toHaveLength(0);
+      if (pressedPlay) video.play();
+      video.fail(2);
+      await page.settle();
+      expect(page.head.children).toHaveLength(0);
+      if (pressedPlay) video.play();
+      video.fail(4);
+      video.fail(4);
+      await page.settle();
+      expect(page.head.children.map((script) => script.src)).toEqual(["/hls-1.7.2.min.js"]);
+      expect(page.players.map((player) => [player.url, player.video])).toEqual([[`${viewerRoot}${playlist}`, video]]);
+      expect(page.captures.children[0].children[0]).toBe(video);
+      expect(video.plays).toBe(pressedPlay ? 3 : 0);
+    }
+  });
+
+  test("a player that cannot load leaves the link to the clip", async () => {
+    const page = await openViewer({ playerLoads: false, responses: { "status.json": uploading, "live.json": { clips: [{ playlist }], shots: [] } } });
+    const [figure] = page.captures.children;
+    expect(figure.children[0].textContent).toBe("This browser cannot play the clip. Open its link in a media player.");
+    expect(figure.children[1].children[0].href).toBe(`${viewerRoot}${playlist}`);
   });
 });

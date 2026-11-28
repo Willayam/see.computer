@@ -42,7 +42,6 @@ export function viewerHtml(nonce) {
       <p><a href="transcript.json">transcript.json</a></p>
     </section>
   </main>
-  <script nonce="${nonce}" src="/hls-1.7.2.min.js"></script>
   <script nonce="${nonce}">
     const allowedAsset = ${allowedAsset.toString()};
     const root = new URL("./", location.href);
@@ -51,12 +50,10 @@ export function viewerHtml(nonce) {
     const capturesNode = document.querySelector("#captures");
     let renderedFinal = false;
     let liveVersion = "";
-    let players = [];
-
-    function clearPlayers() {
-      for (const player of players) player.destroy();
-      players = [];
-    }
+    let hlsScript;
+    // The figures on the page, by kind and address. A capture that stays listed
+    // keeps its node, so a clip keeps playing while others arrive.
+    const mounted = new Map();
 
     function assetPath(value) {
       if (typeof value !== "string" || value.length > 128 || !allowedAsset.test(value)) return null;
@@ -71,50 +68,122 @@ export function viewerHtml(nonce) {
       return node;
     }
 
-    function imageFigure(path, label) {
-      const url = assetPath(path);
-      if (!url || !/\.(?:png|jpg)$/.test(url.pathname)) return null;
+    // A browser downloads the player only for a clip it cannot play itself.
+    function loadHls() {
+      hlsScript ??= new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.nonce = ${JSON.stringify(nonce)};
+        script.src = "/hls-1.7.2.min.js";
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.append(script);
+      });
+      return hlsScript;
+    }
+
+    function imageFigure(url, label) {
       const figure = document.createElement("figure");
       const image = document.createElement("img");
       image.src = url.href;
       image.alt = label;
       image.loading = "lazy";
-      figure.append(image);
       const caption = document.createElement("figcaption");
       caption.textContent = label;
-      figure.append(caption);
-      return figure;
+      figure.append(image, caption);
+      return {
+        figure,
+        update(text) {
+          image.alt = text;
+          caption.textContent = text;
+        },
+        destroy() {},
+      };
     }
 
-    function videoFigure(path, label, live) {
-      const url = assetPath(path);
-      if (!url || !/\.(?:mp4|mov|m3u8)$/.test(url.pathname)) return null;
+    function videoFigure(url, label, live) {
       const figure = document.createElement("figure");
       const video = document.createElement("video");
       video.controls = true;
       video.playsInline = true;
       video.preload = live ? "none" : "metadata";
-      if (url.pathname.endsWith(".m3u8") && !video.canPlayType("application/vnd.apple.mpegurl")) {
-        if (window.Hls && Hls.isSupported()) {
-          const hls = new Hls({ enableWorker: false, maxBufferLength: 15, backBufferLength: 15 });
-          hls.loadSource(url.href);
-          hls.attachMedia(video);
-          players.push(hls);
-          figure.append(video);
-        } else {
-          figure.append(note("This browser cannot play the clip. Open its link in a media player."));
-        }
-      } else {
-        video.src = url.href;
-        figure.append(video);
-      }
       const link = document.createElement("a");
       link.href = url.href;
       link.textContent = label;
       const caption = document.createElement("figcaption");
       caption.append(link);
-      figure.append(caption);
-      return figure;
+      figure.append(video, caption);
+      let player;
+      let removed = false;
+      const unplayable = () => {
+        if (!removed) video.replaceWith(note("This browser cannot play the clip. Open its link in a media player."));
+      };
+      const playWithHls = (resume) => loadHls().then(() => {
+        if (removed) return;
+        if (!Hls.isSupported()) return unplayable();
+        player = new Hls({ enableWorker: false, maxBufferLength: 15, backBufferLength: 15 });
+        player.loadSource(url.href);
+        player.attachMedia(video);
+        if (resume) video.play().catch(() => {});
+      }, unplayable);
+      if (!url.pathname.endsWith(".m3u8")) {
+        video.src = url.href;
+      } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        // Chrome reports HLS support and can still fail to parse a take that
+        // is being recorded. The player takes over the same element, and
+        // resumes if the viewer had pressed play. The failure pauses the
+        // element before its error event, so the press is remembered here.
+        let pressed = false;
+        video.addEventListener("play", () => { pressed = true; });
+        video.addEventListener("pause", () => { pressed = false; });
+        const handOver = () => {
+          // Codes 3 and 4 are decode and format errors. A network error stays with the browser.
+          if (video.error.code < 3) return;
+          video.removeEventListener("error", handOver);
+          playWithHls(pressed);
+        };
+        video.addEventListener("error", handOver);
+        video.src = url.href;
+      } else {
+        playWithHls(false);
+      }
+      return {
+        figure,
+        update(text, live) {
+          link.textContent = text;
+          video.preload = live ? "none" : "metadata";
+        },
+        destroy() {
+          removed = true;
+          if (player) player.destroy();
+        },
+      };
+    }
+
+    function capture(kind, path, label, live) {
+      const url = assetPath(path);
+      if (!url || !(kind === "image" ? /\\.(?:png|jpg)$/ : /\\.(?:mp4|mov|m3u8)$/).test(url.pathname)) return null;
+      return { key: kind + " " + url.href, label, live, mount: () => (kind === "image" ? imageFigure(url, label) : videoFigure(url, label, live)) };
+    }
+
+    function show(captures) {
+      const listed = new Map();
+      for (const item of captures) {
+        if (item && !listed.has(item.key)) listed.set(item.key, item);
+      }
+      for (const [key, entry] of mounted) {
+        if (listed.has(key)) continue;
+        entry.destroy();
+        entry.figure.remove();
+        mounted.delete(key);
+      }
+      let position = capturesNode.firstChild;
+      for (const [key, item] of listed) {
+        let entry = mounted.get(key);
+        if (entry) entry.update(item.label, item.live);
+        else mounted.set(key, entry = item.mount());
+        if (entry.figure === position) position = position.nextSibling;
+        else capturesNode.insertBefore(entry.figure, position);
+      }
     }
 
     function renderLive(manifest) {
@@ -122,61 +191,45 @@ export function viewerHtml(nonce) {
       const version = JSON.stringify(manifest);
       if (version === liveVersion) return;
       liveVersion = version;
-      clearPlayers();
-      const next = [];
+      const captures = [];
       if (Array.isArray(manifest.shots)) {
-        for (const shot of manifest.shots) {
-          const figure = imageFigure(shot && shot.file, "Screenshot recorded during upload");
-          if (figure) next.push(figure);
-        }
+        for (const shot of manifest.shots) captures.push(capture("image", shot && shot.file, "Screenshot recorded during upload"));
       }
       if (Array.isArray(manifest.clips)) {
-        for (const clip of manifest.clips) {
-          const figure = videoFigure(clip && clip.playlist, "Live video clip", true);
-          if (figure) next.push(figure);
-        }
+        for (const clip of manifest.clips) captures.push(capture("video", clip && clip.playlist, "Live video clip", true));
       }
-      capturesNode.replaceChildren(...next);
+      show(captures);
     }
 
-    async function renderFinal(transcript) {
+    function renderFinal(transcript) {
       if (!transcript || typeof transcript !== "object") throw new Error("Invalid transcript");
       narrationNode.textContent = typeof transcript.fullText === "string" && transcript.fullText ? transcript.fullText : "No speech was detected.";
-      clearPlayers();
-      const next = [];
+      const captures = [];
       if (Array.isArray(transcript.captures)) {
-        for (const capture of transcript.captures) {
-          if (!capture || typeof capture !== "object") continue;
-          if (capture.type === "shot") {
-            const figure = imageFigure(capture.file, typeof capture.timestamp === "string" ? "Screenshot at " + capture.timestamp : "Screenshot");
-            if (figure) next.push(figure);
+        for (const item of transcript.captures) {
+          if (!item || typeof item !== "object") continue;
+          if (item.type === "shot") {
+            captures.push(capture("image", item.file, typeof item.timestamp === "string" ? "Screenshot at " + item.timestamp : "Screenshot"));
           }
-          if (capture.type === "clip") {
-            const figure = videoFigure(capture.video, typeof capture.durationMs === "number" ? "Video clip, " + Math.round(capture.durationMs / 1000) + " seconds" : "Video clip", false);
-            if (figure) next.push(figure);
-            if (Array.isArray(capture.frames)) {
-              for (const frame of capture.frames) {
-                const frameFigure = imageFigure(frame && frame.file, frame && typeof frame.timestamp === "string" ? "Video frame at " + frame.timestamp : "Video frame");
-                if (frameFigure) next.push(frameFigure);
+          if (item.type === "clip") {
+            captures.push(capture("video", item.video, typeof item.durationMs === "number" ? "Video clip, " + Math.round(item.durationMs / 1000) + " seconds" : "Video clip", false));
+            if (Array.isArray(item.frames)) {
+              for (const frame of item.frames) {
+                captures.push(capture("image", frame && frame.file, frame && typeof frame.timestamp === "string" ? "Video frame at " + frame.timestamp : "Video frame"));
               }
             }
           }
         }
       }
-      if (!next.some((figure) => figure.querySelector('a[href$="fullclip.mp4"]'))) {
-        const packagedUrl = assetPath("fullclip.mp4");
-        if (packagedUrl) {
-          try {
-            const packaged = await fetch(packagedUrl, { method: "HEAD", cache: "no-store" });
-            if (packaged.ok) {
-              const figure = videoFigure("fullclip.mp4", "Packaged video", false);
-              if (figure) next.unshift(figure);
-            }
-          } catch {}
-        }
-      }
-      capturesNode.replaceChildren(...next);
+      show(captures);
       renderedFinal = true;
+      // First-beta shares packaged the take as one file. The captures above do
+      // not wait to learn whether this share has one.
+      const packaged = capture("video", "fullclip.mp4", "Packaged video", false);
+      if (captures.some((item) => item && item.key === packaged.key)) return;
+      fetch(new URL("fullclip.mp4", root), { method: "HEAD", cache: "no-store" }).then((probe) => {
+        if (probe.ok) show([packaged, ...captures]);
+      }, () => {});
     }
 
     async function json(path) {
@@ -191,7 +244,7 @@ export function viewerHtml(nonce) {
         const expires = new Date(status.expiresAt).toLocaleString();
         if (status.state === "ready") {
           statusNode.textContent = "Upload complete. This link expires " + expires + ".";
-          if (!renderedFinal) await renderFinal(await json("transcript.json"));
+          if (!renderedFinal) renderFinal(await json("transcript.json"));
           return;
         }
         statusNode.textContent = "Upload in progress. This page will update. The link expires " + expires + ".";
